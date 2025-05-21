@@ -10,6 +10,7 @@ from langchain_community.document_loaders import TextLoader
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Annoy
 from langchain.chains import RetrievalQA
+from langchain.text_splitter import RecursiveCharacterTextSplitter  # ← Agrego esto para implementar el chunking
 
 #Aquí cargo las variables de entorno desde el archivo .env
 load_dotenv()
@@ -33,17 +34,17 @@ base_prompt = PromptTemplate(
 #Creación del índice del contenido que será desde la base de datos.
 def create_index_from_content(content_text):
     """
-    Crea un índice de Annoy a partir del contenido proporcionado.
-
-    :param content_text: Texto del contenido que se utilizará para crear el índice.
-    :return: Instancia de vectorstore de Annoy.
+    Crea un índice Annoy dividiendo el contenido en fragmentos (chunking).
     """
-    documents = [
-        content_text]  # Convertir el contenido en una lista de un solo documento
-    # Inicializar embeddings de OpenAI
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,      # Tamaño máximo de tokens por fragmento
+        chunk_overlap=100     # Superposición entre fragmentos
+    )
+    documents = text_splitter.create_documents([content_text])  # ← Aquí se parte el contenido
+
     embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY)
-    vectorstore = Annoy.from_texts(
-        documents, embeddings)  # Crear el índice Annoy
+    vectorstore = Annoy.from_documents(documents, embeddings)  # ← Se indexan por fragmento
+
     return vectorstore
 
 
