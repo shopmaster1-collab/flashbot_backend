@@ -28,7 +28,7 @@ db_chain = None
 # Plantilla de prompt base para consultas
 base_prompt = PromptTemplate(
     input_variables=["query"],
-    template="Responde brevemente y de forma concisa a '{query}', usando solo la información proporcionada en el contenido. No agregues explicaciones adicionales ni detalles innecesarios. Mantén la respuesta clara y corta."
+    "Responde brevemente y de forma concisa a '{query}', usando solo la información proporcionada en el contenido. No agregues explicaciones adicionales ni detalles innecesarios. Mantén la respuesta clara y corta. No realices respuestas como -la información que proporciona el texto- Sólo responde lo que te preguntan"
     #template="Responde a '{query}' únicamente con la información proporcionada en el contenido disponible, sin agregar detalles adicionales."
 )
 
