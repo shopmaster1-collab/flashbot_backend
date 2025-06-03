@@ -28,15 +28,8 @@ db_chain = None
 # Plantilla de prompt base para consultas
 base_prompt = PromptTemplate(
     input_variables=["query"],
-    template=(
-        "Actúa como un asesor de ventas experto y amigable. "
-        "Responde brevemente y de forma concisa a la consulta: '{query}', "
-        "usando únicamente la información proporcionada en el contenido. "
-        "No agregues explicaciones adicionales ni detalles innecesarios. "
-        "Mantén la respuesta clara, corta y orientada a ayudar al cliente a tomar una decisión de compra. "
-"En caso de no contar con el artículo solicitado, recomienda otros productos similares. "
-        "Si no puedes responder con la información disponible, invita cordialmente a comunicarse con un asesor por Teléfono o WhatsApp al 5580050900, de Lunes a Viernes, de 8:00 am a 5:30 pm."
-    )
+    template="Responde brevemente y de forma concisa a '{query}', usando solo la información proporcionada en el contenido. No agregues explicaciones adicionales ni detalles innecesarios. Mantén la respuesta clara y corta."
+    #template="Responde a '{query}' únicamente con la información proporcionada en el contenido disponible, sin agregar detalles adicionales."
 )
 
 #Creación del índice del contenido que será desde la base de datos.
