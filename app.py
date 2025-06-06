@@ -39,7 +39,7 @@ base_prompt = PromptTemplate(
 
 def create_index_from_content(content_text):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
+        chunk_size=500,
         chunk_overlap=100
     )
     documents = text_splitter.create_documents([content_text])
