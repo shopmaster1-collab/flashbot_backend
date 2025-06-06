@@ -59,7 +59,8 @@ def setup_content():
 
     try:
         vectorstore = create_index_from_content(content_text)
-        llm = ChatOpenAI(api_key=OPENAI_API_KEY, temperature=0)
+        llm = ChatOpenAI(api_key=OPENAI_API_KEY, temperature=0, model_name="gpt-3.5-turbo")
+
         db_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
