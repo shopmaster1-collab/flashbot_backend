@@ -81,7 +81,12 @@ def setup_content():
         vectorstore = create_index_from_content(content_text)
 
         # Crear el chatbot para consultas usando el modelo de lenguaje
-        llm = ChatOpenAI(model="gpt-3.5-turbo", api_key=OPENAI_API_KEY, temperature=0)
+        llm = ChatOpenAI(
+    model="gpt-3.5-turbo",
+    api_key=OPENAI_API_KEY,
+    temperature=0,
+    max_tokens=100
+)
         db_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
