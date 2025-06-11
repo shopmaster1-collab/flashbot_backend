@@ -35,7 +35,8 @@ base_prompt = PromptTemplate(
         "No agregues explicaciones adicionales ni detalles innecesarios. "
         "Mantén la respuesta clara, corta y orientada a ayudar al cliente a tomar una decisión de compra. "
         "En caso de no contar con el artículo solicitado, recomienda otros productos similares. "
-        "Si no puedes responder con la información disponible, invita cordialmente a comunicarse con un asesor por Teléfono o WhatsApp al 5580050900, de Lunes a Viernes, de 8:00 am a 5:30 pm."
+        "Si no puedes responder con la información disponible, invita cordialmente a comunicarse con un asesor por Teléfono o WhatsApp al 5580050900, de Lunes a Viernes, de 8:00 am a 5:30 pm. "
+        "Limita tu respuesta a un máximo de 100 palabras. "
     )
 )
 
