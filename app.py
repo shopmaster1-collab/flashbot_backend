@@ -24,8 +24,6 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 
 # Inicializar Flask
-from flask_cors import CORS
-
 app = Flask(__name__)
 CORS(app)
 
@@ -131,10 +129,7 @@ def chat():
         logging.exception("Error inesperado: %s", e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/cors-test', methods=['GET'])
-def cors_test():
-    return jsonify({"message": "✅ CORS está funcionando correctamente"})
-
 # Ejecutar la aplicación
 if __name__ == '__main__':
     app.run(debug=False, port=5010)
+
