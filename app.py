@@ -27,7 +27,7 @@ DB_NAME = os.getenv("DB_NAME")
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app, origins=["https://masterconnect.com.mx"])
+CORS(app, resources={r"/*": {"origins": "https://masterconnect.com.mx"}})
 
 # Estado global del sistema
 db_chain = None
