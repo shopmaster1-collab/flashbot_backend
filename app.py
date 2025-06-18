@@ -24,8 +24,10 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 
 # Inicializar Flask
+from flask_cors import CORS
+
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://masterconnect.com.mx"])
 
 # Estado global del sistema
 db_chain = None
