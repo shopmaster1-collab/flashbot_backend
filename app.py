@@ -119,8 +119,15 @@ def index():
 @app.route('/chat', methods=['POST'])
 def chat():
     user_message = request.json.get('message')
-    session_id = request.remote_addr  # Puedes usar también cookies o tokens únicos
+    session_id = request.remote_addr
     logging.info("Mensaje del usuario: %s", user_message)
+
+    if not user_message:
+        return jsonify({"error": "Mensaje vacío recibido"}), 400
+
+    if not db_chain:
+        logging.warning("Intento de consulta sin contenido configurado.")
+        return jsonify({"error": "El contenido no está configurado. Por favor, ejecuta primero /setup-db."}), 500
 
     try:
         result = execute_langchain_query(user_message)
@@ -128,11 +135,7 @@ def chat():
         return jsonify({"question": user_message, "response": result.strip()})
     except Exception as e:
         logging.exception("Error inesperado: %s", e)
-        return jsonify({"error": str(e)}), 500
-
-# Ejecutar la aplicación
-if __name__ == '__main__':
-    app.run(debug=False, port=5010)
+        return jsonify({"error": f"Error interno: {str(e)}"}), 500
 
 
 
