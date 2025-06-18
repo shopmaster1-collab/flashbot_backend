@@ -133,3 +133,14 @@ def chat():
 if __name__ == '__main__':
     app.run(debug=False, port=5010)
 
+import requests
+
+@app.route('/my-ip')
+def obtener_ip_publica():
+    try:
+        ip = requests.get("https://api.ipify.org").text
+        return jsonify({"render_public_ip": ip})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
