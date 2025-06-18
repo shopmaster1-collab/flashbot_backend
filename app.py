@@ -1,5 +1,6 @@
 import os
 import logging
+import mysql.connector  # ← Agregado
 
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
@@ -12,17 +13,21 @@ from langchain_community.vectorstores import Annoy
 from langchain.chains import RetrievalQA
 from langchain.text_splitter import RecursiveCharacterTextSplitter  # ← Agrego esto para implementar el chunking
 
-#Aquí cargo las variables de entorno desde el archivo .env
+# Cargar variables de entorno
 load_dotenv()
 
-#Configuraciones de variables globales
+# Configuración de API y base de datos
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
-# Inicializar la aplicación Flask
+# Inicializar Flask
 app = Flask(__name__)
-CORS(app)  # Permitir solicitudes CORS
+CORS(app)
 
-# Variables de configuración
+# Estado global del sistema
 db_chain = None
 
 # Prompt personalizado para asesor de ventas
@@ -40,109 +45,90 @@ base_prompt = PromptTemplate(
     )
 )
 
-#Creación del índice del contenido que será desde la base de datos.
+# Guardar conversación en base de datos
+def guardar_conversacion(session_id, question, response):
+    try:
+        conn = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        cursor = conn.cursor()
+        query = "INSERT INTO chat_logs (session_id, user_question, bot_response) VALUES (%s, %s, %s)"
+        cursor.execute(query, (session_id, question, response))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Error al guardar en BD: {str(e)}")
+
+# Crear índice vectorial del contenido usando chunking
 def create_index_from_content(content_text):
-    """
-    Crea un índice Annoy dividiendo el contenido en fragmentos (chunking).
-    """
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,      # Tamaño máximo de tokens por fragmento
-        chunk_overlap=100     # Superposición entre fragmentos
+        chunk_size=1000,
+        chunk_overlap=100
     )
-    documents = text_splitter.create_documents([content_text])  # ← Aquí se parte el contenido
-
+    documents = text_splitter.create_documents([content_text])
     embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY)
-    vectorstore = Annoy.from_documents(documents, embeddings)  # ← Se indexan por fragmento
-
+    vectorstore = Annoy.from_documents(documents, embeddings)
     return vectorstore
 
-
+# Ruta para configurar el contenido
 @app.route('/setup-db', methods=['POST'])
 def setup_content():
-    """
-    Ruta para configurar el contenido que será usado en el sistema de consulta.
-
-    :return: Mensaje de éxito o error en la configuración del contenido.
-    """
     global db_chain
-
-#Recuperación de datos de la solicitud. Estos datos los recibimos en un request en formato jason.
-
     data = request.json
     content_text = data.get('contenido')
-
-
 
     if not content_text:
         return jsonify({'error': 'El campo contenido es requerido'}), 400
 
     try:
-        # Crear el índice de Annoy con el contenido proporcionado
         vectorstore = create_index_from_content(content_text)
-
-        # Crear el chatbot para consultas usando el modelo de lenguaje
         llm = ChatOpenAI(
-    model="gpt-3.5-turbo",
-    api_key=OPENAI_API_KEY,
-    temperature=0,
-    max_tokens=150
-)
+            model="gpt-3.5-turbo",
+            api_key=OPENAI_API_KEY,
+            temperature=0,
+            max_tokens=150
+        )
         db_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
             retriever=vectorstore.as_retriever()
         )
-
         return jsonify({'message': 'Contenido configurado con éxito'}), 200
-
-#Manejo de errorres
     except Exception as e:
         logging.error(f"Error en setup_content: {str(e)}")
         return jsonify({'error': f'Error al configurar el contenido: {str(e)}'}), 500
 
-#Permite ejecutar consultas a través de Lan Chain
+# Ejecutar consulta a LangChain
 def execute_langchain_query(query):
-    """
-    Ejecuta una consulta usando LangChain y el contenido configurado.
-
-    :param query: La consulta del usuario.
-    :return: Resultado de la consulta.
-    """
     if not db_chain:
         raise ValueError("El contenido no está configurado correctamente")
+    result = db_chain.invoke({"query": query})
+    return result.get('result', '').strip()
 
-    result = db_chain.invoke({"query": query})  # Invocar la consulta
-    return result.get('result', '').strip()  # Devolver el resultado formateado
-
-
+# Página de inicio
 @app.route('/')
 def index():
-    """
-    Ruta principal que renderiza la página de inicio.
-    """
     return render_template('index.html')
 
-
+# Endpoint de chat con almacenamiento de conversación
 @app.route('/chat', methods=['POST'])
 def chat():
-    """
-    Ruta para manejar las consultas del usuario.
-
-    :return: Respuesta del chatbot con la consulta y su respuesta.
-    """
     user_message = request.json.get('message')
+    session_id = request.remote_addr  # Puedes usar también cookies o tokens únicos
     logging.info("Mensaje del usuario: %s", user_message)
 
     try:
-        result = execute_langchain_query(user_message)  # Ejecutar la consulta
+        result = execute_langchain_query(user_message)
+        guardar_conversacion(session_id, user_message, result)
         return jsonify({"question": user_message, "response": result.strip()})
-
-
     except Exception as e:
         logging.exception("Error inesperado: %s", e)
         return jsonify({"error": str(e)}), 500
 
-
-# Ejecutar la aplicación en el puerto especificado
+# Ejecutar la aplicación
 if __name__ == '__main__':
     app.run(debug=False, port=5010)
