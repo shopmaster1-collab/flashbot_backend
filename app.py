@@ -25,7 +25,7 @@ DB_NAME = os.getenv("DB_NAME")
 
 # Inicializar Flask
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "https://masterconnect.com.mx"}})
 
 # Estado global del sistema
 db_chain = None
@@ -42,6 +42,7 @@ base_prompt = PromptTemplate(
         "En caso de no contar con el artículo solicitado, recomienda otros productos similares. "
         "Si no puedes responder con la información disponible, invita cordialmente a comunicarse con un asesor por Teléfono o WhatsApp al 5580050900, de Lunes a Viernes, de 8:00 am a 5:30 pm. "
         "Limita tu respuesta a un máximo de 150 palabras, no cortes las frases, procura en tu límite escribir la respuesta comleta. "
+        "No respondas a preguntas que no tengan qué ver con el contenido asignado. "
     )
 )
 
