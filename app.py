@@ -130,11 +130,14 @@ def chat():
         return jsonify({"error": "El contenido no está configurado. Por favor, ejecuta primero /setup-db."}), 500
 
     try:
+        logging.info("Antes de ejecutar la consulta a LangChain")
         result = execute_langchain_query(user_message)
+        logging.info("Resultado obtenido correctamente")
+
         guardar_conversacion(session_id, user_message, result)
         return jsonify({"question": user_message, "response": result.strip()})
     except Exception as e:
-        logging.exception("Error inesperado: %s", e)
+        logging.exception("Error inesperado en /chat: %s", e)
         return jsonify({"error": f"Error interno: {str(e)}"}), 500
 
 
