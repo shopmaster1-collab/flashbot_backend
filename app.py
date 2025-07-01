@@ -10,6 +10,8 @@ from langchain_community.document_loaders import TextLoader
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Annoy
 from langchain.chains import RetrievalQA
+from langchain.chains.llm import LLMChain
+from langchain.chains.combine_documents import StuffDocumentsChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter  # ← Agrego esto para implementar el chunking
 
 #Aquí cargo las variables de entorno desde el archivo .env
@@ -80,15 +82,24 @@ def setup_content():
 
         # Crear el chatbot para consultas usando el modelo de lenguaje
         llm = ChatOpenAI(
-    model="gpt-3.5-turbo",
-    api_key=OPENAI_API_KEY,
-    temperature=0,
-    max_tokens=150
-)
-        db_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            chain_type="stuff",
-            retriever=vectorstore.as_retriever()
+            model="gpt-3.5-turbo",
+            api_key=OPENAI_API_KEY,
+            temperature=0,
+            max_tokens=150
+        )
+
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})  # Solo 3 fragmentos
+
+        qa_chain = LLMChain(llm=llm, prompt=base_prompt)
+
+        stuff_chain = StuffDocumentsChain(
+            llm_chain=qa_chain,
+            document_variable_name="context"
+        )
+
+        db_chain = RetrievalQA(
+            combine_documents_chain=stuff_chain,
+            retriever=retriever
         )
 
         return jsonify({'message': 'Contenido configurado con éxito'}), 200
