@@ -85,6 +85,8 @@ def setup_content():
     temperature=0,
     max_tokens=150
 )
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})  # ← controla el número de documentos
+
         db_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
