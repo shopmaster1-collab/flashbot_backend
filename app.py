@@ -1,4 +1,4 @@
-import osMore actions
+import os
 import logging
 
 from flask import Flask, jsonify, render_template, request
@@ -28,7 +28,6 @@ db_chain = None
 # Prompt personalizado para asesor de ventas
 base_prompt = PromptTemplate(
     input_variables=["query"],
-
 template=(
     "Responde como asesor de ventas. "
     "Contesta de forma clara y breve: '{query}'. "
@@ -145,7 +144,6 @@ def chat():
 # Ejecutar la aplicación en el puerto especificado
 if __name__ == '__main__':
     app.run(debug=False, port=5010)
-
 
 
 
