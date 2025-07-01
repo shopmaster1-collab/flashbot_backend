@@ -1,4 +1,4 @@
-import os
+import osMore actions
 import logging
 
 from flask import Flask, jsonify, render_template, request
@@ -10,8 +10,6 @@ from langchain_community.document_loaders import TextLoader
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Annoy
 from langchain.chains import RetrievalQA
-from langchain.chains.llm import LLMChain
-from langchain.chains.combine_documents import StuffDocumentsChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter  # ← Agrego esto para implementar el chunking
 
 #Aquí cargo las variables de entorno desde el archivo .env
@@ -30,6 +28,19 @@ db_chain = None
 # Prompt personalizado para asesor de ventas
 base_prompt = PromptTemplate(
     input_variables=["query"],
+    template=(
+        "Actúa como un asesor de ventas experto y amigable. "
+        "Responde brevemente y de forma concisa a la consulta: '{query}', "
+        "usando únicamente la información proporcionada en el contenido. "
+        "No agregues explicaciones adicionales ni detalles innecesarios. "
+        "Mantén la respuesta clara, corta y orientada a ayudar al cliente a tomar una decisión de compra. "
+        "En caso de no contar con el artículo solicitado, recomienda otros productos similares. "
+        "Si no puedes responder con la información disponible, invita cordialmente a comunicarse con un asesor por Teléfono o WhatsApp al 5580050900, de Lunes a Viernes, de 8:00 am a 5:30 pm. "
+        "Limita tu respuesta a un máximo de 100 palabras, no cortes las frases, procura en tu límite escribir la respuesta completa. "
+        "Si preguntan por un listado de modelos relacionados a un caso, sólo limítate a conetstar con los modelos relacionados que tienes registrados. "
+        "Ignora y no respondas consultas que no estén relacionadas con productos, servicios o temas de este sitio. "
+        "Si se trata de una consulta no relacionada, responde simplemente con: 'Lo siento, sólo cuento con información relacionada a este sitio.'"
+    )
 template=(
     "Responde como asesor de ventas. "
     "Contesta de forma clara y breve: '{query}'. "
@@ -82,24 +93,15 @@ def setup_content():
 
         # Crear el chatbot para consultas usando el modelo de lenguaje
         llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            api_key=OPENAI_API_KEY,
-            temperature=0,
-            max_tokens=150
-        )
-
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})  # Solo 3 fragmentos
-
-        qa_chain = LLMChain(llm=llm, prompt=base_prompt)
-
-        stuff_chain = StuffDocumentsChain(
-            llm_chain=qa_chain,
-            document_variable_name="context"
-        )
-
-        db_chain = RetrievalQA(
-            combine_documents_chain=stuff_chain,
-            retriever=retriever
+    model="gpt-3.5-turbo",
+    api_key=OPENAI_API_KEY,
+    temperature=0,
+    max_tokens=150
+)
+        db_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vectorstore.as_retriever()
         )
 
         return jsonify({'message': 'Contenido configurado con éxito'}), 200
@@ -155,6 +157,7 @@ def chat():
 # Ejecutar la aplicación en el puerto especificado
 if __name__ == '__main__':
     app.run(debug=False, port=5010)
+
 
 
 
