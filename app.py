@@ -1,6 +1,8 @@
 import os
 import logging
 
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.output_parsers import StrOutputParser
 from langchain.chains.llm import LLMChain
 from langchain.chains.combine_documents import StuffDocumentsChain
 from flask import Flask, jsonify, render_template, request
@@ -76,12 +78,11 @@ def setup_content():
 
         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-        qa_chain = LLMChain(llm=llm, prompt=base_prompt)
-
-        stuff_chain = StuffDocumentsChain(
-            llm_chain=qa_chain,
-            document_variable_name="context"
-        )
+        stuff_chain = create_stuff_documents_chain(
+    llm=llm,
+    prompt=base_prompt,
+    output_parser=StrOutputParser()
+)
 
         db_chain = RetrievalQA(
             combine_documents_chain=stuff_chain,
