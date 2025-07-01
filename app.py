@@ -1,6 +1,8 @@
 import os
 import logging
 
+from langchain.chains.llm import LLMChain
+from langchain.chains.combine_documents import StuffDocumentsChain
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -27,16 +29,19 @@ db_chain = None
 
 # Prompt personalizado para asesor de ventas
 base_prompt = PromptTemplate(
-    input_variables=["query"],
-template=(
-    "Responde como asesor de ventas. "
-    "Contesta de forma clara y breve: '{query}'. "
-    "Usa solo el contenido disponible. No expliques ni agregues más. "
-    "Si no hay datos, sugiere llamar al 5580050900. "
-    "Máximo 80 palabras. "
-    "Si la pregunta no es sobre productos o servicios, responde: 'Lo siento, sólo tengo información del sitio.'"
+    input_variables=["query", "context"],  # ahora usamos "context"
+    template=(
+        "Responde como asesor de ventas. "
+        "Consulta: {query}\n"
+        "Información: {context}\n"
+        "Responde de forma clara y breve, solo con los datos disponibles. "
+        "No expliques ni agregues más. "
+        "Si no hay datos, sugiere llamar al 5580050900. "
+        "Máximo 80 palabras. "
+        "Si la pregunta no es sobre productos o servicios, responde: 'Lo siento, sólo tengo información del sitio.'"
+    )
 )
-)
+
 
 #Creación del índice del contenido que será desde la base de datos.
 def create_index_from_content(content_text):
@@ -87,11 +92,18 @@ def setup_content():
 )
         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})  # ← controla el número de documentos
 
-        db_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            chain_type="stuff",
-            retriever=vectorstore.as_retriever()
-        )
+qa_chain = LLMChain(llm=llm, prompt=base_prompt)  # ← usamos tu prompt personalizado
+
+# Último cambio
+stuff_chain = StuffDocumentsChain(
+    llm_chain=qa_chain,
+    document_variable_name="context"  # ← obligatorio
+)
+
+db_chain = RetrievalQA(
+    combine_documents_chain=stuff_chain,
+    retriever=retriever
+)
 
         return jsonify({'message': 'Contenido configurado con éxito'}), 200
 
