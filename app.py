@@ -28,14 +28,14 @@ db_chain = None
 # Prompt personalizado para asesor de ventas
 base_prompt = PromptTemplate(
     input_variables=["query"],
-template=(
-    "Responde como asesor de ventas. "
-    "Contesta de forma clara y breve: '{query}'. "
-    "Usa solo el contenido disponible. No expliques ni agregues más. "
-    "Si no hay datos, sugiere llamar al 5580050900. "
-    "Máximo 80 palabras. "
-    "Si la pregunta no es sobre productos o servicios, responde: 'Lo siento, sólo tengo información del sitio.'"
-)
+    template=(
+        "Como asesor de ventas, responde claro y breve: '{query}'. "
+        "Solo usa el contenido disponible. "
+        "Si no hay información, sugiere llamar al 5580050900. "
+        "Máximo 80 palabras. "
+        "Si la pregunta no es sobre productos o servicios del sitio, responde: "
+        "'Lo siento, solo tengo información del sitio.'"
+    )
 )
 
 #Creación del índice del contenido que será desde la base de datos.
@@ -44,8 +44,8 @@ def create_index_from_content(content_text):
     Crea un índice Annoy dividiendo el contenido en fragmentos (chunking).
     """
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,      # Tamaño máximo de tokens por fragmento
-        chunk_overlap=100     # Superposición entre fragmentos
+        chunk_size=700,      # Tamaño máximo de tokens por fragmento
+        chunk_overlap=50     # Superposición entre fragmentos
     )
     documents = text_splitter.create_documents([content_text])  # ← Aquí se parte el contenido
 
@@ -83,7 +83,7 @@ def setup_content():
     model="gpt-3.5-turbo",
     api_key=OPENAI_API_KEY,
     temperature=0,
-    max_tokens=150
+    max_tokens=100
 )
         db_chain = RetrievalQA.from_chain_type(
             llm=llm,
