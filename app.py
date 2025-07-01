@@ -29,11 +29,11 @@ db_chain = None
 base_prompt = PromptTemplate(
     input_variables=["query"],
     template=(
-        "Como asesor de ventas, responde claro y breve: '{query}'. "
-        "Solo usa el contenido disponible. "
-        "Si no hay información, sugiere llamar al 5580050900. "
-        "Máximo 80 palabras. "
-        "Si la pregunta no es sobre productos o servicios del sitio, responde: "
+        "Como asesor de ventas, responde de forma clara y completa pero concisa a la siguiente consulta:\n"
+        "'{query}'\n"
+        "Usa solo el contenido disponible. Si no hay información suficiente, sugiere llamar al 5580050900.\n"
+        "Limita la respuesta a lo esencial, sin exceder lo necesario. No expliques más de lo necesario.\n"
+        "Si la pregunta no está relacionada con productos o servicios del sitio, responde:\n"
         "'Lo siento, solo tengo información del sitio.'"
     )
 )
