@@ -88,7 +88,7 @@ def setup_content():
         db_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
-            retriever=vectorstore.as_retriever()
+            retriever=vectorstore.as_retriever(search_kwargs={"k": 2})
         )
 
         return jsonify({'message': 'Contenido configurado con éxito'}), 200
