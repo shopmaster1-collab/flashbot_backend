@@ -1,5 +1,5 @@
 document.addEventListener("DOMContentLoaded", function () {
-  const API_URL = "https://chatbot-master-rihr.onrender.com/chat";
+  const API_URL = "https://flashbot-backend-25b6.onrender.com/chat";
   const ORIGIN = window.location.origin;
 
   console.log("✅ Widget cargado correctamente desde:", ORIGIN);
