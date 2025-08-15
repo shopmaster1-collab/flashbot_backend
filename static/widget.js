@@ -2,83 +2,130 @@ document.addEventListener("DOMContentLoaded", function () {
   const API_URL = "https://flashbot-backend-25b6.onrender.com/chat";
   const ORIGIN = window.location.origin;
 
-  // ✅ Asegura que logo/loader salgan del mismo host que el backend
-  const ASSETS_BASE = new URL(API_URL).origin + "/static/img/";
-  const LOGO_URL = ASSETS_BASE + "img_m.png";
-  const LOADER_URL = ASSETS_BASE + "barra.gif";
-
-  console.log("✅ Widget cargado correctamente desde:", ORIGIN);
-
+  // ---- Estilos básicos ----
   const style = document.createElement("style");
   style.textContent = `
     #chatbot-bubble {
       position: fixed;
       bottom: 20px;
-      left: 20px;
+      right: 20px;
       background-color: #007bff;
       color: white;
       padding: 10px 14px;
-      border-radius: 28px;
-      cursor: pointer;
-      z-index: 2147483647;
+      border-radius: 24px;
       display: flex;
       align-items: center;
-      font-family: sans-serif;
-      font-size: 14px;
-      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
-      transition: background 0.3s;
+      gap: 8px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      font-weight: 600;
+      cursor: pointer;
+      z-index: 999999;
+      box-shadow: 0 8px 20px rgba(0,0,0,.2);
     }
-    #chatbot-bubble:hover { background-color: #005fcc; }
-    #chatbot-bubble img { width: 28px; height: 28px; margin-right: 8px; }
+    #chatbot-bubble img { width: 28px; height: 28px; border-radius: 50%; }
     #chatbot-window {
       position: fixed;
-      bottom: 90px;
-      left: 20px;
+      bottom: 88px;
+      right: 20px;
       width: 360px;
-      height: 480px;
-      background: white;
+      max-height: 70vh;
       border-radius: 12px;
-      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.25);
-      z-index: 2147483647;
+      background: #fff;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
       display: none;
       flex-direction: column;
       overflow: hidden;
-      font-family: sans-serif;
+      z-index: 999999;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
     #chatbot-header {
-      background: #007bff;
-      color: white;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 10px;
+      gap: 10px;
+      padding: 10px 12px;
+      background: #0d6efd;
+      color: #fff;
     }
-    #chatbot-header img { height: 28px; margin-right: 10px; }
-    #chatbot-title { flex: 1; font-weight: bold; font-size: 14px; }
-    #chatbot-close { cursor: pointer; font-size: 18px; }
-    #chatbot-messages { flex: 1; padding: 12px; overflow-y: auto; }
-    #chatbot-input { display: flex; border-top: 1px solid #ccc; }
+    #chatbot-header img { width: 28px; height: 28px; border-radius: 50%; }
+    #chatbot-title { font-weight: 700; font-size: 14px; flex: 1; }
+    #chatbot-close { cursor: pointer; opacity: .85; }
+    #chatbot-messages {
+      padding: 10px;
+      overflow-y: auto;
+      background: #f7f7f9;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .msg {
+      display: inline-block;
+      max-width: 85%;
+      padding: 8px 10px;
+      border-radius: 10px;
+      line-height: 1.25;
+      font-size: 13px;
+      word-break: break-word;
+    }
+    .msg.user { align-self: flex-end; background: #e6f0ff; }
+    .msg.bot  { align-self: flex-start; background: #ffffff; border: 1px solid #e5e7eb; }
+    .msg.bot .rich { font-size: 13px; }
+    #chatbot-input {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 10px;
+      border-top: 1px solid #e9ecef;
+      background: #fff;
+    }
     #chatbot-input input {
-      flex: 1; padding: 10px; border: none; outline: none;
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #cfd4da;
+      outline: none;
+      font-size: 14px;
     }
     #chatbot-input button {
-      background: #007bff; color: white; border: none; padding: 0 16px; cursor: pointer;
+      background: #198754;
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-weight: 600;
     }
-    .chatbot-loading { text-align: center; margin: 10px 0; }
-    .chatbot-loading img { height: 20px; }
+    .loading {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #6c757d;
+      font-size: 12px;
+    }
+    .loading .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: #6c757d;
+      animation: blink 1.2s infinite;
+    }
+    .loading .dot:nth-child(2){ animation-delay: .2s; }
+    .loading .dot:nth-child(3){ animation-delay: .4s; }
+    @keyframes blink { 0%, 80%, 100% { opacity: .2 } 40% { opacity: 1 } }
   `;
   document.head.appendChild(style);
 
+  // ---- Bubble ----
   const bubble = document.createElement("div");
   bubble.id = "chatbot-bubble";
-  bubble.innerHTML = `<img src="${LOGO_URL}" alt="Chat"><span>MAXTER, Tu Asistente Inteligente</span>`;
+  bubble.innerHTML = `
+     <img src="https://flashbot-backend-25b6.onrender.com/static/img/img_m.png" alt="Maxter">
+     <span>Maxter te ayuda</span>
+  `;
   document.body.appendChild(bubble);
 
-  const windowDiv = document.createElement("div");
-  windowDiv.id = "chatbot-window";
-  windowDiv.innerHTML = `
+  // ---- Window ----
+  const win = document.createElement("div");
+  win.id = "chatbot-window";
+  win.innerHTML = `
     <div id="chatbot-header">
-      <img src="${LOGO_URL}" alt="Logo">
+      <img src="https://flashbot-backend-25b6.onrender.com/static/img/img_m.png" alt="Logo">
       <div id="chatbot-title">MAXTER, Tu Asistente Inteligente</div>
       <div id="chatbot-close">✖️</div>
     </div>
@@ -88,75 +135,89 @@ document.addEventListener("DOMContentLoaded", function () {
       <button>Enviar</button>
     </div>
   `;
-  document.body.appendChild(windowDiv);
+  document.body.appendChild(win);
 
-  const input = windowDiv.querySelector("input");
-  const button = windowDiv.querySelector("button");
-  const messages = windowDiv.querySelector("#chatbot-messages");
-  const closeBtn = windowDiv.querySelector("#chatbot-close");
+  const messages = win.querySelector("#chatbot-messages");
+  const input = win.querySelector("#chatbot-input input");
+  const sendBtn = win.querySelector("#chatbot-input button");
+  const closeBtn = win.querySelector("#chatbot-close");
 
-  bubble.addEventListener("click", () => { windowDiv.style.display = "flex"; });
-  closeBtn.addEventListener("click", () => { windowDiv.style.display = "none"; });
+  let greeted = false;
 
-  function appendMessage(text, from = "user") {
+  function appendMessage(text, who="bot", isHtml=false){
     const div = document.createElement("div");
-    div.style.marginBottom = "10px";
-    div.style.textAlign = from === "user" ? "right" : "left";
-    if (from === "user") {
-      div.innerHTML = `<span style="background:#007bff;color:white;padding:8px;border-radius:8px;display:inline-block;max-width:80%">${text}</span>`;
-    } else {
-      div.innerHTML = text;
+    div.className = `msg ${who}`;
+    if(isHtml){
+      const wrapper = document.createElement("div");
+      wrapper.className = "rich";
+      wrapper.innerHTML = text;
+      div.appendChild(wrapper);
+    }else{
+      div.textContent = text;
     }
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
   }
 
-  function showLoading() {
-    const loading = document.createElement("div");
-    loading.className = "chatbot-loading";
-    loading.id = "chatbot-loading";
-    loading.innerHTML = `<img src="${LOADER_URL}" alt="Cargando...">`;
-    messages.appendChild(loading);
+  let loadingEl = null;
+  function showLoading(){
+    loadingEl = document.createElement("div");
+    loadingEl.className = "msg bot";
+    loadingEl.innerHTML = `<span class="loading">Pensando<span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`;
+    messages.appendChild(loadingEl);
     messages.scrollTop = messages.scrollHeight;
   }
-
-  function hideLoading() {
-    const loading = document.getElementById("chatbot-loading");
-    if (loading) loading.remove();
+  function hideLoading(){
+    if(loadingEl && loadingEl.parentNode){ loadingEl.parentNode.removeChild(loadingEl); }
+    loadingEl = null;
   }
 
-  async function sendMessage() {
-    const question = input.value.trim();
-    if (!question) return;
-    appendMessage(question, "user");
-    input.value = "";
-    showLoading();
+  function openChat(){
+    win.style.display = "flex";
+    if(!greeted){
+      appendMessage("¡Hola! Soy Maxter y estoy para ayudarte.", "bot");
+      greeted = true;
+    }
+  }
+  function closeChat(){ win.style.display = "none"; }
 
-    try {
+  bubble.addEventListener("click", openChat);
+  closeBtn.addEventListener("click", closeChat);
+
+  async function sendMessage(){
+    const text = (input.value || "").trim();
+    if(!text){ return; }
+    appendMessage(text, "user");
+    input.value = "";
+
+    showLoading();
+    try{
       const res = await fetch(API_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: question,
-          origin: ORIGIN // ✅ se envía explícitamente
-        })
+        headers: {
+          "Content-Type": "application/json",
+          "Origin": ORIGIN
+        },
+        body: JSON.stringify({ message: text, origin: ORIGIN })
       });
-
-      const data = await res.json();
       hideLoading();
-      if (data.success) {
-        appendMessage(data.response, "bot");
-      } else {
+      if(!res.ok){
+        appendMessage("Hubo un problema procesando tu mensaje.", "bot");
+        return;
+      }
+      const data = await res.json();
+      if(data && data.success){
+        // La API devuelve HTML seguro en data.response
+        appendMessage(data.response || "Sin respuesta.", "bot", true);
+      }else{
         appendMessage("Hubo un error al procesar tu mensaje.", "bot");
       }
-    } catch (err) {
+    }catch(e){
       hideLoading();
       appendMessage("Error de conexión con el servidor.", "bot");
     }
   }
 
-  button.addEventListener("click", sendMessage);
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") sendMessage();
-  });
+  sendBtn.addEventListener("click", sendMessage);
+  input.addEventListener("keydown", (e)=>{ if(e.key === "Enter") sendMessage(); });
 });
