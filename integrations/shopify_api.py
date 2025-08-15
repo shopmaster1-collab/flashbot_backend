@@ -1,8 +1,6 @@
-# integrations/shopify_api.py
-
-import requests
 import os
 import re
+import requests
 from flask import request
 
 # Tokens para cada tienda
@@ -18,21 +16,19 @@ API_VERSION = "2024-04"
 
 def get_shopify_context(origin=None):
     """
-    Detecta el dominio y retorna (store, headers)
+    Detecta el dominio y retorna (store, headers) correctos según Origin.
     """
     if not origin:
         origin = request.headers.get("Origin", "")
 
-    print(f"[DEBUG] Origin detectado: {origin}")
-
     if "master.com.mx" in origin:
         token = SHOPIFY_TOKEN_COM_MX
         store = SHOPIFY_STORE_COM_MX
-        print("[DEBUG] Usando SHOPIFY_TOKEN_MASTER y tienda master-electronicos")
+        print("[DEBUG] Context: master.com.mx → SHOPIFY_TOKEN_MASTER, master-electronicos")
     else:
         token = SHOPIFY_TOKEN_MX
         store = SHOPIFY_STORE_MX
-        print("[DEBUG] Usando SHOPIFY_TOKEN (master.mx) y tienda airb2bsafe-8329")
+        print("[DEBUG] Context: master.mx → SHOPIFY_TOKEN, airb2bsafe-8329")
 
     headers = {
         "X-Shopify-Access-Token": token,
@@ -61,11 +57,14 @@ def _safe_image_src(product: dict) -> str:
 
 
 def get_products(limit=10, origin=None):
+    """
+    Lista productos desde la tienda detectada. Tolerante a nulls en image/variants.
+    """
     store, headers = get_shopify_context(origin)
-    # status=any para traer activos/archivados/borradores
+    # status=any para traer activos/archivados/borradores cuando existan
     url = f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}&status=any"
     try:
-        print(f"[DEBUG] GET productos desde {url}")
+        print(f"[DEBUG] GET productos → {url}")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         productos_raw = (response.json() or {}).get("products", []) or []
@@ -79,12 +78,13 @@ def get_products(limit=10, origin=None):
                 "type": p.get("product_type") or "",
                 "price": v.get("price", "N/A"),
                 "image": _safe_image_src(p),
-                # Nota: aquí dejamos el admin store en el link; en main.py se reescribe al dominio público con el handle
+                # Nota: aquí usamos el dominio admin; en el front se reescribe al dominio público usando el handle
                 "link": f"https://{store}/products/{(p.get('handle') or '')}",
                 "body_html": (p.get("body_html") or "").lower(),
                 "sku": (v.get("sku") or "").lower(),
                 "variant_id": v.get("id") or 0
             })
+        print(f"[DEBUG] Productos mapeados: {len(productos)}")
         return productos
 
     except Exception as e:
@@ -93,6 +93,9 @@ def get_products(limit=10, origin=None):
 
 
 def get_product_by_title(keyword, origin=None):
+    """
+    Búsqueda contains en title/body_html/sku (case-insensitive).
+    """
     keyword = (keyword or "").lower()
     productos = get_products(limit=100, origin=origin)
     encontrados = []
@@ -112,6 +115,7 @@ def get_product_by_title(keyword, origin=None):
                 "variant_id": p.get("variant_id")
             })
 
+    print(f"[DEBUG] Coincidencias para '{keyword}': {len(encontrados)}")
     return encontrados
 
 
@@ -123,7 +127,7 @@ def get_product_details(product_id, origin=None):
     store, headers = get_shopify_context(origin)
     try:
         url = f"https://{store}/admin/api/{API_VERSION}/products/{product_id}.json"
-        print(f"[DEBUG] GET detalles del producto {product_id} desde {url}")
+        print(f"[DEBUG] GET detalles producto {product_id} → {url}")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         return (response.json() or {}).get("product", {}) or {}
@@ -135,7 +139,7 @@ def get_product_details(product_id, origin=None):
 def get_inventory_by_variant_id(variant_id, origin=None):
     store, headers = get_shopify_context(origin)
     try:
-        print(f"[DEBUG] Obteniendo inventario para variant_id: {variant_id} en tienda {store}")
+        print(f"[DEBUG] Inventario para variant_id={variant_id} en {store}")
 
         # 1) Obtener inventory_item_id del variant
         variant_url = f"https://{store}/admin/api/{API_VERSION}/variants/{variant_id}.json"
