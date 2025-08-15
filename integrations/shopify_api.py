@@ -180,3 +180,5 @@ def extract_manual_url(description):
         return None
     match = re.search(r'(https?://[^\s"\']+\.pdf)', description)
     return match.group(1) if match else None
+
+
