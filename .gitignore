@@ -1,4 +1,0 @@
-# Ignorar el archivo .env en la raiz
-.env
-# Ignorar carpeta env y su contenido
-env/
