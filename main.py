@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import re
+import os
 
 # ---- Integraciones existentes ----
 from integrations.shopify_api import (
@@ -19,7 +20,7 @@ try:
 except Exception:
     SHOPIFY_API_VERSION = "2024-04"
 
-# NLP (con fallback si el módulo está en otra ruta)
+# NLP (con fallback simple si el módulo no está)
 try:
     from utils.nlp_tools import extract_keywords_from_text
 except Exception:
@@ -27,7 +28,6 @@ except Exception:
         from nlp_tools import extract_keywords_from_text
     except Exception:
         def extract_keywords_from_text(text: str):
-            # Fallback muy simple si no existe el módulo
             words = re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñ0-9\-]+", text or "")
             return [w.lower() for w in words if len(w) > 2]
 
@@ -41,6 +41,11 @@ except Exception:
         "https://master.com.mx", "https://www.master.com.mx"
     ]
 
+# Parámetros de búsqueda tunables por ENV
+MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "10"))           # 10 páginas * 250 = 2500 items
+COLLECT_MAX = int(os.getenv("SEARCH_COLLECT_MAX", "40"))       # cortamos cuando tengamos 40 matches
+INCLUDE_DIAGNOSTIC = os.getenv("INCLUDE_DIAGNOSTIC", "false").lower() == "true"
+
 app = Flask(__name__)
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
 
@@ -50,11 +55,24 @@ def _safe_first_variant(product: dict) -> dict:
     variants = product.get("variants") or []
     return variants[0] if isinstance(variants, list) and variants else {}
 
-def _safe_image_src(product: dict) -> str:
+def _choose_image_src(product: dict) -> str:
+    # Igual que en integraciones: intenta product.image, luego product.images[]
     image_obj = product.get("image")
     if isinstance(image_obj, dict):
-        return image_obj.get("src") or ""
+        src = image_obj.get("src") or image_obj.get("url") or ""
+        if src:
+            return src
+    images = product.get("images") or []
+    if isinstance(images, list) and images:
+        for img in images:
+            if isinstance(img, dict):
+                src = img.get("src") or img.get("url") or ""
+                if src:
+                    return src
     return ""
+
+def _has_photo_raw(product: dict) -> bool:
+    return bool(_choose_image_src(product))
 
 def _map_product_for_cards(p: dict, store_domain: str) -> dict:
     v = _safe_first_variant(p)
@@ -63,7 +81,7 @@ def _map_product_for_cards(p: dict, store_domain: str) -> dict:
         "title": p.get("title") or "",
         "type": p.get("product_type") or "",
         "price": v.get("price", "N/A"),
-        "image": _safe_image_src(p),
+        "image": _choose_image_src(p),  # robusto
         "handle": (p.get("handle") or ""),
         "admin_link": f"https://{store_domain}/products/{p.get('handle') or ''}",
         "body_html": (p.get("body_html") or ""),
@@ -76,9 +94,6 @@ def _map_product_for_cards(p: dict, store_domain: str) -> dict:
 # ---------- Helpers de texto ----------
 
 def _tokens(text: str) -> list:
-    """
-    Divide el texto en tokens simples (min 2 chars), en minúsculas.
-    """
     parts = re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñ0-9\-]+", text or "")
     toks = [p.lower() for p in parts if len(p) >= 2]
     # único preservando orden
@@ -109,7 +124,7 @@ def _hay_match(tokens: list, p: dict) -> bool:
                 return True
     return False
 
-# ---------- Fallback multi-estrategia + paginación a Shopify ----------
+# ---------- Fallback multi-estrategia + paginación + filtro por foto ----------
 
 def _parse_next_page_info(link_header: str) -> str | None:
     """
@@ -117,28 +132,28 @@ def _parse_next_page_info(link_header: str) -> str | None:
     """
     if not link_header:
         return None
-    # Ejemplo: <https://store/admin/api/2024-04/products.json?limit=250&page_info=abc>; rel="next"
     for part in link_header.split(","):
         part = part.strip()
         if 'rel="next"' in part:
-            # Busca page_info=...
             m = re.search(r"page_info=([^&>]+)", part)
             if m:
                 return m.group(1)
     return None
 
-def _fetch_products_paginated(store: str, headers: dict, base_url: str,
-                              per_page: int = 250, max_pages: int = 3):
+def _fetch_products_paginated_filtered(store: str, headers: dict, base_url: str,
+                                       per_page: int = 250, max_pages: int = 10,
+                                       filter_fn=None, collect_max: int = 40):
     """
-    Descarga varias páginas usando page_info hasta alcanzar max_pages.
-    Devuelve lista 'mapped' y lista 'attempts' (para diagnóstico).
+    Descarga varias páginas usando page_info y aplica:
+      - Filtro por foto (implícito en filter_fn).
+      - Corte temprano (collect_max).
+    Devuelve (collected, attempts).
     """
     attempts = []
     collected = []
 
-    # Arma URL con limit (si no lo trae)
     sep = "&" if "?" in base_url else "?"
-    url = f"{base_url}{sep}limit={per_page}"
+    url_base = f"{base_url}{sep}limit={per_page}"
 
     page = 0
     page_info = None
@@ -146,34 +161,52 @@ def _fetch_products_paginated(store: str, headers: dict, base_url: str,
     while page < max_pages:
         page += 1
         try:
-            final_url = url if not page_info else f"{base_url}{sep}limit={per_page}&page_info={page_info}"
+            final_url = url_base if not page_info else f"{base_url}{sep}limit={per_page}&page_info={page_info}"
             resp = requests.get(final_url, headers=headers, timeout=25)
             code = resp.status_code
             if code != 200:
-                attempts.append({"url": final_url, "status": code, "count": 0, "note": "non-200"})
+                attempts.append({"url": final_url, "status": code, "count": 0, "note": "non-200", "page": page})
                 break
+
             payload = resp.json() or {}
             raw = payload.get("products") or []
-            mapped = [_map_product_for_cards(p, store_domain=store) for p in raw]
-            attempts.append({"url": final_url, "status": code, "count": len(mapped), "page": page})
-            collected.extend(mapped)
+            # Mapeo uno a uno y filtro "sin foto" ANTES de aplicar filter_fn (por seguridad).
+            mapped_page = []
+            for rp in raw:
+                if not _has_photo_raw(rp):
+                    continue  # descarta sin foto
+                mp = _map_product_for_cards(rp, store_domain=store)
+                mapped_page.append(mp)
+
+            # Aplica filtro de texto si existe
+            if filter_fn:
+                mapped_page = [m for m in mapped_page if filter_fn(m)]
+
+            attempts.append({"url": final_url, "status": code, "count": len(mapped_page), "page": page})
+            collected.extend(mapped_page)
+
+            if len(collected) >= collect_max:
+                break
+
             # Página siguiente
             link_header = resp.headers.get("Link") or resp.headers.get("link") or ""
             next_pi = _parse_next_page_info(link_header)
             if not next_pi:
                 break
             page_info = next_pi
+
         except Exception as e:
-            attempts.append({"url": url, "status": "exception", "count": 0, "error": str(e), "page": page})
+            attempts.append({"url": final_url, "status": "exception", "count": 0, "error": str(e), "page": page})
             break
 
     return collected, attempts
 
-def _fetch_products_multi(origin: str, limit_total: int = 750):
+def _fetch_products_multi(origin: str, tokens: list, collect_max: int = COLLECT_MAX, max_pages: int = MAX_PAGES):
     """
     Llama a Shopify probando varias combinaciones y paginando.
-    Retorna (products, attempts).
-      - limit_total es el tope de productos a recolectar (p.ej. 3 páginas x 250).
+    Retorna (products, attempts), ya filtrados por:
+      - Tiene foto
+      - Hace match con los tokens (OR)
     """
     store, headers = get_shopify_context(origin=origin)
 
@@ -185,39 +218,37 @@ def _fetch_products_multi(origin: str, limit_total: int = 750):
 
     all_attempts = []
     per_page = 250
-    max_pages = max(1, min(10, (limit_total + per_page - 1) // per_page))  # calcula páginas hasta el tope
+    filter_fn = (lambda m: _hay_match(tokens, m)) if tokens else None
 
     for base in base_urls:
-        products, attempts = _fetch_products_paginated(
-            store=store, headers=headers, base_url=base, per_page=per_page, max_pages=max_pages
+        products, attempts = _fetch_products_paginated_filtered(
+            store=store,
+            headers=headers,
+            base_url=base,
+            per_page=per_page,
+            max_pages=max_pages,
+            filter_fn=filter_fn,
+            collect_max=collect_max,
         )
         all_attempts.extend(attempts)
         if products:
-            # Acota al límite total si juntó más
-            if len(products) > limit_total:
-                products = products[:limit_total]
             return products, all_attempts
 
     # Si ninguna variante trajo resultados
     return [], all_attempts
 
-def _shopify_fallback_search(user_text: str, origin: str, limit_total: int = 750) -> tuple[list, list]:
+def _shopify_fallback_search(user_text: str, origin: str,
+                             collect_max: int = COLLECT_MAX, max_pages: int = MAX_PAGES):
     """
     Fallback literal: tokeniza y busca 'contains' (OR) sobre:
     title, body_html, sku, vendor, tags, product_type, handle.
-    Paginado hasta limit_total.
+    Paginado con corte temprano y filtrado por foto.
     Retorna (resultados, attempts).
     """
-    products, attempts = _fetch_products_multi(origin=origin, limit_total=limit_total)
-    if not products:
-        return [], attempts
-
     toks = _tokens(user_text)
     if not toks:
-        return [], attempts
-
-    results = [p for p in products if _hay_match(toks, p)]
-    return results, attempts
+        return [], []
+    return _fetch_products_multi(origin=origin, tokens=toks, collect_max=collect_max, max_pages=max_pages)
 
 # ---------- Rutas ----------
 
@@ -238,14 +269,15 @@ def chat():
         if not user_message:
             return jsonify({"success": False, "error": "Mensaje vacío"}), 400
 
-        # 1) Búsqueda original por keywords vía integración
+        # 1) Búsqueda original por keywords vía integración (ya con require_photo en origen si deseas)
         keywords = extract_keywords_from_text(user_message)
         print(f"[DEBUG] Keywords: {keywords} | Origin: {origin}")
 
         encontrados = []
         for kw in keywords:
             try:
-                encontrados.extend(get_shopify_products(kw, origin=origin))
+                # Nota: si quieres forzar que esta capa también filtre por foto, pasa require_photo=True
+                encontrados.extend(get_shopify_products(kw, origin=origin, require_photo=True))
             except Exception as e:
                 print(f"[WARN] get_shopify_products('{kw}') falló: {e}")
 
@@ -255,6 +287,9 @@ def chat():
             handle = ""
             if p.get("link"):
                 handle = p["link"].split("/products/")[-1]
+            # Descarta sin foto por seguridad
+            if not p.get("image"):
+                continue
             productos.append({
                 "id": p.get("id"),
                 "title": p.get("title") or "",
@@ -270,22 +305,25 @@ def chat():
                 "variant_id": p.get("variant_id", 0),
             })
 
-        # 2) Fallback literal directo a Shopify si no hubo resultados
+        # 2) Fallback literal (paginado + corte temprano + sin foto)
         attempts = []
         if not productos:
-            print("[DEBUG] Sin resultados por keywords; usando fallback literal paginado (campos extendidos + tokens)...")
-            productos, attempts = _shopify_fallback_search(user_message, origin=origin, limit_total=750)
+            print("[DEBUG] Sin resultados por keywords; usando fallback paginado (tokens + filtro por foto)...")
+            productos, attempts = _shopify_fallback_search(
+                user_text=user_message,
+                origin=origin,
+                collect_max=COLLECT_MAX,
+                max_pages=MAX_PAGES
+            )
 
         if not productos:
-            # Devolvemos también diagnóstico (qué URLs/páginas se probaron y cuántos se trajeron)
+            meta = {"domain": origin or "desconocido", "ip": request.remote_addr}
+            if INCLUDE_DIAGNOSTIC:
+                meta["diagnostic"] = attempts
             return jsonify({
                 "success": True,
                 "response": "No encontré resultados para esa búsqueda. ¿Quieres intentar con otra palabra clave?",
-                "meta": {
-                    "domain": origin or "desconocido",
-                    "ip": request.remote_addr,
-                    "diagnostic": attempts
-                }
+                "meta": meta
             })
 
         # Evita duplicados por título
@@ -302,9 +340,11 @@ def chat():
         if "master.com.mx" in (origin or ""):
             domain_for_links = "master.com.mx"
 
-        # Render tarjetas
+        # Render tarjetas (ya sólo llegan con foto)
         cards = []
         for p in unicos[:5]:
+            if not p.get("image"):  # extra guard
+                continue
             title = p["title"]
             price = p.get("price", "N/A")
             image = p.get("image", "")
@@ -355,10 +395,13 @@ def chat():
 
         html = "<div>🔍 Estos productos podrían interesarte:</div>" + "".join(cards)
 
+        meta = {"domain": origin or "desconocido", "ip": request.remote_addr}
+        if INCLUDE_DIAGNOSTIC:
+            meta["diagnostic"] = attempts
         return jsonify({
             "success": True,
             "response": html,
-            "meta": {"domain": origin or "desconocido", "ip": request.remote_addr, "diagnostic": attempts}
+            "meta": meta
         })
 
     except Exception as e:
@@ -369,7 +412,8 @@ def chat():
 def debug_products():
     try:
         origin = request.headers.get("Origin", "")
-        productos = get_products(limit=5, origin=origin)
+        # ya filtramos por foto aquí también para consistencia visual
+        productos = get_products(limit=5, origin=origin, require_photo=True)
         return jsonify({"success": True, "productos": productos})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -377,24 +421,37 @@ def debug_products():
 @app.route("/debug/raw", methods=["GET"])
 def debug_products_raw():
     """
-    Diagnóstico crudo: prueba varias URLs y pagina.
-    Parámetro opcional: ?limit_total=750 (por defecto)
+    Diagnóstico crudo paginado con corte temprano y filtro por foto.
+    Parámetros:
+      - limit_total (opcional): tope de coincidencias a recolectar (por defecto, COLLECT_MAX * 2)
     """
     try:
         origin = request.headers.get("Origin", "")
         try:
-            limit_total = int(request.args.get("limit_total", "750"))
+            limit_total = int(request.args.get("limit_total", str(COLLECT_MAX * 2)))
         except Exception:
-            limit_total = 750
-        products, attempts = _fetch_products_multi(origin=origin, limit_total=limit_total)
-        store, _ = get_shopify_context(origin=origin)
+            limit_total = COLLECT_MAX * 2
+
+        # Para inspección, no hacemos match por tokens: sólo juntamos con foto
+        # usando _fetch_products_paginated_filtered con filter_fn=None
+        store, headers = get_shopify_context(origin=origin)
+        base = f"https://{store}/admin/api/{SHOPIFY_API_VERSION}/products.json"
+        products, attempts = _fetch_products_paginated_filtered(
+            store=store,
+            headers=headers,
+            base_url=base,
+            per_page=250,
+            max_pages=MAX_PAGES,
+            filter_fn=None,            # sin filtro de texto
+            collect_max=limit_total    # sólo tope por cantidad
+        )
+        # 'products' ya llega sin foto filtrada y mapeada
         return jsonify({
             "success": True,
             "origin": origin or "no origin",
-            "shopify_store": store,
             "count": len(products),
             "attempts": attempts,
-            "productos": products[:20]  # muestra primeras 20 para no saturar
+            "productos": products[:20]  # muestra 20 para no saturar
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
