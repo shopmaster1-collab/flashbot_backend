@@ -1,4 +1,4 @@
-# chatbot_backend/integrations/shopify_api.py
+# integrations/shopify_api.py
 
 import requests
 import os
@@ -62,7 +62,7 @@ def _safe_image_src(product: dict) -> str:
 
 def get_products(limit=10, origin=None):
     store, headers = get_shopify_context(origin)
-    # status=any para traer activos/archivados/borradores cuando existan
+    # status=any para traer activos/archivados/borradores
     url = f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}&status=any"
     try:
         print(f"[DEBUG] GET productos desde {url}")
@@ -79,7 +79,7 @@ def get_products(limit=10, origin=None):
                 "type": p.get("product_type") or "",
                 "price": v.get("price", "N/A"),
                 "image": _safe_image_src(p),
-                # Usamos el dominio admin para armar el handle; en el front se reescribe al dominio público
+                # Nota: aquí dejamos el admin store en el link; en main.py se reescribe al dominio público con el handle
                 "link": f"https://{store}/products/{(p.get('handle') or '')}",
                 "body_html": (p.get("body_html") or "").lower(),
                 "sku": (v.get("sku") or "").lower(),
