@@ -68,7 +68,7 @@ def _map_product_for_cards(p: dict, store_domain: str) -> dict:
 
 # ---------- Fallback multi-estrategia a Shopify ----------
 
-def _fetch_products_multi(origin: str, limit: int = 50):
+def _fetch_products_multi(origin: str, limit: int = 250):
     """
     Llama a Shopify probando varias combinaciones de filtros y devuelve:
     - products: lista mapeada
@@ -325,5 +325,6 @@ def debug_shopify_context():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
