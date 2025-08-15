@@ -9,11 +9,12 @@ from flask import request
 SHOPIFY_TOKEN_MX = os.getenv("SHOPIFY_TOKEN")               # master.mx
 SHOPIFY_TOKEN_COM_MX = os.getenv("SHOPIFY_TOKEN_MASTER")    # master.com.mx
 
-# Dominios internos de Shopify
+# Dominios internos de Shopify (admin)
 SHOPIFY_STORE_MX = "airb2bsafe-8329.myshopify.com"
 SHOPIFY_STORE_COM_MX = "master-electronicos.myshopify.com"
 
 API_VERSION = "2024-04"
+
 
 def get_shopify_context(origin=None):
     """
@@ -31,36 +32,58 @@ def get_shopify_context(origin=None):
     else:
         token = SHOPIFY_TOKEN_MX
         store = SHOPIFY_STORE_MX
-        print("[DEBUG] Usando SHOPIFY_TOKEN (default) y tienda airb2bsafe")
+        print("[DEBUG] Usando SHOPIFY_TOKEN (master.mx) y tienda airb2bsafe-8329")
 
     headers = {
+        "X-Shopify-Access-Token": token,
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": token
+        "Accept": "application/json",
     }
-
     return store, headers
+
+
+def _safe_first_variant(product: dict) -> dict:
+    """
+    Devuelve el primer variant como dict o {} si no existe.
+    """
+    variants = product.get("variants") or []
+    return variants[0] if isinstance(variants, list) and variants else {}
+
+
+def _safe_image_src(product: dict) -> str:
+    """
+    Devuelve el .src de la imagen o "" si image es None o no es dict.
+    """
+    image_obj = product.get("image")
+    if isinstance(image_obj, dict):
+        return image_obj.get("src", "") or ""
+    return ""
+
 
 def get_products(limit=10, origin=None):
     store, headers = get_shopify_context(origin)
-    url = f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}"
+    # status=any para traer activos/archivados/borradores cuando existan
+    url = f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}&status=any"
     try:
         print(f"[DEBUG] GET productos desde {url}")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        productos_raw = response.json().get("products", [])
+        productos_raw = (response.json() or {}).get("products", []) or []
 
         productos = []
         for p in productos_raw:
+            v = _safe_first_variant(p)
             productos.append({
                 "id": p.get("id"),
-                "title": p.get("title", ""),
-                "type": p.get("product_type", ""),
-                "price": p.get("variants", [{}])[0].get("price", "N/A"),
-                "image": p.get("image", {}).get("src", ""),
-                "link": f"https://{store}/products/{p.get('handle', '')}",
-                "body_html": p.get("body_html", "").lower(),
-                "sku": p.get("variants", [{}])[0].get("sku", "").lower(),
-                "variant_id": p.get("variants", [{}])[0].get("id")
+                "title": p.get("title") or "",
+                "type": p.get("product_type") or "",
+                "price": v.get("price", "N/A"),
+                "image": _safe_image_src(p),
+                # Usamos el dominio admin para armar el handle; en el front se reescribe al dominio público
+                "link": f"https://{store}/products/{(p.get('handle') or '')}",
+                "body_html": (p.get("body_html") or "").lower(),
+                "sku": (v.get("sku") or "").lower(),
+                "variant_id": v.get("id") or 0
             })
         return productos
 
@@ -68,31 +91,33 @@ def get_products(limit=10, origin=None):
         print(f"[❌ Error en get_products()] {e}")
         return []
 
+
 def get_product_by_title(keyword, origin=None):
-    keyword = keyword.lower()
+    keyword = (keyword or "").lower()
     productos = get_products(limit=100, origin=origin)
     encontrados = []
 
     for p in productos:
-        if (
-            keyword in p["title"].lower()
-            or keyword in p["body_html"]
-            or keyword in p["sku"]
-        ):
+        title = (p.get("title") or "").lower()
+        body = (p.get("body_html") or "")
+        sku = (p.get("sku") or "")
+        if (keyword in title) or (keyword in body) or (keyword in sku):
             encontrados.append({
-                "id": p["id"],
-                "title": p["title"],
-                "type": p["type"],
-                "price": p["price"],
-                "image": p["image"],
-                "link": p["link"],
-                "variant_id": p["variant_id"]
+                "id": p.get("id"),
+                "title": p.get("title"),
+                "type": p.get("type"),
+                "price": p.get("price"),
+                "image": p.get("image"),
+                "link": p.get("link"),
+                "variant_id": p.get("variant_id")
             })
 
     return encontrados
 
+
 def get_shopify_products(keyword="", origin=None):
     return get_product_by_title(keyword, origin) if keyword else get_products(origin=origin)
+
 
 def get_product_details(product_id, origin=None):
     store, headers = get_shopify_context(origin)
@@ -101,43 +126,47 @@ def get_product_details(product_id, origin=None):
         print(f"[DEBUG] GET detalles del producto {product_id} desde {url}")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        return response.json().get("product", {})
+        return (response.json() or {}).get("product", {}) or {}
     except Exception as e:
         print(f"[❌ Error en get_product_details({product_id})] {e}")
         raise e
+
 
 def get_inventory_by_variant_id(variant_id, origin=None):
     store, headers = get_shopify_context(origin)
     try:
         print(f"[DEBUG] Obteniendo inventario para variant_id: {variant_id} en tienda {store}")
 
+        # 1) Obtener inventory_item_id del variant
         variant_url = f"https://{store}/admin/api/{API_VERSION}/variants/{variant_id}.json"
         variant_res = requests.get(variant_url, headers=headers)
         variant_res.raise_for_status()
-        inventory_item_id = variant_res.json()["variant"]["inventory_item_id"]
+        inventory_item_id = (variant_res.json() or {}).get("variant", {}).get("inventory_item_id")
 
+        # 2) Obtener niveles de inventario por locations
         levels_url = f"https://{store}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_ids={inventory_item_id}"
         levels_res = requests.get(levels_url, headers=headers)
         levels_res.raise_for_status()
-        inventory_levels = levels_res.json().get("inventory_levels", [])
+        inventory_levels = (levels_res.json() or {}).get("inventory_levels", []) or []
 
+        # 3) Mapear locations
         locs_res = requests.get(f"https://{store}/admin/api/{API_VERSION}/locations.json", headers=headers)
         locs_res.raise_for_status()
-        locations = {loc["id"]: loc["name"] for loc in locs_res.json().get("locations", [])}
+        locations = {loc["id"]: loc["name"] for loc in (locs_res.json() or {}).get("locations", [])}
 
         resultado = []
-        for level in inventory_levels:
-            loc_id = level.get("location_id")
+        for lvl in inventory_levels:
+            loc_id = lvl.get("location_id")
             resultado.append({
-                "sucursal": locations.get(loc_id, "Desconocida"),
-                "cantidad": level.get("available", 0)
+                "sucursal": locations.get(loc_id, f"Loc {loc_id}"),
+                "cantidad": lvl.get("available", 0)
             })
-
         return resultado
 
     except Exception as e:
         print(f"[❌ Error en get_inventory_by_variant_id({variant_id})] {e}")
         raise e
+
 
 def extract_manual_url(description):
     """
