@@ -38,22 +38,46 @@ def get_shopify_context(origin=None):
     return store, headers
 
 
+def _choose_image_src(product: dict) -> str:
+    """
+    Devuelve un src válido:
+    1) product.image.src
+    2) primera imagen en product.images[].src (o .url)
+    3) "" si no hay
+    """
+    # 1) product.image.src
+    image_obj = product.get("image")
+    if isinstance(image_obj, dict):
+        src = image_obj.get("src") or image_obj.get("url") or ""
+        if src:
+            return src
+
+    # 2) primera imagen de product.images[]
+    images = product.get("images") or []
+    if isinstance(images, list) and images:
+        for img in images:
+            if isinstance(img, dict):
+                src = img.get("src") or img.get("url") or ""
+                if src:
+                    return src
+
+    # 3) no hay
+    return ""
+
+
+def _has_photo(product: dict) -> bool:
+    """
+    True si el producto (objeto crudo) tiene al menos una imagen viable.
+    """
+    return bool(_choose_image_src(product))
+
+
 def _safe_first_variant(product: dict) -> dict:
     """
     Devuelve el primer variant como dict o {} si no existe.
     """
     variants = product.get("variants") or []
     return variants[0] if isinstance(variants, list) and variants else {}
-
-
-def _safe_image_src(product: dict) -> str:
-    """
-    Devuelve el .src de la imagen o "" si image es None o no es dict.
-    """
-    image_obj = product.get("image")
-    if isinstance(image_obj, dict):
-        return image_obj.get("src", "") or ""
-    return ""
 
 
 def _map_product(product: dict, store: str) -> dict:
@@ -66,13 +90,14 @@ def _map_product(product: dict, store: str) -> dict:
         "title": product.get("title") or "",
         "type": product.get("product_type") or "",
         "price": v.get("price", "N/A"),
-        "image": _safe_image_src(product),
+        "image": _choose_image_src(product),  # ← robusto
         "link": f"https://{store}/products/{(product.get('handle') or '')}",
         "body_html": (product.get("body_html") or ""),
         "sku": (v.get("sku") or ""),
         "vendor": product.get("vendor") or "",
         "tags": product.get("tags") or "",
         "variant_id": v.get("id") or 0,
+        "handle": product.get("handle") or "",
     }
 
 
@@ -103,28 +128,33 @@ def _fetch_products_multi(store: str, headers: dict, limit: int = 50):
     return []
 
 
-def get_products(limit=10, origin=None):
+def get_products(limit=10, origin=None, require_photo=False):
     """
     Lista productos desde la tienda detectada.
     - Multi-estrategia de URL
     - Mapeo tolerante a nulls
+    - Filtrado opcional de productos sin foto
     """
     store, headers = get_shopify_context(origin)
     try:
         raw = _fetch_products_multi(store, headers, limit=limit)
+        if require_photo:
+            raw = [p for p in raw if _has_photo(p)]
         return [_map_product(p, store) for p in raw]
     except Exception as e:
         print(f"[❌ Error en get_products()] {e}")
         return []
 
 
-def get_product_by_title(keyword, origin=None):
+def get_product_by_title(keyword, origin=None, require_photo=False):
     """
     Búsqueda contains (case-insensitive) en múltiples campos:
-    title, body_html, sku, vendor, tags, product_type.
+    title, body_html, sku, vendor, tags, product_type, handle.
+    Puede filtrar productos sin foto si require_photo=True.
     """
     keyword = (keyword or "").lower()
-    productos = get_products(limit=200, origin=origin)
+    # Subimos a 200 para mejorar el recall desde esta capa (la paginación se hace en main.py fallback)
+    productos = get_products(limit=200, origin=origin, require_photo=require_photo)
     encontrados = []
 
     for p in productos:
@@ -134,6 +164,7 @@ def get_product_by_title(keyword, origin=None):
         vendor = (p.get("vendor") or "").lower()
         tags = (p.get("tags") or "").lower()
         ptype = (p.get("type") or "").lower()
+        handle = (p.get("handle") or "").lower()
 
         if any([
             keyword in title,
@@ -141,7 +172,8 @@ def get_product_by_title(keyword, origin=None):
             keyword in sku,
             keyword in vendor,
             keyword in tags,
-            keyword in ptype
+            keyword in ptype,
+            keyword in handle
         ]):
             encontrados.append({
                 "id": p.get("id"),
@@ -151,15 +183,19 @@ def get_product_by_title(keyword, origin=None):
                 "image": p.get("image"),
                 "link": p.get("link"),
                 "body_html": p.get("body_html"),
-                "variant_id": p.get("variant_id")
+                "variant_id": p.get("variant_id"),
+                "sku": p.get("sku"),
+                "vendor": p.get("vendor"),
+                "tags": p.get("tags"),
+                "handle": p.get("handle"),
             })
 
-    print(f"[DEBUG] Coincidencias para '{keyword}': {len(encontrados)}")
+    print(f"[DEBUG] Coincidencias para '{keyword}' (require_photo={require_photo}): {len(encontrados)}")
     return encontrados
 
 
-def get_shopify_products(keyword="", origin=None):
-    return get_product_by_title(keyword, origin) if keyword else get_products(origin=origin)
+def get_shopify_products(keyword="", origin=None, require_photo=False):
+    return get_product_by_title(keyword, origin, require_photo=require_photo) if keyword else get_products(origin=origin, require_photo=require_photo)
 
 
 def get_product_details(product_id, origin=None):
@@ -178,7 +214,6 @@ def get_product_details(product_id, origin=None):
 def get_inventory_by_variant_id(variant_id, origin=None):
     """
     Devuelve lista de {sucursal, cantidad} por variant_id.
-    (Corregido: todas las llaves/paren cerradas.)
     """
     store, headers = get_shopify_context(origin)
     try:
@@ -224,3 +259,4 @@ def extract_manual_url(description):
         return None
     match = re.search(r'(https?://[^\s"\']+\.pdf)', description)
     return match.group(1) if match else None
+
