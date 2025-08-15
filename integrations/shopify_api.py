@@ -39,11 +39,17 @@ def get_shopify_context(origin=None):
 
 
 def _safe_first_variant(product: dict) -> dict:
+    """
+    Devuelve el primer variant como dict o {} si no existe.
+    """
     variants = product.get("variants") or []
     return variants[0] if isinstance(variants, list) and variants else {}
 
 
 def _safe_image_src(product: dict) -> str:
+    """
+    Devuelve el .src de la imagen o "" si image es None o no es dict.
+    """
     image_obj = product.get("image")
     if isinstance(image_obj, dict):
         return image_obj.get("src", "") or ""
@@ -51,6 +57,9 @@ def _safe_image_src(product: dict) -> str:
 
 
 def _map_product(product: dict, store: str) -> dict:
+    """
+    Normaliza un product crudo de Shopify para uso en tarjetas/respuestas.
+    """
     v = _safe_first_variant(product)
     return {
         "id": product.get("id"),
@@ -70,6 +79,7 @@ def _map_product(product: dict, store: str) -> dict:
 def _fetch_products_multi(store: str, headers: dict, limit: int = 50):
     """
     Intenta varias URLs y regresa la primera con resultados.
+    (En tus pruebas, la URL SIN 'status=any' sí devolvió productos.)
     """
     candidate_urls = [
         f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}",                     # ← esta te devuelve datos hoy
@@ -166,6 +176,10 @@ def get_product_details(product_id, origin=None):
 
 
 def get_inventory_by_variant_id(variant_id, origin=None):
+    """
+    Devuelve lista de {sucursal, cantidad} por variant_id.
+    (Corregido: todas las llaves/paren cerradas.)
+    """
     store, headers = get_shopify_context(origin)
     try:
         print(f"[DEBUG] Inventario para variant_id={variant_id} en {store}")
@@ -183,7 +197,8 @@ def get_inventory_by_variant_id(variant_id, origin=None):
         inventory_levels = (levels_res.json() or {}).get("inventory_levels", []) or []
 
         # 3) Mapear locations
-        locs_res = requests.get(f"https://{store}/admin/api/{API_VERSION}/locations.json", headers=headers, timeout=20)
+        locs_url = f"https://{store}/admin/api/{API_VERSION}/locations.json"
+        locs_res = requests.get(locs_url, headers=headers, timeout=20)
         locs_res.raise_for_status()
         locations = {loc["id"]: loc["name"] for loc in (locs_res.json() or {}).get("locations", [])}
 
@@ -191,4 +206,21 @@ def get_inventory_by_variant_id(variant_id, origin=None):
         for lvl in inventory_levels:
             loc_id = lvl.get("location_id")
             resultado.append({
-                "sucursal": locations.get(loc_id, f"Loc {loc_id}")
+                "sucursal": locations.get(loc_id, f"Loc {loc_id}"),
+                "cantidad": lvl.get("available", 0)
+            })
+        return resultado
+
+    except Exception as e:
+        print(f"[❌ Error en get_inventory_by_variant_id({variant_id})] {e}")
+        raise e
+
+
+def extract_manual_url(description):
+    """
+    Extrae el primer link .pdf desde la descripción del producto (body_html).
+    """
+    if not description:
+        return None
+    match = re.search(r'(https?://[^\s"\']+\.pdf)', description)
+    return match.group(1) if match else None
