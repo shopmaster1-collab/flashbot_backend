@@ -103,11 +103,6 @@ def _fetch_products_multi(origin: str, limit: int = 50):
     return [], attempts
 
 def _shopify_fallback_search(user_text: str, origin: str, limit: int = 100) -> tuple[list, list]:
-    """
-    Fallback literal: busca 'contains' con el texto del usuario.
-    Ahora considera: title, body_html, sku, vendor, tags, product_type.
-    Retorna (resultados, attempts) para depuración.
-    """
     products, attempts = _fetch_products_multi(origin=origin, limit=limit)
     text = (user_text or "").strip().lower()
     if not products:
@@ -122,6 +117,7 @@ def _shopify_fallback_search(user_text: str, origin: str, limit: int = 100) -> t
             text in (p["vendor"].lower()),
             text in (p["tags"].lower()),
             text in ((p["type"] or "").lower()),
+            text in ((p["handle"] or "").lower()),  # ← NUEVO
         ]):
             results.append(p)
     return results, attempts
@@ -329,4 +325,5 @@ def debug_shopify_context():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
