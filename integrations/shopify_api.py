@@ -1,14 +1,15 @@
 import os
 import re
 import html
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from flask import request
 
-# ============================================================
+# =========================================
 #   Shopify Admin configuration
-# ============================================================
+# =========================================
 
 API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-04")
 
@@ -19,9 +20,9 @@ SHOPIFY_STORE_MX = os.getenv("SHOPIFY_STORE_MX", "airb2bsafe-8329.myshopify.com"
 SHOPIFY_STORE_MASTER = os.getenv("SHOPIFY_STORE_MASTER", "master-electronicos.myshopify.com")
 
 
-# ============================================================
-#   Helpers
-# ============================================================
+# =========================================
+#   Small utils
+# =========================================
 
 _WS = re.compile(r"\s+", re.UNICODE)
 
@@ -39,7 +40,6 @@ def _extract_numeric_gid(gid_or_num: Any) -> str:
 
 def _public_domain_for_store(store: str) -> str:
     return "master.com.mx" if store == SHOPIFY_STORE_MASTER else "master.mx"
-
 
 def get_shopify_context(origin: Optional[str] = None) -> Tuple[str, Dict[str, str]]:
     """
@@ -67,16 +67,15 @@ def get_shopify_context(origin: Optional[str] = None) -> Tuple[str, Dict[str, st
     return store, headers
 
 
-# ============================================================
-#   REST fallbacks
-# ============================================================
+# =========================================
+#   REST fallbacks / detail
+# =========================================
 
 def get_products(limit: int = 20, origin: Optional[str] = None, require_photo: bool = True) -> List[Dict[str, Any]]:
     store, headers = get_shopify_context(origin)
     url = f"https://{store}/admin/api/{API_VERSION}/products.json?limit={int(limit)}&status=active&published_status=published"
     r = requests.get(url, headers=headers, timeout=20)
     items = (r.json() or {}).get("products") or []
-
     out: List[Dict[str, Any]] = []
     for p in items:
         image = ""
@@ -88,10 +87,8 @@ def get_products(limit: int = 20, origin: Optional[str] = None, require_photo: b
                 image = imgs[0].get("src") or imgs[0].get("url") or ""
         if require_photo and not image:
             continue
-
         v = (p.get("variants") or [{}])[0] if isinstance(p.get("variants"), list) and p["variants"] else {}
         price = v.get("price") or v.get("compare_at_price") or "N/A"
-
         out.append({
             "id": p.get("id"),
             "title": p.get("title") or "",
@@ -109,14 +106,12 @@ def get_products(limit: int = 20, origin: Optional[str] = None, require_photo: b
         })
     return out
 
-
 def get_product_details(product_id: str, origin: Optional[str] = None) -> Dict[str, Any]:
     store, headers = get_shopify_context(origin)
     url = f"https://{store}/admin/api/{API_VERSION}/products/{product_id}.json"
     r = requests.get(url, headers=headers, timeout=20)
     r.raise_for_status()
     return (r.json() or {}).get("product") or {}
-
 
 def get_inventory_by_variant_id(variant_id: str, origin: Optional[str] = None) -> List[Dict[str, Any]]:
     """
@@ -160,9 +155,9 @@ def get_inventory_by_variant_id(variant_id: str, origin: Optional[str] = None) -
     return out
 
 
-# ============================================================
-#   GraphQL Admin search
-# ============================================================
+# =========================================
+#   Admin GraphQL search
+# =========================================
 
 def _graphql(store: str, headers: Dict[str, str], query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     url = f"https://{store}/admin/api/{API_VERSION}/graphql.json"
@@ -174,36 +169,45 @@ def _graphql(store: str, headers: Dict[str, str], query: str, variables: Dict[st
         raise RuntimeError(f"GraphQL errors: {data['errors']}")
     return data.get("data") or {}
 
-SUPPORT_NEGATIVE_WORDS = {
-    "amplificador","booster","cable","antena","adaptador","conversor","displayport","vga","hdmi","splitter",
-    "extensor","switch","conmutador","sintonizador","decodificador","tuner","bocina","bafle",
-}
+# ---- Domain intents ----
+NEG_GENERIC = {"amplificador","booster","cable","antena","adaptador","conversor","displayport","vga","hdmi",
+               "splitter","extensor","switch","apagador","toma corriente","toma-corriente","tomacorriente",
+               "bocina","bafle","foco","lámpara","lampara"}
 
-SUPPORT_POSITIVE_WORDS = {
-    "soporte","bracket","montaje","montura","holder","vesa","pared","techo","articulado","inclinable","esquinero","tv","pantalla","monitor"
-}
+WATER_POS = {"sensor","nivel","agua","tinaco","cisterna","aljibe","pipa","water","tank","float"}
+GAS_POS   = {"sensor","gas","estacionario","fugas","tanque","lp","propano","butano"}
+ENER_POS  = {"medidor","consumo","energía","energia","kwh","kw","corriente","voltaje","electricidad","eléctrica","electrica","amperaje"}
 
-TARGET_COLLECTIONS = {"soportes para tv","video y tv","ofertas relámpago","ofertas relampago"}
+def _detect_intent(text: str) -> Optional[str]:
+    t = _norm(text).lower()
+    # simple discriminative checks
+    if any(w in t for w in ["tinaco","cisterna","agua","nivel de agua","nivel","water"]):
+        return "sensor_water"
+    if any(w in t for w in ["gas","fuga","estacionario","tanque"]):
+        return "sensor_gas"
+    if any(w in t for w in ["consumo de energia","consumo de energía","kwh","medidor de energia","medidor de energía","electricidad","consumo eléctrico","energia electrica"]):
+        return "sensor_energy"
+    # fallbacks by keyword + "sensor"/"medidor"
+    if "sensor" in t and any(w in t for w in ["agua","tinaco","cisterna"]):
+        return "sensor_water"
+    if "sensor" in t and "gas" in t:
+        return "sensor_gas"
+    if "medidor" in t or "kwh" in t:
+        return "sensor_energy"
+    return None
 
-def _build_admin_query(keyword: str, extra: Optional[List[str]] = None) -> str:
+def _build_admin_query(keyword: str, intent: Optional[str]) -> str:
     toks = _tokens(keyword)
-    # expand synonyms quickly
-    if "bracket" in toks or "montaje" in toks or "montura" in toks:
-        toks.append("soporte")
-    if "tv" in toks or "televisor" in toks or "pantalla" in toks:
-        toks.append("pantalla")
 
     ors = []
     for t in toks:
         t = re.sub(r'([":])', r"\\\1", t)
         ors.append(f'(title:{t}* OR sku:{t}* OR tag:{t}* OR product_type:{t}* OR vendor:{t}* OR body:{t}*)')
 
-    # inches
+    # inches / vesa keep for other categories if needed
     for m in re.finditer(r"(\d{2,3})\s*(?:\"|pulg|pulgadas|in)\b", keyword.lower()):
         n = m.group(1)
         ors.append(f'(title:{n}* OR body:{n}* OR tag:{n}*)')
-
-    # vesa patterns
     for m in re.finditer(r"(\d{2,4})\s*[xX]\s*(\d{2,4})", keyword):
         pat = f"{m.group(1)}x{m.group(2)}"
         ors.append(f'(title:{pat} OR body:{pat} OR tag:{pat})')
@@ -212,57 +216,17 @@ def _build_admin_query(keyword: str, extra: Optional[List[str]] = None) -> str:
     if ors:
         q.append("(" + " AND ".join(ors) + ")")
 
-    if extra:
-        # raw clauses (already admin syntax)
-        q.append("(" + " OR ".join(extra) + ")")
+    # Intent-specific strengthening
+    if intent == "sensor_water":
+        q.append('(product_type:sensor OR title:sensor* OR tag:sensor)')
+        q.append('(title:agua* OR body:agua OR tag:agua OR title:tinaco* OR body:tinaco OR tag:tinaco OR title:cisterna* OR body:cisterna OR tag:cisterna OR tag:nivel)')
+    elif intent == "sensor_gas":
+        q.append('(product_type:sensor OR title:sensor* OR tag:sensor)')
+        q.append('(title:gas* OR body:gas OR tag:gas OR tag:estacionario OR title:tanque* OR body:tanque)')
+    elif intent == "sensor_energy":
+        q.append('(title:medidor* OR product_type:medidor OR tag:medidor OR body:medidor OR title:kwh* OR body:kwh OR tag:kwh OR title:energia* OR body:energia OR tag:energia)')
 
     return " AND ".join(q)
-
-def _product_node_to_card(n: Dict[str, Any], public_domain: str) -> Dict[str, Any]:
-    # image
-    image = ""
-    if n.get("featuredImage"):
-        image = n["featuredImage"].get("url") or ""
-    if not image:
-        edges = ((n.get("images") or {}).get("edges")) or []
-        if edges:
-            image = (edges[0].get("node") or {}).get("url") or ""
-
-    # variant
-    v_edges = ((n.get("variants") or {}).get("edges")) or []
-    v0 = v_edges[0].get("node") if v_edges else {}
-    raw_price = v0.get("price")
-    price = raw_price.get("amount") if isinstance(raw_price, dict) else (str(raw_price) if raw_price is not None else "N/A")
-    sku = v0.get("sku") or ""
-    variant_id = _extract_numeric_gid(v0.get("id") or "")
-
-    collections = []
-    c_edges = ((n.get("collections") or {}).get("edges")) or []
-    for e in c_edges:
-        c = e.get("node") or {}
-        title = (c.get("title") or "").strip()
-        if title:
-            collections.append(title)
-
-    handle = n.get("handle") or ""
-    link = f"https://{public_domain}/products/{handle}" if handle else f"https://{public_domain}"
-
-    return {
-        "id": n.get("id"),
-        "title": n.get("title") or "",
-        "type": n.get("productType") or "",
-        "price": price or "N/A",
-        "image": image,
-        "link": link,
-        "body_html": n.get("descriptionHtml") or n.get("description") or "",
-        "sku": sku,
-        "vendor": n.get("vendor") or "",
-        "tags": n.get("tags") or [],
-        "variant_id": variant_id,
-        "handle": handle,
-        "_in_stock": True if v0.get("availableForSale") else False,
-        "_collections": collections,
-    }
 
 def _graphql_product_search(store: str, headers: Dict[str,str], query: str, first: int = 80) -> List[Dict[str, Any]]:
     gql = """
@@ -283,9 +247,7 @@ def _graphql_product_search(store: str, headers: Dict[str,str], query: str, firs
             variants(first: 25) {
               edges { node { id title sku availableForSale price } }
             }
-            collections(first: 10) {
-              edges { node { id title handle } }
-            }
+            collections(first: 10) { edges { node { title handle } } }
           }
         }
       }
@@ -295,82 +257,103 @@ def _graphql_product_search(store: str, headers: Dict[str,str], query: str, firs
     edges = (((data.get("products") or {}).get("edges")) or [])
     return [e.get("node") for e in edges if isinstance(e, dict)]
 
+def _node_to_card(n: Dict[str, Any], public_domain: str) -> Dict[str, Any]:
+    # image
+    image = ""
+    if n.get("featuredImage"):
+        image = n["featuredImage"].get("url") or ""
+    if not image:
+        edges = ((n.get("images") or {}).get("edges")) or []
+        if edges:
+            image = (edges[0].get("node") or {}).get("url") or ""
 
-# ============================================================
-#   Public API
-# ============================================================
+    # variant
+    v_edges = ((n.get("variants") or {}).get("edges")) or []
+    v0 = v_edges[0].get("node") if v_edges else {}
+    raw_price = v0.get("price")
+    price = raw_price.get("amount") if isinstance(raw_price, dict) else (str(raw_price) if raw_price is not None else "N/A")
+    sku = v0.get("sku") or ""
+    variant_id = _extract_numeric_gid(v0.get("id") or "")
 
-def _is_support_intent(text: str) -> bool:
-    t = _norm(text).lower()
-    if any(w in t for w in SUPPORT_POSITIVE_WORDS):
-        if not any(b in t for b in SUPPORT_NEGATIVE_WORDS):
-            return True
-    # ask for VESA or inches implies support intent
-    if re.search(r"\bvesa\b", t) or re.search(r"\d{2,3}\s*(?:\"|pulg|pulgadas|in)\b", t):
-        return True
-    return False
+    handle = n.get("handle") or ""
+    link = f"https://{public_domain}/products/{handle}" if handle else f"https://{public_domain}"
 
-def _boost_if_support(p: Dict[str, Any], query: str) -> float:
-    score = 0.0
+    # collections list
+    cols = []
+    c_edges = ((n.get("collections") or {}).get("edges")) or []
+    for e in c_edges:
+        node = e.get("node") or {}
+        title = (node.get("title") or "").strip()
+        if title:
+            cols.append(title)
+
+    return {
+        "id": n.get("id"),
+        "title": n.get("title") or "",
+        "type": n.get("productType") or "",
+        "price": price or "N/A",
+        "image": image,
+        "link": link,
+        "body_html": n.get("descriptionHtml") or n.get("description") or "",
+        "sku": sku,
+        "vendor": n.get("vendor") or "",
+        "tags": n.get("tags") or [],
+        "variant_id": variant_id,
+        "handle": handle,
+        "_in_stock": True if v0.get("availableForSale") else False,
+        "_collections": cols,
+    }
+
+# Negative words per intent to avoid false positives
+NEG_PER_INTENT = {
+    "sensor_water": NEG_GENERIC | {"interruptor","switch","apagador","contacto"},
+    "sensor_gas":   NEG_GENERIC | {"detector de humo"},  # humo may be separate
+    "sensor_energy": NEG_GENERIC | {"apagador","switch","contacto","tomacorriente"},
+}
+
+# Boost collections for relevance
+TARGET_COLLECTIONS = {"soportes para tv","video y tv","ofertas relámpago","ofertas relampago",
+                      "sensores","iot","hogar inteligente","medidores"}
+
+def _score_product(p: Dict[str, Any], keyword: str, intent: Optional[str]) -> float:
+    s = 0.0
     text = " ".join([
-        _norm(p.get("title")),
-        _norm(p.get("body_html")),
-        " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]).lower(),
-        _norm(p.get("vendor")),
-        _norm(p.get("sku")),
+        _norm(p.get("title")), _norm(p.get("body_html")),
+        " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]),
+        _norm(p.get("vendor")), _norm(p.get("sku"))
     ]).lower()
 
-    for t in set(_tokens(query)):
-        if t and t in (p.get("title","").lower()):
-            score += 3.0
-        if t and t in (p.get("sku","").lower()):
-            score += 4.0
-        if t and t in text:
-            score += 1.0
+    for t in set(_tokens(keyword)):
+        if t in (p.get("title","").lower()): s += 3.0
+        if t in (p.get("sku","").lower()):   s += 4.0
+        if t and t in text:                  s += 1.0
 
-    # prefer supports
-    if any(w in text for w in SUPPORT_POSITIVE_WORDS):
-        score += 1.5
-    if any(w in text for w in SUPPORT_NEGATIVE_WORDS):
-        score -= 2.0
+    if intent == "sensor_water":
+        if any(w in text for w in WATER_POS): s += 2.0
+    elif intent == "sensor_gas":
+        if any(w in text for w in GAS_POS): s += 2.0
+    elif intent == "sensor_energy":
+        if any(w in text for w in ENER_POS): s += 2.0
 
-    # boost if belongs to desired collections
+    # collection boost
     cols = [c.lower() for c in (p.get("_collections") or [])]
     if any(c in TARGET_COLLECTIONS for c in cols):
-        score += 1.5
-
-    # inches match / ranges
-    for m in re.finditer(r"(\d{2,3})\s*(?:\"|pulg|pulgadas|in)\b", query.lower()):
-        target = int(m.group(1))
-        blob = text
-        ok = False
-        # ranges like 32-80
-        for mm in re.finditer(r"(\d{2,3})\s*[-–]\s*(\d{2,3})", blob):
-            a, b = int(mm.group(1)), int(mm.group(2))
-            if a <= target <= b:
-                ok = True; break
-        # "hasta 80" or "max 80"
-        if not ok:
-            for mm in re.finditer(r"(?:hasta|max(?:imo)?)\s*(\d{2,3})", blob):
-                if target <= int(mm.group(1)):
-                    ok = True; break
-        # "para 80"
-        if not ok:
-            if re.search(rf"(?:para|de)\s*{target}\s*(?:\"|pulg|pulgadas|in)?\b", blob):
-                ok = True
-        if ok: score += 1.0
-
-    # vesa exact match boost
-    for m in re.finditer(r"(\d{2,4})\s*[xX]\s*(\d{2,4})", query):
-        pat = f"{m.group(1)}x{m.group(2)}"
-        if pat in text:
-            score += 1.2
+        s += 0.8
 
     if p.get("_in_stock"):
-        score += 0.5
+        s += 0.3
 
-    return score
+    # punish negatives
+    if intent and any(w in text for w in NEG_PER_INTENT.get(intent, set())):
+        s -= 3.0
+    else:
+        if any(w in text for w in NEG_GENERIC):
+            s -= 1.5
+    return s
 
+# =========================================
+#   Public search
+# =========================================
 
 def get_shopify_products(
     keyword: str = "",
@@ -381,27 +364,22 @@ def get_shopify_products(
     """
     Precise product search across 4k+ items with:
       - Admin GraphQL search (title, sku, tag, product_type, vendor, body)
-      - Collections awareness (Soportes para TV, Video y TV, OFERTAS RELÁMPAGO)
-      - VESA and inches parsing
+      - Intent recognition for sensors (agua/tinaco, gas, energía)
+      - Collections awareness
       - Deterministic scoring; only items with image
     Requires: read_products (and read_inventory/read_locations if you call inventory endpoints).
     """
     store, headers = get_shopify_context(origin)
     public_domain = _public_domain_for_store(store)
 
-    # Build admin query
-    extra = []
-    # If intent is support, bias query with extra raw terms that help Shopify search
-    if _is_support_intent(keyword):
-        extra.append('(tag:soporte OR product_type:soporte OR title:soporte*)')
-
-    base_query = _build_admin_query(keyword, extra=extra)
+    intent = _detect_intent(keyword)
+    base_query = _build_admin_query(keyword, intent)
 
     try:
         nodes = _graphql_product_search(store, headers, base_query, first=max(60, int(kwargs.get("limit", 20))*3))
-        products = [_product_node_to_card(n, public_domain) for n in nodes]
+        products = [_node_to_card(n, public_domain) for n in nodes]
     except Exception as e:
-        # Fallback to REST list (first page) to avoid empty responses
+        # Fallback to REST list to avoid empty responses
         print(f"[WARN] GraphQL search falló ({e}); usando REST fallback.")
         products = get_products(limit=int(kwargs.get("limit", 20)), origin=origin, require_photo=require_photo)
 
@@ -409,43 +387,31 @@ def get_shopify_products(
     if require_photo:
         products = [p for p in products if p.get("image")]
 
-    # If support intent, filter hard negatives and boost good collections
-    if _is_support_intent(keyword):
+    # If we have an intent, filter out false positives aggressively
+    if intent:
         filtered = []
+        negs = NEG_PER_INTENT.get(intent, set())
         for p in products:
-            blob = " ".join([
+            text = " ".join([
                 _norm(p.get("title")), _norm(p.get("body_html")),
-                " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]).lower()
+                " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]),
+                _norm(p.get("vendor")), _norm(p.get("sku"))
             ]).lower()
-            if any(w in blob for w in SUPPORT_NEGATIVE_WORDS):
+            if any(w in text for w in negs):
                 continue
             filtered.append(p)
         products = filtered
 
-    # Scoring & stable sorting
-    scored = []
-    for p in products:
-        s = _boost_if_support(p, keyword) if _is_support_intent(keyword) else 0.0
-        # generic token score
-        if not _is_support_intent(keyword):
-            text = " ".join([
-                _norm(p.get("title")), _norm(p.get("body_html")),
-                _norm(p.get("vendor")), _norm(p.get("sku"))
-            ]).lower()
-            for t in set(_tokens(keyword)):
-                if t in p.get("title","").lower(): s += 3.0
-                if t in p.get("sku","").lower(): s += 4.0
-                if t in text: s += 1.0
-        scored.append((s, p.get("title",""), p))
-
+    # Score & sort
+    scored = [( _score_product(p, keyword, intent), p.get("title",""), p ) for p in products]
     scored.sort(key=lambda x: (-x[0], x[1]))
     limit = int(kwargs.get("limit", 20))
     return [p for _,__,p in scored][:limit]
 
 
-# ============================================================
+# =========================================
 #   Manual URL
-# ============================================================
+# =========================================
 
 def extract_manual_url(body_html: str) -> Optional[str]:
     if not body_html:
