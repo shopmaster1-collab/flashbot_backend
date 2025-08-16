@@ -42,21 +42,17 @@ except Exception:
     ]
 
 # Parámetros de búsqueda tunables por ENV
-MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "20"))           # por defecto 20 páginas * 250 = 5000 items
-COLLECT_MAX = int(os.getenv("SEARCH_COLLECT_MAX", "40"))       # cortamos cuando tengamos 40 matches útiles
+MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "20"))
+COLLECT_MAX = int(os.getenv("SEARCH_COLLECT_MAX", "40"))
 INCLUDE_DIAGNOSTIC = os.getenv("INCLUDE_DIAGNOSTIC", "false").lower() == "true"
-MIN_TOKENS_MATCH = int(os.getenv("SEARCH_MIN_TOKENS_MATCH", "2"))  # cuántos tokens distintos deben aparecer
+MIN_TOKENS_MATCH = int(os.getenv("SEARCH_MIN_TOKENS_MATCH", "2"))
 
 app = Flask(__name__)
 CORS(app, origins=_CORS_ORIGINS, supports_credentials=True)
 
-# ---------- Utilidades seguras de mapeo / normalización ----------
+# ---------- Utilidades / normalización ----------
 
 _ACCENTS = str.maketrans("áéíóúüÁÉÍÓÚÜñÑ", "aeiouuAEIOUUnN")
-STOPWORDS = set("""
-a al algo algun alguna algunos algunas ante antes como con contra cual cuales cuando de del desde donde dos el la los las un una unos unas en entre es esa eso esas esos esta este esto estas estos hay hasta hacia la lo los las le les mas menos mi mis muy no nos o os para pero por que se sin sobre su sus te tu tus y o en un/una unos/unas este esta estos estas aquel aquella aquellos aquellas esa ese esos esas esta ese estas estos
-""".split())
-
 def _normalize(s: str) -> str:
     return (s or "").translate(_ACCENTS).lower()
 
@@ -89,7 +85,7 @@ def _map_product_for_cards(p: dict, store_domain: str) -> dict:
         "title": p.get("title") or "",
         "type": p.get("product_type") or "",
         "price": v.get("price", "N/A"),
-        "image": _choose_image_src(p),  # robusto
+        "image": _choose_image_src(p),
         "handle": (p.get("handle") or ""),
         "admin_link": f"https://{store_domain}/products/{p.get('handle') or ''}",
         "body_html": (p.get("body_html") or ""),
@@ -99,38 +95,51 @@ def _map_product_for_cards(p: dict, store_domain: str) -> dict:
         "variant_id": v.get("id") or 0,
     }
 
-# ---------- Helpers de texto / tokens / sinónimos ----------
+# ---------- Tokenización / sinónimos ----------
+
+STOPWORDS = set("""
+a al algo algun alguna algunos algunas ante antes como con contra cual cuales cuando de del desde donde dos el la los las un una unos unas en entre es esa eso esas esos esta este esto estas estos hay hasta hacia la lo los las le les mas menos mi mis muy no nos o os para pero por que se sin sobre su sus te tu tus y o en un/una unos/unas este esta estos estas aquel aquella aquellos aquellas esa ese esos esas esta ese estas estos
+""".split())
 
 SYNONYMS = {
     "router": ["ruteador", "access point", "ap", "wifi", "wi-fi", "inalambrico", "inalámbrico"],
     "soporte": ["bracket", "montaje", "montura", "base", "holder", "wall mount", "vesa"],
     "pantalla": ["tv", "televisor", "television", "monitor", "pantallas", "smart tv"],
     "camara": ["cámara", "seguridad", "ip", "cctv", "dvr", "nvr"],
+    # Sensores agua (uso/característica)
+    "sensor_agua": [
+        "sensor de agua","nivel de agua","tinaco","cisterna","pipa",
+        "iot-water","easy-water","connect-water","connect water","connectwater",
+        "bluetooth","wifi","alarma de agua","monitoreo de agua","medidor de agua"
+    ],
 }
 
 def _tokens(text: str) -> list:
     parts = re.findall(r"[A-Za-zÁÉÍÓÚáéíóúÑñ0-9\-]+", text or "")
-    toks = []
-    seen = set()
+    toks, seen = [], set()
     for p in parts:
         n = _normalize(p)
         if len(n) < 2 or n in STOPWORDS:
             continue
         if n not in seen:
             toks.append(n); seen.add(n)
-        # sinónimos
+        # sinónimos básicos
         for syn in SYNONYMS.get(n, []):
+            ns = _normalize(syn)
+            if ns not in seen:
+                toks.append(ns); seen.add(ns)
+    # expandir si detectamos palabras fuertes de sensor agua
+    blob = _normalize(text)
+    if any(k in blob for k in ["tinaco","cisterna","iot-water","easy-water","connect-water","nivel de agua","sensor de agua"]):
+        for syn in SYNONYMS["sensor_agua"]:
             ns = _normalize(syn)
             if ns not in seen:
                 toks.append(ns); seen.add(ns)
     return toks
 
+# ---------- Fallback paginado / scoring ----------
+
 def _score_product(tokens: list, p: dict) -> tuple[int, int]:
-    """
-    Devuelve (score, matched_tokens_count).
-    Pondera campos para mejorar la precisión y exige mínimo de tokens.
-    """
-    # Campos normalizados
     title = _normalize(p.get("title"))
     body = _normalize(p.get("body_html"))
     sku = _normalize(p.get("sku"))
@@ -149,8 +158,7 @@ def _score_product(tokens: list, p: dict) -> tuple[int, int]:
         "vendor": (vendor, 1),
     }
 
-    matched_tokens = 0
-    score = 0
+    matched_tokens, score = 0, 0
     seen_tok = set()
     for t in tokens:
         present = False
@@ -162,7 +170,6 @@ def _score_product(tokens: list, p: dict) -> tuple[int, int]:
             matched_tokens += 1
             seen_tok.add(t)
 
-    # Bonus por frase (tokens unidos) en título/handle/tags
     if tokens:
         phrase = " ".join(tokens)
         for key in ("title", "handle", "tags"):
@@ -175,15 +182,7 @@ def _score_product(tokens: list, p: dict) -> tuple[int, int]:
 def _fetch_products_paginated_filtered(store: str, headers: dict, base_url: str,
                                        per_page: int = 250, max_pages: int = 20,
                                        filter_fn=None, collect_max: int = 40):
-    """
-    Descarga páginas usando page_info y aplica:
-      - Filtro por foto
-      - Filtro/score por texto (filter_fn)
-      - Corte temprano (collect_max)
-    Devuelve (collected, attempts)
-    """
-    attempts = []
-    collected = []
+    attempts, collected = [], []
 
     sep = "&" if "?" in base_url else "?"
     url_base = f"{base_url}{sep}limit={per_page}"
@@ -204,7 +203,6 @@ def _fetch_products_paginated_filtered(store: str, headers: dict, base_url: str,
             payload = resp.json() or {}
             raw = payload.get("products") or []
 
-            # Mapeo y filtro sin-foto
             page_items = []
             for rp in raw:
                 if not _has_photo_raw(rp):
@@ -212,7 +210,6 @@ def _fetch_products_paginated_filtered(store: str, headers: dict, base_url: str,
                 mp = _map_product_for_cards(rp, store_domain=store)
                 page_items.append(mp)
 
-            # Aplica filtro/score si procede
             if filter_fn:
                 page_items = filter_fn(page_items)
 
@@ -236,11 +233,6 @@ def _fetch_products_paginated_filtered(store: str, headers: dict, base_url: str,
 
 def _shopify_fallback_search(user_text: str, origin: str,
                              collect_max: int = COLLECT_MAX, max_pages: int = MAX_PAGES):
-    """
-    Tokeniza, expande sinónimos, filtra por foto y pagina con corte temprano.
-    Exige que al menos MIN_TOKENS_MATCH tokens distintos hagan match (mejor precisión).
-    Rankea por score ponderado y devuelve top-N.
-    """
     tokens = _tokens(user_text)
     if not tokens:
         return [], []
@@ -255,14 +247,12 @@ def _shopify_fallback_search(user_text: str, origin: str,
     all_attempts = []
     per_page = 250
 
-    # filter_fn hará score y threshold de tokens
     def filter_fn(items):
         scored = []
         for p in items:
             score, matched = _score_product(tokens, p)
             if matched >= MIN_TOKENS_MATCH and score > 0:
                 scored.append((score, p))
-        # ordena por score desc
         scored.sort(key=lambda x: x[0], reverse=True)
         return [p for _, p in scored]
 
@@ -282,7 +272,7 @@ def _shopify_fallback_search(user_text: str, origin: str,
 
     return [], all_attempts
 
-# ---------- Detección de intención: SOPORTES/BRACKETS ----------
+# ---------- Detección de intención ----------
 
 SUPPORT_SYNONYMS = {
     "soporte","soportes","bracket","montaje","montura","base","holder",
@@ -293,12 +283,26 @@ EXCLUDE_FOR_SUPPORT = {
     "displayport","vga","convertidor","conversor","decodificador","sintonizador"
 }
 
+SENSOR_WATER_SYNONYMS = {
+    "sensor de agua","nivel de agua","sensor agua","monitoreo de agua","medidor de agua",
+    "tinaco","cisterna","pipa","aljibe",
+    "iot-water","easy-water","connect-water","connect water","connectwater",
+    "bluetooth","wifi","alarma de agua"
+}
+EXCLUDE_FOR_WATER = {
+    "antena","hdmi","adaptador","displayport","soporte","bracket","cable","minidp","vga",
+    "decodificador","control remoto","bocina","audifono","foco"
+}
+
 def detect_support_intent(text: str) -> bool:
     t = _normalize(text)
-    # Debe mencionar soporte/bracket o vesa/pared/techo y algún término de pantalla/tv
     has_core = any(k in t for k in SUPPORT_SYNONYMS) or "soporte" in t or "bracket" in t
     has_tv = any(k in t for k in ("tv","televisor","pantalla","smart tv","monitor","vesa"))
     return bool(has_core or ("soporte" in t and has_tv))
+
+def detect_water_sensor_intent(text: str) -> bool:
+    t = _normalize(text)
+    return any(k in t for k in SENSOR_WATER_SYNONYMS)
 
 def extract_inches(text: str):
     t = _normalize(text)
@@ -310,47 +314,40 @@ def extract_inches(text: str):
             return None
     return None
 
-def _looks_like_support_product(p: dict) -> bool:
-    blob = _normalize(" ".join([
-        p.get("title",""), p.get("type",""), p.get("vendor",""),
-        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or []),
-        p.get("body_html","") or ""
-    ]))
-    if any(bad in blob for bad in EXCLUDE_FOR_SUPPORT):
-        return False
-    keys = {"soporte","bracket","vesa","pared","techo","articulado","inclinable","esquinero","tv"}
-    return any(k in blob for k in keys)
-
-def _compatible_with_inches_local(p: dict, target: int) -> bool:
-    if not target:
-        return True
-    blob = _normalize(" ".join([
-        p.get("title",""), p.get("body_html","") or "",
-        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or [])
-    ]))
-    # rangos 32-70 / 26–55
-    for m in re.finditer(r'(\d{2,3})\s*[-–]\s*(\d{2,3})', blob):
-        a, b = int(m.group(1)), int(m.group(2))
-        if a <= target <= b:
-            return True
-    # "hasta 70"
-    for m in re.finditer(r'(?:hasta|max(?:imo)?)\s+(\d{2,3})', blob):
-        if target <= int(m.group(1)):
-            return True
-    # valores sueltos “para 45”
-    for m in re.finditer(r'(?:para|de)\s+(\d{2,3})\s*(?:["”]|pulg|pulgadas|in)?\b', blob):
-        if target == int(m.group(1)):
-            return True
-    # si no declara, no descartamos
-    return True
-
 def filter_support_products_locally(items: list, inches: int | None) -> list:
+    # Conservador: esta versión local se mantiene para el fallback
+    def looks_like_support(p: dict) -> bool:
+        blob = _normalize(" ".join([
+            p.get("title",""), p.get("type",""), p.get("vendor",""),
+            p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or []),
+            p.get("body_html","") or ""
+        ]))
+        if any(b in blob for b in EXCLUDE_FOR_SUPPORT):
+            return False
+        keys = {"soporte","bracket","vesa","pared","techo","articulado","inclinable","esquinero","tv"}
+        return any(k in blob for k in keys)
+
+    def compatible_inches(p: dict, target: int) -> bool:
+        if not target:
+            return True
+        blob = _normalize(" ".join([p.get("title",""), p.get("body_html","") or "", p.get("tags","") if isinstance(p.get("tags"), str) else ""]))
+        for m in re.finditer(r'(\d{2,3})\s*[-–]\s*(\d{2,3})', blob):
+            a, b = int(m.group(1)), int(m.group(2))
+            if a <= target <= b:
+                return True
+        for m in re.finditer(r'(?:hasta|max(?:imo)?)\s+(\d{2,3})', blob):
+            if target <= int(m.group(1)):
+                return True
+        for m in re.finditer(r'(?:para|de)\s+(\d{2,3})\s*(?:["”]|pulg|pulgadas|in)?\b', blob):
+            if target == int(m.group(1)):
+                return True
+        return True
+
     out = []
     for p in items:
-        if not _looks_like_support_product(p):
+        if not looks_like_support(p):
             continue
-        if inches and not _compatible_with_inches_local(p, inches):
-            # si parece incompatible, lo descartamos
+        if inches and not compatible_inches(p, inches):
             continue
         out.append(p)
     return out
@@ -374,52 +371,67 @@ def chat():
         if not user_message:
             return jsonify({"success": False, "error": "Mensaje vacío"}), 400
 
-        # --- Detección de intención SOPORTE / pulgadas ---
+        # --- Intención por uso/característica ---
         is_support = detect_support_intent(user_message)
-        inches = extract_inches(user_message)
+        is_water   = detect_water_sensor_intent(user_message)
+        inches     = extract_inches(user_message)
 
-        # 1) Búsqueda por integración (con require_photo)
+        # 1) Búsqueda por integración
         keywords = extract_keywords_from_text(user_message)
-        print(f"[DEBUG] Keywords: {keywords} | Origin: {origin} | intent_support={is_support} | inches={inches}")
+        print(f"[DEBUG] Keywords: {keywords} | Origin: {origin} | intent_support={is_support} | intent_water={is_water} | inches={inches}")
 
         encontrados = []
 
-        # Si la intención es SOPORTE, intentamos pasar filtros avanzados a la integración.
-        if is_support:
-            try:
+        try:
+            if is_support:
+                # Filtros para SOPORTES
                 encontrados = get_shopify_products(
                     user_message,
                     origin=origin,
                     require_photo=True,
-                    # kwargs opcionales (si tu integración los soporta, se aplican)
                     must_include=list(SUPPORT_SYNONYMS),
                     must_match_any_of=[
                         "product_type:soporte","product_type:bracket",
-                        "collection:soportes","tag:soporte","tag:bracket"
+                        "tag:soporte","tag:bracket"
                     ],
                     exclude=list(EXCLUDE_FOR_SUPPORT),
                     prefer_in_stock=True,
                     inches_target=inches,
-                    min_score=0.35
+                    min_score=0.35,
+                    category_hint="support"
                 )
-                print("[DEBUG] get_shopify_products con filtros avanzados aplicado.")
-            except TypeError:
-                # Integración no soporta kwargs: caemos a keywords y filtrado local
-                print("[WARN] Integración no soporta kwargs avanzados; usando keywords + filtro local.")
+            elif is_water:
+                # Filtros para SENSORES DE AGUA
+                encontrados = get_shopify_products(
+                    user_message,
+                    origin=origin,
+                    require_photo=True,
+                    must_include=list(SENSOR_WATER_SYNONYMS),
+                    must_match_any_of=[
+                        "product_type:sensor","tag:sensor","tag:agua","tag:tinaco","tag:cisterna"
+                    ],
+                    exclude=list(EXCLUDE_FOR_WATER),
+                    prefer_in_stock=True,
+                    min_score=0.30,
+                    category_hint="sensor_water"
+                )
+            else:
+                # flujo normal sin intención específica
                 for kw in keywords:
                     try:
                         encontrados.extend(get_shopify_products(kw, origin=origin, require_photo=True))
                     except Exception as e:
                         print(f"[WARN] get_shopify_products('{kw}') falló: {e}")
-                # filtro local a soportes
-                encontrados = filter_support_products_locally(encontrados, inches)
-        else:
-            # flujo normal sin intención específica
+        except TypeError:
+            # Integración antigua: usamos keywords + filtros locales (solo soporte)
+            print("[WARN] Integración sin kwargs avanzados; cayendo a keywords + filtros locales.")
             for kw in keywords:
                 try:
                     encontrados.extend(get_shopify_products(kw, origin=origin, require_photo=True))
                 except Exception as e:
                     print(f"[WARN] get_shopify_products('{kw}') falló: {e}")
+            if is_support:
+                encontrados = filter_support_products_locally(encontrados, inches)
 
         productos = []
         for p in encontrados:
@@ -452,9 +464,14 @@ def chat():
                 collect_max=COLLECT_MAX,
                 max_pages=MAX_PAGES
             )
-            # Si la intención es SOPORTE, aplicar filtro local sobre el fallback
             if is_support and productos:
                 productos = filter_support_products_locally(productos, inches)
+            if is_water and productos:
+                # filtro ligero por palabras clave de agua
+                blob_keys = {k for k in SENSOR_WATER_SYNONYMS}
+                productos = [p for p in productos if any(_normalize(k) in _normalize(
+                    (p.get("title","")+" "+p.get("body_html","")+" "+(p.get("tags","") or ""))
+                ) for k in blob_keys)]
 
         if not productos:
             meta = {"domain": origin or "desconocido", "ip": request.remote_addr}
@@ -467,8 +484,7 @@ def chat():
             })
 
         # Evitar duplicados por título
-        vistos = set()
-        unicos = []
+        vistos, unicos = set(), []
         for p in productos:
             t = p.get("title") or ""
             if t not in vistos:
@@ -557,10 +573,6 @@ def debug_products():
 
 @app.route("/debug/raw", methods=["GET"])
 def debug_products_raw():
-    """
-    Diagnóstico crudo paginado: sólo aplica filtro de foto; no hace match de texto.
-    Parámetro opcional: limit_total (por defecto COLLECT_MAX*2)
-    """
     try:
         origin = request.headers.get("Origin", "")
         try:
