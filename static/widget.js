@@ -14,7 +14,7 @@
     style.textContent = `
       #chatbot-bubble {
         position: fixed;
-        right: 18px;
+        left: 18px;
         bottom: 18px;
         z-index: 2147483646;
         display: inline-flex;
@@ -33,7 +33,7 @@
 
       #chatbot-window {
         position: fixed;
-        right: 18px;
+        left: 18px;
         bottom: 78px;
         width: 380px;
         max-height: 70vh;
