@@ -71,6 +71,80 @@
     `;
     document.head.appendChild(style);
 
+    // —— Overrides de layout para que la descripción use el ancho completo ——
+    (function injectMaxterLayoutOverrides(){
+      if (document.getElementById("maxter-overrides-anchos-20250815")) return;
+      const s = document.createElement("style");
+      s.id = "maxter-overrides-anchos-20250815";
+      s.textContent = `
+        /* Escopo: solo dentro de respuestas ricas del bot */
+        .msg.bot .rich { max-width: 100%; }
+
+        /* Card de producto: imagen + contenido fluido en 2 columnas */
+        .msg.bot .rich .mx-product-card,
+        .msg.bot .rich .product-card,
+        .msg.bot .rich [data-maxter-card]{
+          display: grid !important;
+          grid-template-columns: 80px 1fr !important; /* thumb + columna amplia */
+          gap: 12px !important;
+          align-items: start !important;
+        }
+
+        /* Título y descripción ocupan la columna ancha */
+        .msg.bot .rich .mx-product-title,
+        .msg.bot .rich .mx-product-description,
+        .msg.bot .rich .product-title,
+        .msg.bot .rich .product-description{
+          grid-column: 2 / -1 !important;
+          max-width: 100% !important;
+          white-space: normal !important;
+          overflow-wrap: anywhere !important;
+        }
+
+        /* Acciones (precio, botón, "Manual de producto") se envuelven y no estrechan texto */
+        .msg.bot .rich .mx-product-actions,
+        .msg.bot .rich .product-actions,
+        .msg.bot .rich .actions{
+          grid-column: 2 / -1 !important;
+          display: flex !important;
+          gap: 8px !important;
+          flex-wrap: wrap !important;
+          width: 100% !important;
+        }
+
+        /* Columnas/metros laterales no deben imponer anchos rígidos */
+        .msg.bot .rich .mx-product-right,
+        .msg.bot .rich .mx-product-meta,
+        .msg.bot .rich .product-right,
+        .msg.bot .rich .product-meta{
+          width: auto !important;
+          max-width: 100% !important;
+          flex: 1 1 auto !important;
+        }
+
+        /* Inventario o listados dentro del card deben romper línea adecuadamente */
+        .msg.bot .rich .mx-inventory,
+        .msg.bot .rich .inventory,
+        .msg.bot .rich ul,
+        .msg.bot .rich ol{
+          max-width: 100% !important;
+          overflow-wrap: anywhere !important;
+          white-space: normal !important;
+        }
+
+        /* Responsive fino dentro del widget */
+        @media (max-width: 480px){
+          .msg.bot .rich .mx-product-card,
+          .msg.bot .rich .product-card,
+          .msg.bot .rich [data-maxter-card]{
+            grid-template-columns: 60px 1fr !important;
+            gap: 10px !important;
+          }
+        }
+      `;
+      document.head.appendChild(s);
+    })();
+
     // —— Burbuja ——
     const bubble = document.createElement("div");
     bubble.id = "chatbot-bubble";
@@ -215,3 +289,5 @@
     init();
   }
 })();
+
+
