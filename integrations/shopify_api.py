@@ -1,82 +1,270 @@
 import os
 import re
+import html
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
 from flask import request
-from typing import List, Dict, Any, Optional, Iterable
-import math
 
-# Tokens para cada tienda
-SHOPIFY_TOKEN_MX = os.getenv("SHOPIFY_TOKEN")               # master.mx
-SHOPIFY_TOKEN_COM_MX = os.getenv("SHOPIFY_TOKEN_MASTER")    # master.com.mx
+# ============================================================
+#   Shopify Admin configuration
+# ============================================================
 
-# Dominios internos de Shopify (admin)
-SHOPIFY_STORE_MX = "airb2bsafe-8329.myshopify.com"
-SHOPIFY_STORE_COM_MX = "master-electronicos.myshopify.com"
+API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-04")
 
-API_VERSION = "2024-04"
+SHOPIFY_TOKEN_MX = os.getenv("SHOPIFY_TOKEN", "")
+SHOPIFY_TOKEN_MASTER = os.getenv("SHOPIFY_TOKEN_MASTER", "")
+
+SHOPIFY_STORE_MX = os.getenv("SHOPIFY_STORE_MX", "airb2bsafe-8329.myshopify.com")
+SHOPIFY_STORE_MASTER = os.getenv("SHOPIFY_STORE_MASTER", "master-electronicos.myshopify.com")
 
 
-# ================
-#   GraphQL helpers
-# ================
-def _graphql(store: str, headers: dict, query: str, variables: dict):
+# ============================================================
+#   Helpers
+# ============================================================
+
+_WS = re.compile(r"\s+", re.UNICODE)
+
+def _norm(s: Optional[str]) -> str:
+    s = html.unescape(s or "")
+    s = re.sub(r"<[^>]+>", " ", s)
+    return _WS.sub(" ", s).strip()
+
+def _tokens(s: str) -> List[str]:
+    return [t.lower() for t in re.findall(r"[a-z0-9áéíóúüñ]+", _norm(s), flags=re.IGNORECASE)]
+
+def _extract_numeric_gid(gid_or_num: Any) -> str:
+    m = re.search(r"(\d+)$", str(gid_or_num or ""))
+    return m.group(1) if m else str(gid_or_num or "")
+
+def _public_domain_for_store(store: str) -> str:
+    return "master.com.mx" if store == SHOPIFY_STORE_MASTER else "master.mx"
+
+
+def get_shopify_context(origin: Optional[str] = None) -> Tuple[str, Dict[str, str]]:
+    """
+    Decide store & token from request Origin.
+    Defaults to master.com.mx catalog.
+    """
+    if not origin and request:
+        origin = request.headers.get("Origin", "")
+
+    if origin and "master.mx" in origin and "master.com.mx" not in origin:
+        store = SHOPIFY_STORE_MX
+        token = SHOPIFY_TOKEN_MX or SHOPIFY_TOKEN_MASTER
+    else:
+        store = SHOPIFY_STORE_MASTER
+        token = SHOPIFY_TOKEN_MASTER or SHOPIFY_TOKEN_MX
+
+    if not token:
+        raise RuntimeError("Falta token de Shopify. Configura SHOPIFY_TOKEN_MASTER o SHOPIFY_TOKEN.")
+
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    return store, headers
+
+
+# ============================================================
+#   REST fallbacks
+# ============================================================
+
+def get_products(limit: int = 20, origin: Optional[str] = None, require_photo: bool = True) -> List[Dict[str, Any]]:
+    store, headers = get_shopify_context(origin)
+    url = f"https://{store}/admin/api/{API_VERSION}/products.json?limit={int(limit)}&status=active&published_status=published"
+    r = requests.get(url, headers=headers, timeout=20)
+    items = (r.json() or {}).get("products") or []
+
+    out: List[Dict[str, Any]] = []
+    for p in items:
+        image = ""
+        if isinstance(p.get("image"), dict):
+            image = p["image"].get("src") or p["image"].get("url") or ""
+        if not image:
+            imgs = p.get("images") or []
+            if imgs and isinstance(imgs, list) and isinstance(imgs[0], dict):
+                image = imgs[0].get("src") or imgs[0].get("url") or ""
+        if require_photo and not image:
+            continue
+
+        v = (p.get("variants") or [{}])[0] if isinstance(p.get("variants"), list) and p["variants"] else {}
+        price = v.get("price") or v.get("compare_at_price") or "N/A"
+
+        out.append({
+            "id": p.get("id"),
+            "title": p.get("title") or "",
+            "type": p.get("product_type") or "",
+            "price": price if isinstance(price, str) else str(price),
+            "image": image,
+            "link": f"https://{_public_domain_for_store(store)}/products/{p.get('handle') or ''}",
+            "body_html": p.get("body_html") or "",
+            "sku": v.get("sku") or "",
+            "vendor": p.get("vendor") or "",
+            "tags": p.get("tags") or [],
+            "variant_id": _extract_numeric_gid(v.get("id") or ""),
+            "handle": p.get("handle") or "",
+            "_in_stock": bool(v.get("inventory_quantity")) and int(v.get("inventory_quantity", 0)) > 0
+        })
+    return out
+
+
+def get_product_details(product_id: str, origin: Optional[str] = None) -> Dict[str, Any]:
+    store, headers = get_shopify_context(origin)
+    url = f"https://{store}/admin/api/{API_VERSION}/products/{product_id}.json"
+    r = requests.get(url, headers=headers, timeout=20)
+    r.raise_for_status()
+    return (r.json() or {}).get("product") or {}
+
+
+def get_inventory_by_variant_id(variant_id: str, origin: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Return inventory per location for a given variant id (gid or numeric).
+    """
+    store, headers = get_shopify_context(origin)
+    var_id = _extract_numeric_gid(variant_id)
+
+    v_url = f"https://{store}/admin/api/{API_VERSION}/variants/{var_id}.json"
+    rv = requests.get(v_url, headers=headers, timeout=20)
+    rv.raise_for_status()
+    variant = (rv.json() or {}).get("variant") or {}
+    inv_item_id = variant.get("inventory_item_id")
+    if not inv_item_id:
+        return []
+
+    lv_url = f"https://{store}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_ids={inv_item_id}"
+    rl = requests.get(lv_url, headers=headers, timeout=20)
+    rl.raise_for_status()
+    levels = (rl.json() or {}).get("inventory_levels") or []
+
+    # Fetch locations names
+    names = {}
+    try:
+        locs = requests.get(f"https://{store}/admin/api/{API_VERSION}/locations.json?limit=250",
+                            headers=headers, timeout=20).json().get("locations") or []
+        for loc in locs:
+            names[loc.get("id")] = loc.get("name")
+    except Exception:
+        pass
+
+    out: List[Dict[str, Any]] = []
+    for lv in levels:
+        lid = lv.get("location_id")
+        qty = lv.get("available", 0)
+        try:
+            qty = int(qty)
+        except Exception:
+            qty = 0
+        out.append({"sucursal": names.get(lid, f"Loc {lid}"), "cantidad": qty})
+    return out
+
+
+# ============================================================
+#   GraphQL Admin search
+# ============================================================
+
+def _graphql(store: str, headers: Dict[str, str], query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     url = f"https://{store}/admin/api/{API_VERSION}/graphql.json"
     resp = requests.post(url, headers=headers, json={"query": query, "variables": variables}, timeout=25)
     if resp.status_code != 200:
         raise RuntimeError(f"GraphQL {resp.status_code}: {resp.text[:200]}")
     data = resp.json()
     if "errors" in data:
-        raise RuntimeError(f"GraphQL errors: {data.get('errors')}")
+        raise RuntimeError(f"GraphQL errors: {data['errors']}")
     return data.get("data") or {}
 
-def _build_admin_query(keyword: str) -> str:
-    """
-    Construye la query de Shopify Admin con sinónimos y extracción de pulgadas/VESA/SKU.
-    """
-    text = (keyword or "").lower()
+SUPPORT_NEGATIVE_WORDS = {
+    "amplificador","booster","cable","antena","adaptador","conversor","displayport","vga","hdmi","splitter",
+    "extensor","switch","conmutador","sintonizador","decodificador","tuner","bocina","bafle",
+}
 
-    # sinónimos básicos
-    synonyms = {
-        "soporte": ["soporte", "bracket", "mount", "montaje", "brackets"],
-        "pantalla": ["pantalla", "tv", "televisor", "televisión", "monitor"],
+SUPPORT_POSITIVE_WORDS = {
+    "soporte","bracket","montaje","montura","holder","vesa","pared","techo","articulado","inclinable","esquinero","tv","pantalla","monitor"
+}
+
+TARGET_COLLECTIONS = {"soportes para tv","video y tv","ofertas relámpago","ofertas relampago"}
+
+def _build_admin_query(keyword: str, extra: Optional[List[str]] = None) -> str:
+    toks = _tokens(keyword)
+    # expand synonyms quickly
+    if "bracket" in toks or "montaje" in toks or "montura" in toks:
+        toks.append("soporte")
+    if "tv" in toks or "televisor" in toks or "pantalla" in toks:
+        toks.append("pantalla")
+
+    ors = []
+    for t in toks:
+        t = re.sub(r'([":])', r"\\\1", t)
+        ors.append(f'(title:{t}* OR sku:{t}* OR tag:{t}* OR product_type:{t}* OR vendor:{t}* OR body:{t}*)')
+
+    # inches
+    for m in re.finditer(r"(\d{2,3})\s*(?:\"|pulg|pulgadas|in)\b", keyword.lower()):
+        n = m.group(1)
+        ors.append(f'(title:{n}* OR body:{n}* OR tag:{n}*)')
+
+    # vesa patterns
+    for m in re.finditer(r"(\d{2,4})\s*[xX]\s*(\d{2,4})", keyword):
+        pat = f"{m.group(1)}x{m.group(2)}"
+        ors.append(f'(title:{pat} OR body:{pat} OR tag:{pat})')
+
+    q = ["status:active"]
+    if ors:
+        q.append("(" + " AND ".join(ors) + ")")
+
+    if extra:
+        # raw clauses (already admin syntax)
+        q.append("(" + " OR ".join(extra) + ")")
+
+    return " AND ".join(q)
+
+def _product_node_to_card(n: Dict[str, Any], public_domain: str) -> Dict[str, Any]:
+    # image
+    image = ""
+    if n.get("featuredImage"):
+        image = n["featuredImage"].get("url") or ""
+    if not image:
+        edges = ((n.get("images") or {}).get("edges")) or []
+        if edges:
+            image = (edges[0].get("node") or {}).get("url") or ""
+
+    # variant
+    v_edges = ((n.get("variants") or {}).get("edges")) or []
+    v0 = v_edges[0].get("node") if v_edges else {}
+    raw_price = v0.get("price")
+    price = raw_price.get("amount") if isinstance(raw_price, dict) else (str(raw_price) if raw_price is not None else "N/A")
+    sku = v0.get("sku") or ""
+    variant_id = _extract_numeric_gid(v0.get("id") or "")
+
+    collections = []
+    c_edges = ((n.get("collections") or {}).get("edges")) or []
+    for e in c_edges:
+        c = e.get("node") or {}
+        title = (c.get("title") or "").strip()
+        if title:
+            collections.append(title)
+
+    handle = n.get("handle") or ""
+    link = f"https://{public_domain}/products/{handle}" if handle else f"https://{public_domain}"
+
+    return {
+        "id": n.get("id"),
+        "title": n.get("title") or "",
+        "type": n.get("productType") or "",
+        "price": price or "N/A",
+        "image": image,
+        "link": link,
+        "body_html": n.get("descriptionHtml") or n.get("description") or "",
+        "sku": sku,
+        "vendor": n.get("vendor") or "",
+        "tags": n.get("tags") or [],
+        "variant_id": variant_id,
+        "handle": handle,
+        "_in_stock": True if v0.get("availableForSale") else False,
+        "_collections": collections,
     }
 
-    tokens = set(re.findall(r"[a-z0-9]+", text))
-    for key, syns in synonyms.items():
-        if any(s in text for s in syns):
-            tokens.add(key)
-
-    clauses = ["status:active"]
-
-    # SKU explícito
-    msku = re.findall(r"\b[A-Z0-9]{3,}(?:[-_][A-Z0-9]+)+\b", (keyword or "").upper())
-    if msku:
-        sku = msku[0]
-        clauses.append(f"(sku:{sku}*)")
-
-    # pulgadas
-    minch = re.findall(r"(\d{2,3})\s*(?:pulg|pulgadas|pulgada|in|\")", text)
-    if minch:
-        n = minch[0]
-        clauses.append(f"(title:{n}* OR body:{n}* OR tag:{n}*)")
-
-    # VESA (e.g., 600x400)
-    mvesa = re.findall(r"(\d{2,4})\s*[xX]\s*(\d{2,4})", text)
-    if mvesa:
-        a,b = mvesa[0]
-        pat = f"{a}x{b}"
-        clauses.append(f"(title:{pat} OR body:{pat} OR tag:{pat})")
-
-    # palabras generales
-    if tokens:
-        ors = []
-        for t in sorted(tokens):
-            ors.append(f"(title:{t}* OR sku:{t}* OR tag:{t}* OR product_type:{t}* OR vendor:{t}* OR body:{t}*)")
-        clauses.append("(" + " AND ".join(ors) + ")")
-
-    return " AND ".join(clauses)
-
-def _graphql_product_search(store: str, headers: dict, query: str, limit: int = 40):
+def _graphql_product_search(store: str, headers: Dict[str,str], query: str, first: int = 80) -> List[Dict[str, Any]]:
     gql = """
     query($first:Int!, $query:String!) {
       products(first: $first, query: $query) {
@@ -89,558 +277,184 @@ def _graphql_product_search(store: str, headers: dict, query: str, limit: int = 
             productType
             tags
             status
-            featuredImage { url altText }
-            images(first: 3) { edges { node { url altText } } }
+            featuredImage { url }
+            images(first: 3) { edges { node { url } } }
             descriptionHtml
             variants(first: 25) {
-              edges {
-                node {
-                  id
-                  title
-                  sku
-                  availableForSale
-                  price
-                }
-              }
+              edges { node { id title sku availableForSale price } }
+            }
+            collections(first: 10) {
+              edges { node { id title handle } }
             }
           }
         }
       }
     }
     """
-    data = _graphql(store, headers, gql, {"first": int(limit), "query": query})
+    data = _graphql(store, headers, gql, {"first": int(first), "query": query})
     edges = (((data.get("products") or {}).get("edges")) or [])
-    nodes = [e.get("node") for e in edges if isinstance(e, dict)]
-    return nodes
-
-def _node_to_card(node: dict, store_public: str) -> dict:
-    # image url
-    img = ""
-    if node.get("featuredImage"):
-        img = node["featuredImage"].get("url") or ""
-    if not img:
-        edges = ((node.get("images") or {}).get("edges")) or []
-        if edges:
-            img = (edges[0].get("node") or {}).get("url") or ""
-
-    # first variant
-    v_edges = ((node.get("variants") or {}).get("edges")) or []
-    v0 = v_edges[0].get("node") if v_edges else {}
-    raw_price = v0.get("price")
-    price = raw_price.get("amount") if isinstance(raw_price, dict) else (str(raw_price) if raw_price is not None else "N/A")
-    sku = v0.get("sku") or ""
-    # variant id numeric
-    m = re.search(r"(\d+)$", str(v0.get("id") or ""))
-    variant_id = m.group(1) if m else v0.get("id") or ""
-
-    handle = node.get("handle") or ""
-    link = f"https://{store_public}/products/{handle}" if handle else f"https://{store_public}"
-
-    return {
-        "id": node.get("id"),
-        "title": node.get("title") or "",
-        "type": node.get("productType") or "",
-        "price": price or "N/A",
-        "image": img,
-        "link": link,
-        "body_html": node.get("descriptionHtml") or "",
-        "variant_id": variant_id,
-        "sku": sku,
-        "vendor": node.get("vendor") or "",
-        "tags": node.get("tags") or [],
-        "handle": handle,
-        "_in_stock": True if v0.get("availableForSale") is True else False
-    }
+    return [e.get("node") for e in edges if isinstance(e, dict)]
 
 
-# ============================
-#   Contexto Shopify
-# ============================
+# ============================================================
+#   Public API
+# ============================================================
 
-def get_shopify_context(origin=None):
-    """
-    Detecta el dominio y retorna (store, headers) correctos según Origin.
-    """
-    if not origin:
-        origin = request.headers.get("Origin", "")
-
-    if "master.com.mx" in (origin or ""):
-        token = SHOPIFY_TOKEN_COM_MX
-        store = SHOPIFY_STORE_COM_MX
-        print("[DEBUG] Context: master.com.mx → SHOPIFY_TOKEN_MASTER, master-electronicos")
-    else:
-        token = SHOPIFY_TOKEN_MX
-        store = SHOPIFY_STORE_MX
-        print("[DEBUG] Context: master.mx → SHOPIFY_TOKEN, airb2bsafe-8329")
-
-    headers = {
-        "X-Shopify-Access-Token": token,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    return store, headers
-
-
-# ============================
-#   Utilidades varias
-# ============================
-
-def _norm(s: str) -> str:
-    s = s or ""
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip().lower()
-
-def _tokenize(s: str) -> set:
-    s = _norm(s)
-    toks = re.findall(r"[a-z0-9]+", s)
-    return set(t for t in toks if len(t) > 1)
-
-def _overlap(a: set, b: set) -> float:
-    if not a or not b:
-        return 0.0
-    inter = len(a & b)
-    return inter / math.sqrt(len(a) * len(b))
-
-def _choose_image_src(product: dict) -> str:
-    image_obj = product.get("image")
-    if isinstance(image_obj, dict):
-        src = image_obj.get("src") or image_obj.get("url") 
-        if src:
-            return src
-    images = product.get("images") or []
-    if isinstance(images, list) and images:
-        for img in images:
-            if isinstance(img, dict):
-                src = img.get("src") or img.get("url") or ""
-                if src:
-                    return src
-    return ""
-
-def _has_photo(product: dict) -> bool:
-    return bool(_choose_image_src(product))
-
-def _safe_first_variant(product: dict) -> dict:
-    variants = product.get("variants") or []
-    return variants[0] if variants else {}
-
-def _map_product(rest_product: dict, store: str) -> dict:
-    """
-    Normaliza REST → forma que espera el frontend.
-    """
-    v = _safe_first_variant(rest_product)
-    handle = rest_product.get("handle") or ""
-    # Dominio público para el enlace
-    public = "master.com.mx" if store == SHOPIFY_STORE_COM_MX else "master.mx"
-    return {
-        "id": rest_product.get("id"),
-        "title": rest_product.get("title") or "",
-        "type": rest_product.get("product_type") or "",
-        "price": v.get("price") or v.get("compare_at_price") or "N/A",
-        "image": _choose_image_src(rest_product) or "",
-        "link": f"https://{public}/products/{handle}" if handle else f"https://{public}",
-        "body_html": rest_product.get("body_html") or "",
-        "variant_id": v.get("id") or "",
-        "sku": v.get("sku") or "",
-        "vendor": rest_product.get("vendor") or "",
-        "tags": rest_product.get("tags") or "",
-        "handle": handle,
-        "_in_stock": (isinstance(v.get("inventory_quantity"), int) and v.get("inventory_quantity") > 0)
-    }
-
-def _fetch_products_multi(store: str, headers: dict, limit: int = 50):
-    candidate_urls = [
-        f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}",
-        f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}&status=any",
-        f"https://{store}/admin/api/{API_VERSION}/products.json?limit={limit}&published_status=any",
-    ]
-    for url in candidate_urls:
-        try:
-            resp = requests.get(url, headers=headers, timeout=20)
-            if resp.status_code != 200:
-                print(f"[WARN] {url} → {resp.status_code}")
-                continue
-            raw = (resp.json() or {}).get("products") or []
-            if raw:
-                print(f"[DEBUG] {url} → {len(raw)} productos")
-                return raw
-            else:
-                print(f"[DEBUG] {url} → 0 productos")
-        except Exception as e:
-            print(f"[ERROR] fetch {url}: {e}")
-    return []
-
-
-# ============================
-#   API básica (retrocompatible)
-# ============================
-
-def get_products(limit=10, origin=None, require_photo=False):
-    store, headers = get_shopify_context(origin)
-    try:
-        raw = _fetch_products_multi(store, headers, limit=max(10, int(limit)))
-        if not raw:
-            return []
-        out = []
-        for rp in raw:
-            if require_photo and not _has_photo(rp):
-                continue
-            out.append(_map_product(rp, store))
-        return out[:int(limit)]
-    except Exception as e:
-        print(f"[❌ Error en get_products] {e}")
-        return []
-
-def _simple_keyword_match(keyword: str, origin=None, require_photo=False):
-    """
-    Modo simple: usa una página de productos y hace matching local.
-    (Solo como fallback si GraphQL no está disponible).
-    """
-    store, headers = get_shopify_context(origin)
-    raw = _fetch_products_multi(store, headers, limit=200)
-    if not raw:
-        return []
-    mapped = []
-    for p in raw:
-        if require_photo and not _has_photo(p):
-            continue
-        mapped.append(_map_product(p, store))
-
-    # matching local
-    keyword = (keyword or "").lower().strip()
-    if not keyword:
-        return mapped[:20]
-
-    encontrados = []
-    for p in mapped:
-        title = (p.get("title") or "").lower()
-        body = (p.get("body_html") or "").lower()
-        sku  = (p.get("sku") or "").lower()
-        vendor = (p.get("vendor") or "").lower()
-        tags = (p.get("tags") or "")
-        if isinstance(tags, list):
-            tags = " ".join(tags)
-        tags = str(tags).lower()
-        ptype = (p.get("type") or "").lower()
-        handle = (p.get("handle") or "").lower()
-
-        if any([
-            keyword in title,
-            keyword in body,
-            keyword in sku,
-            keyword in vendor,
-            keyword in tags,
-            keyword in ptype,
-            keyword in handle
-        ]):
-            encontrados.append({
-                "id": p.get("id"),
-                "title": p.get("title"),
-                "type": p.get("type"),
-                "price": p.get("price"),
-                "image": p.get("image"),
-                "link": p.get("link"),
-                "body_html": p.get("body_html"),
-                "variant_id": p.get("variant_id"),
-                "sku": p.get("sku"),
-                "vendor": p.get("vendor"),
-                "tags": p.get("tags"),
-                "handle": p.get("handle"),
-            })
-
-    print(f"[DEBUG] Coincidencias para '{keyword}' (require_photo={require_photo}): {len(encontrados)}")
-    return encontrados
-
-
-# ============================
-#   Heurísticas de categorías
-# ============================
-
-def _looks_like_support(p: Dict[str, Any]) -> bool:
-    t = _norm(" ".join([
-        p.get("title",""),
-        p.get("type",""),
-        p.get("vendor",""),
-        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or [])
-    ]))
-    keys = {"soporte","bracket","tv","vesa","pared","techo","articulado","inclinable","esquinero"}
-    bad  = {"antena","adaptador","cable","hdmi","displayport","vga","decodificador","sintonizador","conversor"}
-    if any(b in t for b in bad):
-        return False
-    return any(k in t for k in keys)
-
-def _looks_like_sensor_water(p: Dict[str, Any]) -> bool:
-    t = _norm(" ".join([
-        p.get("title",""),
-        p.get("type",""),
-        p.get("vendor",""),
-        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or [])
-    ]))
-    keys = {"sensor","agua","tinaco","cisterna","nivel","bluetooth","conect","iot","water"}
-    return any(k in t for k in keys)
-
-def _looks_like_category(p: Dict[str, Any], hint: Optional[str]) -> bool:
-    if not hint:
-        return True
-    if hint == "support":
-        return _looks_like_support(p)
-    if hint == "sensor_water":
-        return _looks_like_sensor_water(p)
-    return True
-
-def _matches_all_meta(p: Dict[str, Any], tokens: List[str]) -> bool:
-    if not tokens:
-        return True
-    blob = _norm(" ".join([
-        p.get("title",""),
-        p.get("type",""),
-        p.get("vendor",""),
-        p.get("sku",""),
-        p.get("handle",""),
-        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or []),
-        p.get("body_html","") or ""
-    ]))
-    return all(t.lower() in blob for t in tokens)
-
-def _matches_any_meta(p: Dict[str, Any], raw_clauses: List[str]) -> bool:
-    if not raw_clauses:
-        return True
-    blob = _norm(" ".join([
-        p.get("title",""),
-        p.get("type",""),
-        p.get("vendor",""),
-        p.get("sku",""),
-        p.get("handle",""),
-        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or []),
-        p.get("body_html","") or ""
-    ]))
-    # cada item en raw_clauses lo tratamos como un fragmento a buscar
-    for clause in raw_clauses:
-        clause = clause.strip().lower()
-        if not clause:
-            continue
-        # si hay "x*y" tipo 600x400, solo busca literal
-        if clause in blob:
+def _is_support_intent(text: str) -> bool:
+    t = _norm(text).lower()
+    if any(w in t for w in SUPPORT_POSITIVE_WORDS):
+        if not any(b in t for b in SUPPORT_NEGATIVE_WORDS):
             return True
+    # ask for VESA or inches implies support intent
+    if re.search(r"\bvesa\b", t) or re.search(r"\d{2,3}\s*(?:\"|pulg|pulgadas|in)\b", t):
+        return True
     return False
 
-def _compatible_with_inches(p: Dict[str, Any], inches: int) -> bool:
-    """
-    Regla simple: si el producto menciona N pulgadas y N >= inches.
-    """
-    blob = _norm(" ".join([p.get("title",""), p.get("body_html","") or "", p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or [])]))
-    # buscar 80, 80", 80 pulgadas
-    pats = [
-        rf"\b{inches}\b",
-        rf"\b{inches}\"",
-        rf"\b{inches}\s*(pulg|pulgadas|pulgada|in)\b"
-    ]
-    for pat in pats:
-        if re.search(pat, blob):
-            return True
-    return False
+def _boost_if_support(p: Dict[str, Any], query: str) -> float:
+    score = 0.0
+    text = " ".join([
+        _norm(p.get("title")),
+        _norm(p.get("body_html")),
+        " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]).lower(),
+        _norm(p.get("vendor")),
+        _norm(p.get("sku")),
+    ]).lower()
 
+    for t in set(_tokens(query)):
+        if t and t in (p.get("title","").lower()):
+            score += 3.0
+        if t and t in (p.get("sku","").lower()):
+            score += 4.0
+        if t and t in text:
+            score += 1.0
 
-# ============================
-#   Búsqueda avanzada local (retrocompatible)
-# ============================
+    # prefer supports
+    if any(w in text for w in SUPPORT_POSITIVE_WORDS):
+        score += 1.5
+    if any(w in text for w in SUPPORT_NEGATIVE_WORDS):
+        score -= 2.0
 
-def _search_with_filters(
-    query: str,
-    *,
-    origin: Optional[str] = None,
-    require_photo: bool = False,
-    must_include: Optional[List[str]] = None,
-    must_match_any_of: Optional[List[str]] = None,
-    exclude: Optional[List[str]] = None,
-    prefer_in_stock: bool = False,
-    inches_target: Optional[int] = None,
-    min_score: float = 0.25,
-    limit: int = 20,
-    category_hint: Optional[str] = None
-) -> List[Dict[str, Any]]:
-    store, headers = get_shopify_context(origin)
-    raw = _fetch_products_multi(store, headers, limit=200)
-    if not raw:
-        return []
+    # boost if belongs to desired collections
+    cols = [c.lower() for c in (p.get("_collections") or [])]
+    if any(c in TARGET_COLLECTIONS for c in cols):
+        score += 1.5
 
-    mapped = []
-    for rp in raw:
-        if require_photo and not _has_photo(rp):
-            continue
-        mapped.append(_map_product(rp, store))
+    # inches match / ranges
+    for m in re.finditer(r"(\d{2,3})\s*(?:\"|pulg|pulgadas|in)\b", query.lower()):
+        target = int(m.group(1))
+        blob = text
+        ok = False
+        # ranges like 32-80
+        for mm in re.finditer(r"(\d{2,3})\s*[-–]\s*(\d{2,3})", blob):
+            a, b = int(mm.group(1)), int(mm.group(2))
+            if a <= target <= b:
+                ok = True; break
+        # "hasta 80" or "max 80"
+        if not ok:
+            for mm in re.finditer(r"(?:hasta|max(?:imo)?)\s*(\d{2,3})", blob):
+                if target <= int(mm.group(1)):
+                    ok = True; break
+        # "para 80"
+        if not ok:
+            if re.search(rf"(?:para|de)\s*{target}\s*(?:\"|pulg|pulgadas|in)?\b", blob):
+                ok = True
+        if ok: score += 1.0
 
-    q_tokens = _tokenize(query)
-    results: List[Dict[str, Any]] = []
+    # vesa exact match boost
+    for m in re.finditer(r"(\d{2,4})\s*[xX]\s*(\d{2,4})", query):
+        pat = f"{m.group(1)}x{m.group(2)}"
+        if pat in text:
+            score += 1.2
 
-    for p in mapped:
-        meta_blob = " ".join([
-            p.get("title",""),
-            p.get("body_html","") or "",
-            p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or []),
-            p.get("type",""),
-            p.get("vendor",""),
-            p.get("sku",""),
-            p.get("handle",""),
-        ])
+    if p.get("_in_stock"):
+        score += 0.5
 
-        if exclude and any(x.lower() in meta_blob.lower() for x in exclude):
-            continue
+    return score
 
-        if must_include and not _matches_all_meta(p, must_include):
-            continue
-
-        if must_match_any_of and not _matches_any_meta(p, must_match_any_of):
-            if not _looks_like_category(p, category_hint):
-                continue
-
-        p_tokens = _tokenize(" ".join([p.get("title",""), p.get("tags",""), p.get("type",""), p.get("sku","")]))
-        score = _overlap(q_tokens, p_tokens)
-
-        if _looks_like_category(p, category_hint):
-            score += 0.2
-
-        if inches_target and category_hint == "support" and not _compatible_with_inches(p, inches_target):
-            score -= 0.3
-
-        if score < min_score:
-            if not (_looks_like_category(p, category_hint) and len(q_tokens) <= 2 and score >= (min_score - 0.15)):
-                continue
-
-        p["_rank_score"] = round(float(score), 4)
-        results.append(p)
-
-    if prefer_in_stock:
-        results.sort(key=lambda x: (0 if x.get("_in_stock") else 1, -x.get("_rank_score", 0.0)))
-    else:
-        results.sort(key=lambda x: -x.get("_rank_score", 0.0))
-
-    return results[:max(1, limit)]
-
-
-# ============================
-#   API pública
-# ============================
 
 def get_shopify_products(
     keyword: str = "",
     origin: Optional[str] = None,
-    require_photo: bool = False,
+    require_photo: bool = True,
     **kwargs
-):
+) -> List[Dict[str, Any]]:
     """
-    Búsqueda de alta precisión.
-    - Si hay keyword, usamos Admin GraphQL con query enriquecida (sinónimos, pulgadas, VESA, SKU).
-    - Si falla GraphQL, caemos al flujo previo.
-    - Retornamos en el formato que espera el frontend (image url string, price string, variant_id numérico).
+    Precise product search across 4k+ items with:
+      - Admin GraphQL search (title, sku, tag, product_type, vendor, body)
+      - Collections awareness (Soportes para TV, Video y TV, OFERTAS RELÁMPAGO)
+      - VESA and inches parsing
+      - Deterministic scoring; only items with image
+    Requires: read_products (and read_inventory/read_locations if you call inventory endpoints).
     """
-    advanced_keys = {
-        "must_include", "must_match_any_of", "exclude",
-        "prefer_in_stock", "inches_target", "min_score", "limit", "category_hint"
-    }
-
     store, headers = get_shopify_context(origin)
-    public_domain = "master.com.mx" if store == SHOPIFY_STORE_COM_MX else "master.mx"
+    public_domain = _public_domain_for_store(store)
 
-    # 1) GraphQL when keyword provided
-    if (keyword or "").strip():
-        try:
-            q = _build_admin_query(keyword)
-            nodes = _graphql_product_search(store, headers, q, limit=int(kwargs.get("limit", 40)))
-            products = [_node_to_card(n, public_domain) for n in nodes]
-            if require_photo:
-                products = [p for p in products if p.get("image")]
-            # Simple scoring by token overlap with keyword and synonyms
-            qtok = set(re.findall(r"[a-z0-9]+", (keyword or "").lower()))
-            def sc(p):
-                hay = " ".join([
-                    str(p.get("title","")).lower(),
-                    str(p.get("sku","")).lower(),
-                    str(p.get("vendor","")).lower(),
-                    " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]).lower(),
-                    str(p.get("body_html","")).lower(),
-                ])
-                s=0.0
-                for t in qtok:
-                    if t in p.get("title","").lower(): s+=3
-                    if t and t in p.get("sku","").lower(): s+=4
-                    if t in hay: s+=1
-                if p.get("_in_stock"): s+=0.5
-                return -s
-            products.sort(key=sc)
-            limit = int(kwargs.get("limit", 20))
-            return products[:limit]
-        except Exception as e:
-            print(f"[WARN] GraphQL search failed: {e}. Falling back to legacy search.")
+    # Build admin query
+    extra = []
+    # If intent is support, bias query with extra raw terms that help Shopify search
+    if _is_support_intent(keyword):
+        extra.append('(tag:soporte OR product_type:soporte OR title:soporte*)')
 
-    # 2) Legacy behavior (retrocompatible)
-    if any(k in kwargs for k in advanced_keys):
-        return _search_with_filters(
-            query=keyword or "",
-            origin=origin,
-            require_photo=require_photo,
-            must_include=kwargs.get("must_include"),
-            must_match_any_of=kwargs.get("must_match_any_of"),
-            exclude=kwargs.get("exclude"),
-            prefer_in_stock=kwargs.get("prefer_in_stock", False),
-            inches_target=kwargs.get("inches_target"),
-            min_score=float(kwargs.get("min_score", 0.25)),
-            limit=int(kwargs.get("limit", 20)),
-            category_hint=kwargs.get("category_hint")
-        )
+    base_query = _build_admin_query(keyword, extra=extra)
 
-    # default simple list + local filter
-    return _simple_keyword_match(keyword, origin=origin, require_photo=require_photo)
-
-
-def get_product_details(product_id, origin=None):
-    store, headers = get_shopify_context(origin)
     try:
-        url = f"https://{store}/admin/api/{API_VERSION}/products/{product_id}.json"
-        print(f"[DEBUG] GET detalles producto {product_id} → {url}")
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
-        return (response.json() or {}).get("product", {}) or {}
+        nodes = _graphql_product_search(store, headers, base_query, first=max(60, int(kwargs.get("limit", 20))*3))
+        products = [_product_node_to_card(n, public_domain) for n in nodes]
     except Exception as e:
-        print(f"[❌ Error en get_product_details({product_id})] {e}")
-        raise e
+        # Fallback to REST list (first page) to avoid empty responses
+        print(f"[WARN] GraphQL search falló ({e}); usando REST fallback.")
+        products = get_products(limit=int(kwargs.get("limit", 20)), origin=origin, require_photo=require_photo)
 
-def get_inventory_by_variant_id(variant_id, origin=None):
-    store, headers = get_shopify_context(origin)
-    try:
-        print(f"[DEBUG] Inventario para variant_id={variant_id} en {store}")
+    # require image
+    if require_photo:
+        products = [p for p in products if p.get("image")]
 
-        variant_url = f"https://{store}/admin/api/{API_VERSION}/variants/{variant_id}.json"
-        variant_res = requests.get(variant_url, headers=headers, timeout=20)
-        variant_res.raise_for_status()
-        inventory_item_id = (variant_res.json() or {}).get("variant", {}).get("inventory_item_id")
+    # If support intent, filter hard negatives and boost good collections
+    if _is_support_intent(keyword):
+        filtered = []
+        for p in products:
+            blob = " ".join([
+                _norm(p.get("title")), _norm(p.get("body_html")),
+                " ".join(p.get("tags") if isinstance(p.get("tags"), list) else [str(p.get("tags",""))]).lower()
+            ]).lower()
+            if any(w in blob for w in SUPPORT_NEGATIVE_WORDS):
+                continue
+            filtered.append(p)
+        products = filtered
 
-        levels_url = f"https://{store}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_ids={inventory_item_id}"
-        levels_res = requests.get(levels_url, headers=headers, timeout=20)
-        levels_res.raise_for_status()
-        inventory_levels = (levels_res.json() or {}).get("inventory_levels", []) or []
+    # Scoring & stable sorting
+    scored = []
+    for p in products:
+        s = _boost_if_support(p, keyword) if _is_support_intent(keyword) else 0.0
+        # generic token score
+        if not _is_support_intent(keyword):
+            text = " ".join([
+                _norm(p.get("title")), _norm(p.get("body_html")),
+                _norm(p.get("vendor")), _norm(p.get("sku"))
+            ]).lower()
+            for t in set(_tokens(keyword)):
+                if t in p.get("title","").lower(): s += 3.0
+                if t in p.get("sku","").lower(): s += 4.0
+                if t in text: s += 1.0
+        scored.append((s, p.get("title",""), p))
 
-        # Obtener nombres de locations
-        locs_url = f"https://{store}/admin/api/{API_VERSION}/locations.json?limit=250"
-        locs_res = requests.get(locs_url, headers=headers, timeout=20)
-        locs_res.raise_for_status()
-        locations = {l.get("id"): l.get("name") for l in (locs_res.json() or {}).get("locations", [])}
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    limit = int(kwargs.get("limit", 20))
+    return [p for _,__,p in scored][:limit]
 
-        resultado = []
-        for lvl in inventory_levels:
-            loc_id = lvl.get("location_id")
-            resultado.append({
-                "sucursal": locations.get(loc_id, f"Loc {loc_id}"),
-                "cantidad": lvl.get("available", 0)
-            })
-        return resultado
 
-    except Exception as e:
-        print(f"[❌ Error en get_inventory_by_variant_id({variant_id})] {e}")
-        raise e
+# ============================================================
+#   Manual URL
+# ============================================================
 
-def extract_manual_url(description):
-    if not description:
+def extract_manual_url(body_html: str) -> Optional[str]:
+    if not body_html:
         return None
-    match = re.search(r'(https?://[^\s"\']+\.pdf)', description)
-    return match.group(1) if match else None
+    body = html.unescape(body_html or "")
+    m = re.search(r'href=["\']([^"\']+\.pdf)["\']', body, flags=re.IGNORECASE)
+    if m:
+        return m.group(1)
+    for href, text in re.findall(r'href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', body, flags=re.IGNORECASE|re.DOTALL):
+        if any(k in (text or "").lower() for k in ["manual","ficha","descargar","instructivo","datasheet"]):
+            return href
+    return None
