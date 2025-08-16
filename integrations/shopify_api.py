@@ -2,6 +2,8 @@ import os
 import re
 import requests
 from flask import request
+from typing import List, Dict, Any, Optional, Iterable
+import math
 
 # Tokens para cada tienda
 SHOPIFY_TOKEN_MX = os.getenv("SHOPIFY_TOKEN")               # master.mx
@@ -14,6 +16,10 @@ SHOPIFY_STORE_COM_MX = "master-electronicos.myshopify.com"
 API_VERSION = "2024-04"
 
 
+# ============================
+#   Contexto Shopify
+# ============================
+
 def get_shopify_context(origin=None):
     """
     Detecta el dominio y retorna (store, headers) correctos según Origin.
@@ -21,7 +27,7 @@ def get_shopify_context(origin=None):
     if not origin:
         origin = request.headers.get("Origin", "")
 
-    if "master.com.mx" in origin:
+    if "master.com.mx" in (origin or ""):
         token = SHOPIFY_TOKEN_COM_MX
         store = SHOPIFY_STORE_COM_MX
         print("[DEBUG] Context: master.com.mx → SHOPIFY_TOKEN_MASTER, master-electronicos")
@@ -37,6 +43,26 @@ def get_shopify_context(origin=None):
     }
     return store, headers
 
+
+# ============================
+#   Normalización / Utilidades
+# ============================
+
+_ACCENTS = str.maketrans("áéíóúüÁÉÍÓÚÜñÑ", "aeiouuAEIOUUnN")
+
+def _norm(s: str) -> str:
+    return (s or "").translate(_ACCENTS).lower().strip()
+
+def _tokenize(s: str) -> set:
+    s = _norm(s)
+    toks = re.findall(r"[a-z0-9]+", s)
+    return set(t for t in toks if len(t) > 1)
+
+def _overlap(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    return inter / math.sqrt(len(a) * len(b))
 
 def _choose_image_src(product: dict) -> str:
     """
@@ -64,26 +90,17 @@ def _choose_image_src(product: dict) -> str:
     # 3) no hay
     return ""
 
-
 def _has_photo(product: dict) -> bool:
-    """
-    True si el producto (objeto crudo) tiene al menos una imagen viable.
-    """
+    """True si el producto (objeto crudo) tiene al menos una imagen viable."""
     return bool(_choose_image_src(product))
 
-
 def _safe_first_variant(product: dict) -> dict:
-    """
-    Devuelve el primer variant como dict o {} si no existe.
-    """
+    """Devuelve el primer variant como dict o {} si no existe."""
     variants = product.get("variants") or []
     return variants[0] if isinstance(variants, list) and variants else {}
 
-
 def _map_product(product: dict, store: str) -> dict:
-    """
-    Normaliza un product crudo de Shopify para uso en tarjetas/respuestas.
-    """
+    """Normaliza un product crudo de Shopify para uso en tarjetas/respuestas."""
     v = _safe_first_variant(product)
     return {
         "id": product.get("id"),
@@ -95,11 +112,20 @@ def _map_product(product: dict, store: str) -> dict:
         "body_html": (product.get("body_html") or ""),
         "sku": (v.get("sku") or ""),
         "vendor": product.get("vendor") or "",
+        # Shopify REST devuelve tags como string separado por comas
         "tags": product.get("tags") or "",
         "variant_id": v.get("id") or 0,
         "handle": product.get("handle") or "",
+        # Señal muy básica de stock (no llamamos al inventario aquí por costo):
+        "_in_stock": not re.search(r"\b(agotado|sin\s*stock|out\s*of\s*stock)\b", _norm(
+            (product.get("tags") or "") + " " + (product.get("title") or "")
+        ) or "")
     }
 
+
+# ============================
+#   Fetch multi-estrategia
+# ============================
 
 def _fetch_products_multi(store: str, headers: dict, limit: int = 50):
     """
@@ -128,6 +154,10 @@ def _fetch_products_multi(store: str, headers: dict, limit: int = 50):
     return []
 
 
+# ============================
+#   API de listado/búsqueda básica (retrocompatible)
+# ============================
+
 def get_products(limit=10, origin=None, require_photo=False):
     """
     Lista productos desde la tienda detectada.
@@ -145,7 +175,6 @@ def get_products(limit=10, origin=None, require_photo=False):
         print(f"[❌ Error en get_products()] {e}")
         return []
 
-
 def get_product_by_title(keyword, origin=None, require_photo=False):
     """
     Búsqueda contains (case-insensitive) en múltiples campos:
@@ -153,7 +182,7 @@ def get_product_by_title(keyword, origin=None, require_photo=False):
     Puede filtrar productos sin foto si require_photo=True.
     """
     keyword = (keyword or "").lower()
-    # Subimos a 200 para mejorar el recall desde esta capa (la paginación se hace en main.py fallback)
+    # Subimos a 200 para mejorar el recall desde esta capa
     productos = get_products(limit=200, origin=origin, require_photo=require_photo)
     encontrados = []
 
@@ -194,9 +223,206 @@ def get_product_by_title(keyword, origin=None, require_photo=False):
     return encontrados
 
 
-def get_shopify_products(keyword="", origin=None, require_photo=False):
+# ============================
+#   Búsqueda avanzada con filtros y scoring
+# ============================
+
+def _has_any(haystack: str, needles: Iterable[str]) -> bool:
+    h = _norm(haystack)
+    for n in needles or []:
+        if _norm(n) in h:
+            return True
+    return False
+
+def _looks_like_support(p: Dict[str, Any]) -> bool:
+    """Heurística simple para identificar soportes/brackets"""
+    t = _norm(" ".join([
+        p.get("title",""),
+        p.get("type",""),
+        p.get("vendor",""),
+        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or [])
+    ]))
+    keys = {"soporte","bracket","tv","vesa","pared","techo","articulado","inclinable","esquinero"}
+    bad  = {"antena","adaptador","cable","hdmi","displayport","vga","decodificador","sintonizador","conversor"}
+    if any(b in t for b in bad):
+        return False
+    return any(k in t for k in keys)
+
+def _matches_any_meta(p: Dict[str, Any], patterns: Iterable[str]) -> bool:
+    """Patrones tipo 'product_type:soporte', 'collection:soportes', 'tag:soporte'."""
+    title = _norm(p.get("title",""))
+    ptype = _norm(p.get("type",""))
+    tags  = set(t.strip() for t in (_norm(p.get("tags","")).split(",") if isinstance(p.get("tags"), str) else []))
+
+    for pat in patterns or []:
+        pat = _norm(pat)
+        if pat.startswith("product_type:"):
+            want = pat.split(":",1)[1]
+            if want and want in ptype:
+                return True
+        elif pat.startswith("tag:"):
+            want = pat.split(":",1)[1]
+            if want and want in tags:
+                return True
+        elif pat.startswith("collection:"):
+            # No traemos colecciones en este endpoint; lo ignoramos silenciosamente
+            continue
+        else:
+            # patrón libre: buscar en título
+            if pat and pat in title:
+                return True
+    return False
+
+def _compatible_with_inches(p: Dict[str, Any], target: Optional[int]) -> bool:
+    if not target:
+        return True
+    text = _norm(" ".join([
+        p.get("title",""),
+        p.get("body_html","") or "",
+        p.get("tags","") if isinstance(p.get("tags"), str) else ""
+    ]))
+    # Rangos "32-70" / "26–55"
+    for m in re.finditer(r'(\d{2,3})\s*[-–]\s*(\d{2,3})', text):
+        a, b = int(m.group(1)), int(m.group(2))
+        if a <= target <= b:
+            return True
+    # "hasta 55", "max 70"
+    for m in re.finditer(r'(?:hasta|max(?:imo)?)\s+(\d{2,3})', text):
+        if target <= int(m.group(1)):
+            return True
+    # "para 45", "de 45"
+    for m in re.finditer(r'(?:para|de)\s+(\d{2,3})\s*(?:["”]|pulg|pulgadas|in)?\b', text):
+        if target == int(m.group(1)):
+            return True
+    # Si no declara nada, no descartamos
+    return True
+
+def _search_with_filters(
+    query: str,
+    *,
+    origin: Optional[str] = None,
+    require_photo: bool = False,
+    must_include: Optional[List[str]] = None,
+    must_match_any_of: Optional[List[str]] = None,
+    exclude: Optional[List[str]] = None,
+    prefer_in_stock: bool = False,
+    inches_target: Optional[int] = None,
+    min_score: float = 0.25,
+    limit: int = 20
+) -> List[Dict[str, Any]]:
+    """
+    Búsqueda con filtros semánticos simples y scoring.
+    Usa un único fetch amplio y filtra localmente (eficiente y barato).
+    """
+    store, headers = get_shopify_context(origin)
+    raw = _fetch_products_multi(store, headers, limit=200)  # traemos más y filtramos
+    if not raw:
+        return []
+
+    # Mapeo y filtro de foto
+    mapped = []
+    for rp in raw:
+        if require_photo and not _has_photo(rp):
+            continue
+        mapped.append(_map_product(rp, store))
+
+    q_tokens = _tokenize(query)
+    results: List[Dict[str, Any]] = []
+
+    for p in mapped:
+        meta_blob = " ".join([
+            p.get("title",""),
+            p.get("body_html","") or "",
+            p.get("tags","") if isinstance(p.get("tags"), str) else "",
+            p.get("type","") or "",
+        ])
+        meta_norm = _norm(meta_blob)
+
+        # Excluir por palabras
+        if exclude and _has_any(meta_norm, exclude):
+            continue
+
+        # must_include: exigimos que alguno aparezca (salvo que el producto "parezca soporte")
+        if must_include and not _has_any(meta_norm, must_include):
+            if not _looks_like_support(p):
+                continue
+
+        # must_match_any_of: product_type/tag/collection (colección no disponible aquí)
+        if must_match_any_of and not _matches_any_meta(p, must_match_any_of):
+            if not _looks_like_support(p):
+                continue
+
+        # Scoring por tokens (título/tags/type)
+        p_tokens = _tokenize(" ".join([p.get("title",""), p.get("tags",""), p.get("type","")]))
+        score = _overlap(q_tokens, p_tokens)
+
+        # Bonus si “parece soporte”
+        if _looks_like_support(p):
+            score += 0.2
+
+        # Afinar por pulgadas si se dieron
+        if inches_target and not _compatible_with_inches(p, inches_target):
+            score -= 0.3
+
+        if score < min_score:
+            # Si es soporte claro y la consulta es corta, tolera un poco menos
+            if not (_looks_like_support(p) and len(q_tokens) <= 2 and score >= (min_score - 0.15)):
+                continue
+
+        # Señal de stock muy básica (ver _map_product)
+        p["_rank_score"] = round(float(score), 4)
+        results.append(p)
+
+    # Orden: stock primero si se pide, luego score desc
+    if prefer_in_stock:
+        results.sort(key=lambda x: (0 if x.get("_in_stock") else 1, -x.get("_rank_score", 0.0)))
+    else:
+        results.sort(key=lambda x: -x.get("_rank_score", 0.0))
+
+    return results[:max(1, limit)]
+
+
+# ============================
+#   API pública
+# ============================
+
+def get_shopify_products(
+    keyword: str = "",
+    origin: Optional[str] = None,
+    require_photo: bool = False,
+    **kwargs
+):
+    """
+    Retrocompatible:
+      - Si solo pasas (keyword, origin, require_photo) → usa búsqueda básica por título/campos.
+      - Si envías filtros extra (must_include, exclude, etc.) → usa búsqueda avanzada con scoring.
+    """
+    # ¿Se solicitaron filtros avanzados?
+    advanced_keys = {
+        "must_include", "must_match_any_of", "exclude",
+        "prefer_in_stock", "inches_target", "min_score", "limit"
+    }
+    if any(k in kwargs for k in advanced_keys):
+        return _search_with_filters(
+            query=keyword or "",
+            origin=origin,
+            require_photo=require_photo,
+            must_include=kwargs.get("must_include"),
+            must_match_any_of=kwargs.get("must_match_any_of"),
+            exclude=kwargs.get("exclude"),
+            prefer_in_stock=kwargs.get("prefer_in_stock", False),
+            inches_target=kwargs.get("inches_target"),
+            min_score=float(kwargs.get("min_score", 0.25)),
+            limit=int(kwargs.get("limit", 20)),
+        )
+
+    # Búsqueda básica (comportamiento anterior)
     return get_product_by_title(keyword, origin, require_photo=require_photo) if keyword else get_products(origin=origin, require_photo=require_photo)
 
+
+# ============================
+#   Detalles de producto / Inventario / Manual
+# ============================
 
 def get_product_details(product_id, origin=None):
     store, headers = get_shopify_context(origin)
@@ -209,7 +435,6 @@ def get_product_details(product_id, origin=None):
     except Exception as e:
         print(f"[❌ Error en get_product_details({product_id})] {e}")
         raise e
-
 
 def get_inventory_by_variant_id(variant_id, origin=None):
     """
@@ -250,7 +475,6 @@ def get_inventory_by_variant_id(variant_id, origin=None):
         print(f"[❌ Error en get_inventory_by_variant_id({variant_id})] {e}")
         raise e
 
-
 def extract_manual_url(description):
     """
     Extrae el primer link .pdf desde la descripción del producto (body_html).
@@ -259,4 +483,3 @@ def extract_manual_url(description):
         return None
     match = re.search(r'(https?://[^\s"\']+\.pdf)', description)
     return match.group(1) if match else None
-
