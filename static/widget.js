@@ -8,13 +8,15 @@
   function init() {
     if (document.getElementById("chatbot-bubble") || document.getElementById("chatbot-window")) return;
 
+    // —— Estilos: LADO IZQUIERDO ——
     const style = document.createElement("style");
     style.id = "maxter-widget-style";
     style.textContent = `
       #chatbot-bubble {
         position: fixed;
         bottom: 20px;
-        right: 20px;
+        left: 20px;      /* ← izquierda */
+        right: auto;
         background-color: #007bff;
         color: white;
         padding: 10px 14px;
@@ -25,14 +27,15 @@
         font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
         font-weight: 600;
         cursor: pointer;
-        z-index: 2147483646; /* por encima de la mayoría de widgets */
+        z-index: 2147483646;
         box-shadow: 0 8px 20px rgba(0,0,0,.2);
       }
       #chatbot-bubble img { width: 28px; height: 28px; border-radius: 50%; }
       #chatbot-window {
         position: fixed;
         bottom: 88px;
-        right: 20px;
+        left: 20px;      /* ← izquierda */
+        right: auto;
         width: 360px;
         max-height: 70vh;
         border-radius: 12px;
@@ -41,7 +44,7 @@
         display: none;
         flex-direction: column;
         overflow: hidden;
-        z-index: 2147483647; /* ventana por encima de todo */
+        z-index: 2147483647;
         font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
       }
       #chatbot-header{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#0d6efd;color:#fff;}
@@ -62,12 +65,13 @@
       .loading .dot:nth-child(3){animation-delay:.4s}
       @keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}
       @media (max-width: 480px){
-        #chatbot-window{right:10px;width:92vw;max-height:70vh}
-        #chatbot-bubble{right:10px}
+        #chatbot-window{left:10px;width:92vw;max-height:70vh}
+        #chatbot-bubble{left:10px}
       }
     `;
     document.head.appendChild(style);
 
+    // —— Burbuja ——
     const bubble = document.createElement("div");
     bubble.id = "chatbot-bubble";
     bubble.innerHTML = `
@@ -76,6 +80,7 @@
     `;
     document.body.appendChild(bubble);
 
+    // —— Ventana ——
     const win = document.createElement("div");
     win.id = "chatbot-window";
     win.innerHTML = `
@@ -97,11 +102,13 @@
     const sendBtn  = win.querySelector("#chatbot-input button");
     const closeBtn = win.querySelector("#chatbot-close");
 
-    // --- Evitar solapamiento con otros flotantes (WhatsApp, etc.)
-    function findBottomOffset() {
+    // —— Anti solapamiento en lado izquierdo (otros widgets fixed left-bottom) ——
+    function findBottomLeftOffset() {
       const candidates = [
-        document.getElementById("wabutton"),
-        ...document.querySelectorAll(".wabtn, .whatsapp, .wa-floating-button, [class*='wa']"),
+        document.getElementById("wabutton"),  // por si alguien lo coloca a la izquierda
+        ...document.querySelectorAll(
+          ".wabtn, .whatsapp, .wa-floating-button, [class*='wa'], .chat, .chat-widget, [class*='chat']"
+        ),
       ].filter(Boolean);
 
       let extra = 0;
@@ -109,27 +116,27 @@
         try {
           const cs = getComputedStyle(el);
           const isFixed = cs.position === "fixed";
-          const isRight = parseInt(cs.right || "0", 10) <= 60;
-          const isBottom = parseInt(cs.bottom || "0", 10) <= 60;
-          const vis = cs.display !== "none" && cs.visibility !== "hidden" && el.offsetParent !== null;
-          if (isFixed && isRight && isBottom && vis) {
+          const nearLeft = parseInt(cs.left || "9999", 10) <= 60;   // ← pegado a izquierda
+          const nearBottom = parseInt(cs.bottom || "9999", 10) <= 60;
+          const visible = cs.display !== "none" && cs.visibility !== "hidden" && el.offsetParent !== null;
+          if (isFixed && nearLeft && nearBottom && visible) {
             extra = Math.max(extra, el.offsetHeight + (parseInt(cs.bottom || "0", 10) || 0) + 16);
           }
         } catch (e) {}
       });
-      return extra; // px
+      return extra;
     }
     function placeBubble() {
-      const extra = findBottomOffset();
+      const extra = findBottomLeftOffset();
       bubble.style.bottom = (20 + extra) + "px";
+      // la ventana ya abre más arriba (bottom: 88px); no suele necesitar ajuste
     }
-    // Re-posiciona varias veces por si otro widget carga tarde
     let tries = 0;
     const iv = setInterval(() => { placeBubble(); if (++tries > 20) clearInterval(iv); }, 300);
     window.addEventListener("resize", placeBubble);
     window.addEventListener("scroll", placeBubble);
 
-    // --- Chat I/O ---
+    // —— Chat I/O ——
     let greeted = false;
     function appendMessage(text, who="bot", isHtml=false){
       const div = document.createElement("div");
@@ -198,10 +205,8 @@
     sendBtn.addEventListener("click", sendMessage);
     input.addEventListener("keydown", (e)=>{ if(e.key === "Enter") sendMessage(); });
 
-    // Coloca correctamente al iniciar
     placeBubble();
-
-    console.info("[Maxter] widget cargado con anti-solapamiento.");
+    console.info("[Maxter] widget (lado izquierdo) cargado.");
   }
 
   if (document.readyState === "loading") {
@@ -210,4 +215,3 @@
     init();
   }
 })();
-
