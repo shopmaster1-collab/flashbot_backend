@@ -121,24 +121,27 @@
           white-space: normal !important;
         }
 
-        /* 4) Fila exclusiva para PRECIO + BOTÓN "Comprar ahora" */
+        /* 4) PRECIO en su propio renglón y botón DEBAJO */
         .msg.bot .rich > div[style*="border-bottom"] > div[style*='flex:1'] > div:nth-child(2){
           display: flex !important;
-          align-items: center !important;
+          flex-direction: column !important;   /* ← precio arriba, botón debajo */
+          align-items: flex-start !important;
           justify-content: flex-start !important;
-          gap: 12px !important;
+          gap: 6px !important;
           margin: 6px 0 6px 0 !important;
-          flex-wrap: nowrap !important; /* botón en la misma línea */
           width: 100% !important;
         }
-        /* Precio destacado */
-        .msg.bot .rich > div[style*="border-bottom"] > div[style*='flex:1'] > div:nth-child(2) div{
+        /* Precio destacado, sin cortes */
+        .msg.bot .rich > div[style*="border-bottom"] > div[style*='flex:1'] > div:nth-child(2) > div{
           color: #0d6efd !important;
           font-weight: 800 !important;
-          font-size: 16px !important;
+          font-size: 18px !important;
+          line-height: 1.2 !important;
           letter-spacing: .2px !important;
+          white-space: normal !important;      /* permitir varias líneas si hace falta */
+          display: block !important;           /* forzar bloque propio */
         }
-        /* Botón comprar ahora ancho (texto completo en una línea) */
+        /* Botón debajo del precio */
         .msg.bot .rich > div[style*="border-bottom"] > div[style*='flex:1'] > div:nth-child(2) a{
           display: inline-flex !important;
           align-items: center !important;
@@ -149,7 +152,8 @@
           padding: 8px 12px !important;
           text-decoration: none !important;
           font-weight: 700 !important;
-          white-space: nowrap !important; /* evitar salto dentro del botón */
+          white-space: nowrap !important;      /* el texto del botón en una sola línea */
+          margin-top: 2px !important;          /* pequeño respiro respecto al precio */
         }
 
         /* 5) Debajo: enlaces "Ver producto" y "Manual de producto" con texto completo */
