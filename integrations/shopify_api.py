@@ -407,4 +407,38 @@ def get_product_details(product_id, origin=None):
 def get_inventory_by_variant_id(variant_id, origin=None):
     store, headers = get_shopify_context(origin)
     try:
-        print(f"[DEBUG] Inventar
+        print(f"[DEBUG] Inventario para variant_id={variant_id} en {store}")
+
+        variant_url = f"https://{store}/admin/api/{API_VERSION}/variants/{variant_id}.json"
+        variant_res = requests.get(variant_url, headers=headers, timeout=20)
+        variant_res.raise_for_status()
+        inventory_item_id = (variant_res.json() or {}).get("variant", {}).get("inventory_item_id")
+
+        levels_url = f"https://{store}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_ids={inventory_item_id}"
+        levels_res = requests.get(levels_url, headers=headers, timeout=20)
+        levels_res.raise_for_status()
+        inventory_levels = (levels_res.json() or {}).get("inventory_levels", []) or []
+
+        locs_url = f"https://{store}/admin/api/{API_VERSION}/locations.json"
+        locs_res = requests.get(locs_url, headers=headers, timeout=20)
+        locs_res.raise_for_status()
+        locations = {loc["id"]: loc["name"] for loc in (locs_res.json() or {}).get("locations", [])}
+
+        resultado = []
+        for lvl in inventory_levels:
+            loc_id = lvl.get("location_id")
+            resultado.append({
+                "sucursal": locations.get(loc_id, f"Loc {loc_id}"),
+                "cantidad": lvl.get("available", 0)
+            })
+        return resultado
+
+    except Exception as e:
+        print(f"[❌ Error en get_inventory_by_variant_id({variant_id})] {e}")
+        raise e
+
+def extract_manual_url(description):
+    if not description:
+        return None
+    match = re.search(r'(https?://[^\s"\']+\.pdf)', description)
+    return match.group(1) if match else None
