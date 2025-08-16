@@ -282,6 +282,79 @@ def _shopify_fallback_search(user_text: str, origin: str,
 
     return [], all_attempts
 
+# ---------- Detección de intención: SOPORTES/BRACKETS ----------
+
+SUPPORT_SYNONYMS = {
+    "soporte","soportes","bracket","montaje","montura","base","holder",
+    "pared","techo","articulado","inclinable","esquinero","vesa","tv mount","wall mount"
+}
+EXCLUDE_FOR_SUPPORT = {
+    "antena","antenas","adaptador","adaptadores","cable","cables","hdmi",
+    "displayport","vga","convertidor","conversor","decodificador","sintonizador"
+}
+
+def detect_support_intent(text: str) -> bool:
+    t = _normalize(text)
+    # Debe mencionar soporte/bracket o vesa/pared/techo y algún término de pantalla/tv
+    has_core = any(k in t for k in SUPPORT_SYNONYMS) or "soporte" in t or "bracket" in t
+    has_tv = any(k in t for k in ("tv","televisor","pantalla","smart tv","monitor","vesa"))
+    return bool(has_core or ("soporte" in t and has_tv))
+
+def extract_inches(text: str):
+    t = _normalize(text)
+    m = re.search(r'(\d{2,3})\s*(?:["”]|pulg|pulgadas|in)\b', t)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+def _looks_like_support_product(p: dict) -> bool:
+    blob = _normalize(" ".join([
+        p.get("title",""), p.get("type",""), p.get("vendor",""),
+        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or []),
+        p.get("body_html","") or ""
+    ]))
+    if any(bad in blob for bad in EXCLUDE_FOR_SUPPORT):
+        return False
+    keys = {"soporte","bracket","vesa","pared","techo","articulado","inclinable","esquinero","tv"}
+    return any(k in blob for k in keys)
+
+def _compatible_with_inches_local(p: dict, target: int) -> bool:
+    if not target:
+        return True
+    blob = _normalize(" ".join([
+        p.get("title",""), p.get("body_html","") or "",
+        p.get("tags","") if isinstance(p.get("tags"), str) else " ".join(p.get("tags") or [])
+    ]))
+    # rangos 32-70 / 26–55
+    for m in re.finditer(r'(\d{2,3})\s*[-–]\s*(\d{2,3})', blob):
+        a, b = int(m.group(1)), int(m.group(2))
+        if a <= target <= b:
+            return True
+    # "hasta 70"
+    for m in re.finditer(r'(?:hasta|max(?:imo)?)\s+(\d{2,3})', blob):
+        if target <= int(m.group(1)):
+            return True
+    # valores sueltos “para 45”
+    for m in re.finditer(r'(?:para|de)\s+(\d{2,3})\s*(?:["”]|pulg|pulgadas|in)?\b', blob):
+        if target == int(m.group(1)):
+            return True
+    # si no declara, no descartamos
+    return True
+
+def filter_support_products_locally(items: list, inches: int | None) -> list:
+    out = []
+    for p in items:
+        if not _looks_like_support_product(p):
+            continue
+        if inches and not _compatible_with_inches_local(p, inches):
+            # si parece incompatible, lo descartamos
+            continue
+        out.append(p)
+    return out
+
 # ---------- Rutas ----------
 
 @app.route("/")
@@ -301,16 +374,52 @@ def chat():
         if not user_message:
             return jsonify({"success": False, "error": "Mensaje vacío"}), 400
 
+        # --- Detección de intención SOPORTE / pulgadas ---
+        is_support = detect_support_intent(user_message)
+        inches = extract_inches(user_message)
+
         # 1) Búsqueda por integración (con require_photo)
         keywords = extract_keywords_from_text(user_message)
-        print(f"[DEBUG] Keywords: {keywords} | Origin: {origin}")
+        print(f"[DEBUG] Keywords: {keywords} | Origin: {origin} | intent_support={is_support} | inches={inches}")
 
         encontrados = []
-        for kw in keywords:
+
+        # Si la intención es SOPORTE, intentamos pasar filtros avanzados a la integración.
+        if is_support:
             try:
-                encontrados.extend(get_shopify_products(kw, origin=origin, require_photo=True))
-            except Exception as e:
-                print(f"[WARN] get_shopify_products('{kw}') falló: {e}")
+                encontrados = get_shopify_products(
+                    user_message,
+                    origin=origin,
+                    require_photo=True,
+                    # kwargs opcionales (si tu integración los soporta, se aplican)
+                    must_include=list(SUPPORT_SYNONYMS),
+                    must_match_any_of=[
+                        "product_type:soporte","product_type:bracket",
+                        "collection:soportes","tag:soporte","tag:bracket"
+                    ],
+                    exclude=list(EXCLUDE_FOR_SUPPORT),
+                    prefer_in_stock=True,
+                    inches_target=inches,
+                    min_score=0.35
+                )
+                print("[DEBUG] get_shopify_products con filtros avanzados aplicado.")
+            except TypeError:
+                # Integración no soporta kwargs: caemos a keywords y filtrado local
+                print("[WARN] Integración no soporta kwargs avanzados; usando keywords + filtro local.")
+                for kw in keywords:
+                    try:
+                        encontrados.extend(get_shopify_products(kw, origin=origin, require_photo=True))
+                    except Exception as e:
+                        print(f"[WARN] get_shopify_products('{kw}') falló: {e}")
+                # filtro local a soportes
+                encontrados = filter_support_products_locally(encontrados, inches)
+        else:
+            # flujo normal sin intención específica
+            for kw in keywords:
+                try:
+                    encontrados.extend(get_shopify_products(kw, origin=origin, require_photo=True))
+                except Exception as e:
+                    print(f"[WARN] get_shopify_products('{kw}') falló: {e}")
 
         productos = []
         for p in encontrados:
@@ -343,6 +452,9 @@ def chat():
                 collect_max=COLLECT_MAX,
                 max_pages=MAX_PAGES
             )
+            # Si la intención es SOPORTE, aplicar filtro local sobre el fallback
+            if is_support and productos:
+                productos = filter_support_products_locally(productos, inches)
 
         if not productos:
             meta = {"domain": origin or "desconocido", "ip": request.remote_addr}
