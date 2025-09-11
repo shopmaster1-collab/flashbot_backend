@@ -23,7 +23,11 @@ indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.m
 deeps = DeepseekClient()
 
 # Construye índice al iniciar
-indexer.build()
+try:
+    indexer.build()
+except Exception as e:
+    # No tumbes la app en arranque; podrás reindexar luego con /api/admin/reindex
+    print(f"[WARN] Index build failed at startup: {e}", flush=True)
 
 @app.get("/health")
 def health():
