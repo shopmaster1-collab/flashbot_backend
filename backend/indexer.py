@@ -4,13 +4,14 @@ import sqlite3
 from typing import List, Dict, Any
 from .utils import strip_html
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "catalog.db")
+DB_DIR = os.path.join(os.path.dirname(__file__), "data")
+DB_PATH = os.path.join(DB_DIR, "catalog.db")
 
 class CatalogIndexer:
     def __init__(self, shopify_client, store_base_url: str):
         self.client = shopify_client
         self.store_base_url = store_base_url.rstrip("/")
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        os.makedirs(DB_DIR, exist_ok=True)
 
     # ----- DB helpers -----
     def _conn(self):
@@ -114,9 +115,9 @@ class CatalogIndexer:
         def product_is_complete(p) -> bool:
             # Imagen principal
             has_image = bool(p.get("images"))
-            # Descripción
+            # Descripción (relajamos el mínimo a 10 caracteres)
             body = strip_html(p.get("body_html", "")) or ""
-            has_body = len(body) >= 30
+            has_body = len(body.strip()) >= 10
             # Variante válida (SKU, precio y stock > 0)
             ok_variant = False
             for v in p.get("variants", []):
@@ -128,6 +129,8 @@ class CatalogIndexer:
                     ok_variant = True
                     break
             return has_image, has_body, ok_variant
+
+        inserted = 0
 
         # Insertar productos + variantes + FTS (solo si completos y activos)
         for p in products:
@@ -153,6 +156,7 @@ class CatalogIndexer:
                     p.get("product_type", ""),
                 ),
             )
+            inserted += 1
 
             # Variantes
             v_rows = []
@@ -180,6 +184,7 @@ class CatalogIndexer:
             )
 
         conn.commit()
+        print(f"[INDEX] Inserted products: {inserted}", flush=True)
         conn.close()
 
     def _top_inventory_by_variant(self, conn, inventory_item_id: int):
@@ -205,12 +210,12 @@ class CatalogIndexer:
         )
         ids = [r[0] for r in fts_rows]
 
-        # 2) Fallback LIKE si no hay suficientes resultados
+        # 2) Fallback LIKE si no hay suficientes resultados (incluimos tags)
         if len(ids) < k:
             like_rows = list(
                 cur.execute(
-                    "SELECT id FROM products WHERE title LIKE ? OR body LIKE ? LIMIT ?",
-                    (f"%{query}%", f"%{query}%", k * 2),
+                    "SELECT id FROM products WHERE title LIKE ? OR body LIKE ? OR tags LIKE ? LIMIT ?",
+                    (f"%{query}%", f"%{query}%", f"%{query}%", k * 2),
                 )
             )
             ids += [r[0] for r in like_rows]
@@ -282,6 +287,15 @@ class CatalogIndexer:
 
         conn.close()
         return results
+
+    def stats(self):
+        conn = self._conn()
+        cur = conn.cursor()
+        p = cur.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        v = cur.execute("SELECT COUNT(*) FROM variants").fetchone()[0]
+        il = cur.execute("SELECT COUNT(*) FROM inventory_levels").fetchone()[0]
+        conn.close()
+        return {"products": p, "variants": v, "inventory_levels": il}
 
     def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
         import json
