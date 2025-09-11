@@ -134,6 +134,21 @@ def admin_stats():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     return {"ok": True, **indexer.stats()}
 
+
+@app.get("/api/admin/discards")
+def admin_discards():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return {"ok": True, **indexer.discard_stats()}
+
+@app.get("/api/admin/products")
+def admin_products():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    limit = int(request.args.get("limit", 10))
+    return {"ok": True, "items": indexer.sample_products(limit=limit)}
+
+
 @app.get("/api/admin/search")
 def admin_search():
     if not _admin_ok(request):
