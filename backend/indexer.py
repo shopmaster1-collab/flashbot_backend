@@ -32,6 +32,7 @@ class CatalogIndexer:
             DROP TABLE IF EXISTS locations;
             DROP TABLE IF EXISTS inventory_levels;
             DROP TABLE IF EXISTS products_fts;
+            DROP TABLE IF EXISTS debug_discard;
 
             CREATE TABLE products (
                 id INTEGER PRIMARY KEY,
@@ -68,6 +69,13 @@ class CatalogIndexer:
             CREATE VIRTUAL TABLE products_fts USING fts5(
                 title, body, tags, content='products', content_rowid='id'
             );
+
+            CREATE TABLE debug_discard (
+                product_id INTEGER,
+                title TEXT,
+                handle TEXT,
+                reason TEXT
+            );
             """
         )
         conn.commit()
@@ -80,17 +88,17 @@ class CatalogIndexer:
                 [(loc["id"], loc["name"]) for loc in locations],
             )
 
-        # Productos
+        # Productos y variantes brutas
         products = self.client.list_products()
 
-        # Recolectar inventory_item_ids de variantes
+        # Recolectar inventory_item_ids
         all_inv_items = []
         for p in products:
             for v in p.get("variants", []):
                 if v.get("inventory_item_id"):
                     all_inv_items.append(v["inventory_item_id"])
 
-        # Niveles de inventario
+        # Niveles de inventario (puede ser vacío)
         levels = self.client.inventory_levels_for_items(all_inv_items) if all_inv_items else []
 
         if levels:
@@ -107,19 +115,24 @@ class CatalogIndexer:
                 lv.get("available", 0) for lv in levels if lv["inventory_item_id"] == inv_item_id
             )
 
-        # --------- regla de “producto completo” (ajustada) ----------
-        def product_is_complete(p) -> bool:
-            # Imagen: acepta 'images' (plural), 'image' (singular) o imagen en alguna variante
-            images_list = p.get("images") or []
-            has_image = bool(images_list) or bool(p.get("image")) or any(
+        # --------- regla de “producto completo” con motivos ----------
+        def product_check_and_reason(p):
+            if p.get("status") != "active":
+                return False, "status!=active"
+
+            # Imagen: image principal, images o imagen en variante
+            has_image = bool(p.get("images")) or bool(p.get("image")) or any(
                 (v.get("image_id") is not None) for v in p.get("variants", [])
             )
+            if not has_image:
+                return False, "no_image"
 
-            # Descripción (mínimo 10 caracteres limpios)
+            # Descripción mínima
             body = strip_html(p.get("body_html", "")) or ""
-            has_body = len(body.strip()) >= 10
+            if len(body.strip()) < 10:
+                return False, "no_body"
 
-            # Variante con SKU, precio y stock > 0
+            # Variante completa (SKU + precio + stock>0)
             ok_variant = False
             for v in p.get("variants", []):
                 sku_ok = bool(v.get("sku"))
@@ -129,21 +142,23 @@ class CatalogIndexer:
                 if sku_ok and price_ok and total > 0:
                     ok_variant = True
                     break
+            if not ok_variant:
+                return False, "no_variant_complete"
 
-            return has_image, has_body, ok_variant
+            return True, "ok"
         # ------------------------------------------------------------
 
         inserted = 0
         for p in products:
-            if p.get("status") != "active":
-                continue
-
-            has_image, has_body, ok_variant = product_is_complete(p)
-            if not (has_image and has_body and ok_variant):
+            is_ok, reason = product_check_and_reason(p)
+            if not is_ok:
+                cur.execute(
+                    "INSERT INTO debug_discard(product_id,title,handle,reason) VALUES (?,?,?,?)",
+                    (p.get("id"), p.get("title"), p.get("handle"), reason),
+                )
                 continue
 
             body = strip_html(p.get("body_html", "")) or ""
-            # toma imagen principal si existe, si no la primera de la lista
             image = (p.get("image") or {}).get("src") or (p.get("images", [{}])[0].get("src"))
             cur.execute(
                 "INSERT INTO products(id,title,handle,body,image,tags,vendor,product_type) VALUES (?,?,?,?,?,?,?,?)",
@@ -216,7 +231,7 @@ class CatalogIndexer:
             like_rows = list(
                 cur.execute(
                     "SELECT id FROM products WHERE title LIKE ? OR body LIKE ? OR tags LIKE ? LIMIT ?",
-                    (f"%{query}%", f"%{query}%", f"%{query}%", k * 2),
+                    (f\"%{query}%\", f\"%{query}%\", f\"%{query}%\", k * 2),
                 )
             )
             ids += [r[0] for r in like_rows]
@@ -293,6 +308,30 @@ class CatalogIndexer:
         il = cur.execute("SELECT COUNT(*) FROM inventory_levels").fetchone()[0]
         conn.close()
         return {"products": p, "variants": v, "inventory_levels": il}
+
+    def discard_stats(self):
+        conn = self._conn()
+        cur = conn.cursor()
+        data = cur.execute(
+            "SELECT reason, COUNT(*) AS c FROM debug_discard GROUP BY reason ORDER BY c DESC"
+        ).fetchall()
+        sample = cur.execute(
+            "SELECT product_id, title, handle, reason FROM debug_discard LIMIT 20"
+        ).fetchall()
+        conn.close()
+        return {
+            "by_reason": [{ "reason": r["reason"], "count": r["c"] } for r in data],
+            "sample": [dict(x) for x in sample],
+        }
+
+    def sample_products(self, limit: int = 10):
+        conn = self._conn()
+        cur = conn.cursor()
+        rows = cur.execute(
+            "SELECT id, title, handle FROM products LIMIT ?", (limit,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
 
     def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
         import json
