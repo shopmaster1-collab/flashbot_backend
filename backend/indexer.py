@@ -1,420 +1,224 @@
 # -*- coding: utf-8 -*-
 """
-Indexer del catálogo Shopify -> SQLite (+FTS5) para el buscador del bot.
-
-Reglas de filtrado (configurables por variables de entorno):
-- REQUIRE_ACTIVE=1  -> exige product.status == "active"
-- REQUIRE_IMAGE=1   -> exige al menos una imagen
-- REQUIRE_STOCK=0/1 -> exige stock > 0 por variante (por defecto 1; en Opción B: 0)
-- REQUIRE_SKU=0/1   -> exige SKU no vacío (por defecto 1; en Opción B: 0)
-- MIN_BODY_CHARS=N  -> mínimo de caracteres de descripción tras limpiar HTML (por defecto 10; en Opción B: 0)
-
-Tablas:
-- products(id, handle, title, body, tags, vendor, product_type, image)
-- variants(id, product_id, sku, price, compare_at_price, inventory_item_id)
-- inventory(variant_id, location_id, location_name, available)
-- products_fts (FTS5 sobre title/body/tags) si está disponible; si no, hay fallback LIKE.
+Crea un índice ligero del catálogo para búsquedas rápidas.
+Aplica filtros configurables vía variables de entorno y
+genera tarjetas listas para el widget.
 """
-from __future__ import annotations
 
 import os
-import re
 import json
-import sqlite3
-from typing import Any, Dict, List, Tuple, Optional
-
+from collections import defaultdict
+from rapidfuzz import fuzz, process
 from .utils import strip_html
 
-
-BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def _row_factory(cursor, row):
-    d = {}
-    for idx, col in enumerate(cursor.description):
-        d[col[0]] = row[idx]
-    return d
-
+# Filtros (se configuran en Render → Environment)
+REQUIRE_ACTIVE = os.getenv("REQUIRE_ACTIVE", "0") == "1"
+REQUIRE_IMAGE  = os.getenv("REQUIRE_IMAGE",  "0") == "1"
+REQUIRE_SKU    = os.getenv("REQUIRE_SKU",    "0") == "1"
+REQUIRE_STOCK  = os.getenv("REQUIRE_STOCK",  "0") == "1"
+MIN_BODY_CHARS = int(os.getenv("MIN_BODY_CHARS", "0"))
 
 class CatalogIndexer:
     def __init__(self, shop_client, store_base_url: str):
-        self.client = shop_client
-        self.store_base_url = store_base_url.rstrip("/")
+        self.shop = shop_client
+        self.store_base = store_base_url.rstrip("/")
+        self.products = []          # lista de dicts para el chat
+        self._norm_titles = []      # títulos normalizados para fuzzy search
+        self._id_to_item = {}       # id producto -> item
+        self._discard_reasons = []  # [(product_id, handle, reason, title)]
+        self._inventory_cache = {}  # inventory_item_id -> [{location_id, available}, ...]
 
-        # Reglas desde entorno (ver docstring)
-        self.rules = {
-            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1",
-            "REQUIRE_IMAGE": os.getenv("REQUIRE_IMAGE", "1") == "1",
-            "REQUIRE_STOCK": os.getenv("REQUIRE_STOCK", "1") == "1",
-            "REQUIRE_SKU": os.getenv("REQUIRE_SKU", "1") == "1",
-            "MIN_BODY_CHARS": int(os.getenv("MIN_BODY_CHARS", "10")),
-        }
+    # ------------------------ utilería interna ------------------------
 
-        self.db_path = os.path.join(DATA_DIR, "catalog.sqlite3")
-        self._fts_enabled = False
+    def _fetch_inventory_for_variants(self, variants):
+        ids = [v.get("inventory_item_id") for v in variants if v.get("inventory_item_id")]
+        ids = list({i for i in ids if i})
+        if not ids:
+            return {}
+        levels = self.shop.inventory_levels_for_items(ids)
+        m = defaultdict(list)
+        for lv in levels:
+            m[lv["inventory_item_id"]].append({
+                "location_id": lv["location_id"],
+                "available": lv.get("available") or 0,
+            })
+        return m
 
-        # métricas del último build
-        self._stats: Dict[str, Any] = {
-            "products": 0,
-            "variants": 0,
-            "inventory_levels": 0,
-        }
-        # descarte de productos (para diagnóstico)
-        self._discards_sample: List[Dict[str, Any]] = []
-        self._discards_count: Dict[str, int] = {}
+    def _variant_pick(self, variants):
+        """
+        Regla simple: el primer variant “publicable”.
+        """
+        if not variants:
+            return None
+        for v in variants:
+            return v
+        return variants[0]
 
-        # cachés auxiliares
-        self._location_map: Dict[int, str] = {}       # location_id -> name
-        self._inventory_map: Dict[int, List[Dict]] = {}  # inventory_item_id -> [{location_id, available}, ...]
-
-    # ---------- utils de conexión ----------
-    def _conn_rw(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = _row_factory
-        return conn
-
-    def _conn_read(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = _row_factory
-        return conn
-
-    # ---------- reglas ----------
-    def _passes_product_rules(self, p: Dict[str, Any]) -> Tuple[bool, str]:
-        if self.rules["REQUIRE_ACTIVE"] and p.get("status") != "active":
+    def _accepts(self, p, hero_img, variant, inventory_sum):
+        """
+        Aplica todas las reglas de filtrado y devuelve (ok, reason_str|None).
+        """
+        # Estado
+        if REQUIRE_ACTIVE and (p.get("status") != "active"):
             return False, "status!=active"
-        images = p.get("images") or []
-        if self.rules["REQUIRE_IMAGE"] and not images:
+
+        # Imagen: ahora validamos también hero_img que puede venir de p['image']
+        if REQUIRE_IMAGE and not hero_img:
             return False, "no_image"
 
-        if self.rules["MIN_BODY_CHARS"] > 0:
-            text = strip_html(p.get("body_html") or "")
-            if len(text) < self.rules["MIN_BODY_CHARS"]:
-                return False, "no_body"
+        # SKU
+        if REQUIRE_SKU and not (variant.get("sku") or "").strip():
+            return False, "no_sku"
 
-        return True, ""
+        # Stock
+        if REQUIRE_STOCK and inventory_sum <= 0:
+            return False, "no_stock"
 
-    def _select_valid_variants(self, variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Aplica reglas por variante (precio requerido; SKU/stock según banderas)."""
-        out: List[Dict[str, Any]] = []
-        for v in variants:
-            price = v.get("price")
-            sku = (v.get("sku") or "").strip()
-            inv_item_id = v.get("inventory_item_id")
-            inv_levels = self._inventory_map.get(inv_item_id, []) if inv_item_id else []
-            total = sum(int(x.get("available") or 0) for x in inv_levels)
+        # Cuerpo mínimo
+        body_txt = strip_html(p.get("body_html") or "")
+        if MIN_BODY_CHARS > 0 and len(body_txt) < MIN_BODY_CHARS:
+            return False, "short_body"
 
-            if price is None:
+        return True, None
+
+    # ------------------------ API pública ------------------------
+
+    def build(self):
+        """Descarga productos, aplica filtros y produce el índice en memoria."""
+        self.products.clear()
+        self._norm_titles.clear()
+        self._id_to_item.clear()
+        self._discard_reasons.clear()
+        self._inventory_cache.clear()
+
+        raw_products = self.shop.list_products()
+
+        for p in raw_products:
+            # IMAGEN PRINCIPAL (robusto):
+            # 1) featured image: product.image.src
+            # 2) primera de la galería: product.images[0].src
+            hero_img = None
+            img_obj = p.get("image") or {}
+            if img_obj.get("src"):
+                hero_img = img_obj["src"]
+            elif p.get("images"):
+                first = p["images"][0] or {}
+                hero_img = first.get("src")
+
+            # VARIANT & INVENTARIO
+            variants = p.get("variants") or []
+            v = self._variant_pick(variants)
+            if not v:
+                self._discard_reasons.append((p.get("id"), p.get("handle"), "no_variant_complete", p.get("title")))
                 continue
-            if self.rules["REQUIRE_SKU"] and not sku:
-                continue
-            if self.rules["REQUIRE_STOCK"] and total <= 0:
-                continue
 
-            out.append({
-                "id": v["id"],
-                "sku": sku or None,
-                "price": float(price),
-                "compare_at_price": float(v["compare_at_price"]) if v.get("compare_at_price") is not None else None,
-                "inventory_item_id": inv_item_id,
-                "inventory": inv_levels,  # se convierte a nombres más adelante
-            })
-        return out
+            inv_map = self._fetch_inventory_for_variants(variants)
+            inv_list = inv_map.get(v.get("inventory_item_id"), [])
+            inventory_sum = sum(x.get("available") or 0 for x in inv_list)
 
-    # ---------- build ----------
-    def build(self) -> None:
-        """Descarga catálogo y levanta índice en SQLite."""
-        # locations
-        try:
-            locations = self.client.list_locations()
-        except Exception:
-            locations = []
-        self._location_map = {int(x["id"]): x.get("name") or str(x["id"]) for x in locations}
-
-        # productos
-        products = self.client.list_products()  # puede tardar
-        # recoger todos los inventory_item_id
-        all_inv_ids: List[int] = []
-        for p in products:
-            for v in p.get("variants") or []:
-                if v.get("inventory_item_id"):
-                    all_inv_ids.append(int(v["inventory_item_id"]))
-
-        # inventario por item id
-        levels = self.client.inventory_levels_for_items(all_inv_ids) if all_inv_ids else []
-        self._stats["inventory_levels"] = len(levels)
-
-        # construir índice en disco
-        if os.path.exists(self.db_path):
-            try:
-                os.remove(self.db_path)
-            except OSError:
-                pass
-
-        # build inventory map
-        self._inventory_map = {}
-        for lev in levels:
-            iid = int(lev["inventory_item_id"])
-            self._inventory_map.setdefault(iid, []).append({
-                "location_id": int(lev["location_id"]),
-                "available": int(lev.get("available") or 0),
-            })
-
-        conn = self._conn_rw()
-        cur = conn.cursor()
-
-        # tablas
-        cur.executescript(
-            """
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE products (
-              id INTEGER PRIMARY KEY,
-              handle TEXT,
-              title TEXT,
-              body TEXT,
-              tags TEXT,
-              vendor TEXT,
-              product_type TEXT,
-              image TEXT
-            );
-            CREATE TABLE variants (
-              id INTEGER PRIMARY KEY,
-              product_id INTEGER,
-              sku TEXT,
-              price REAL,
-              compare_at_price REAL,
-              inventory_item_id INTEGER
-            );
-            CREATE TABLE inventory (
-              variant_id INTEGER,
-              location_id INTEGER,
-              location_name TEXT,
-              available INTEGER
-            );
-            """
-        )
-        conn.commit()
-
-        # Intentar crear FTS5 (si no está disponible, seguimos con LIKE)
-        try:
-            cur.execute("CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')")
-            self._fts_enabled = True
-        except sqlite3.OperationalError:
-            self._fts_enabled = False
-
-        # inserción de productos/variantes
-        discards_sample: List[Dict[str, Any]] = []
-        discards_count: Dict[str, int] = {}
-
-        ins_p = "INSERT INTO products (id, handle, title, body, tags, vendor, product_type, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        ins_v = "INSERT INTO variants (id, product_id, sku, price, compare_at_price, inventory_item_id) VALUES (?, ?, ?, ?, ?, ?)"
-        ins_inv = "INSERT INTO inventory (variant_id, location_id, location_name, available) VALUES (?, ?, ?, ?)"
-
-        n_products = 0
-        n_variants = 0
-
-        for p in products:
-            ok, reason = self._passes_product_rules(p)
+            ok, reason = self._accepts(p, hero_img, v, inventory_sum)
             if not ok:
-                discards_count[reason] = discards_count.get(reason, 0) + 1
-                if len(discards_sample) < 20:
-                    discards_sample.append({
-                        "product_id": p.get("id"),
-                        "handle": p.get("handle"),
-                        "title": p.get("title"),
-                        "reason": reason,
-                    })
+                self._discard_reasons.append((p.get("id"), p.get("handle"), reason, p.get("title")))
                 continue
 
-            # variantes válidas
-            valids = self._select_valid_variants(p.get("variants") or [])
-            if not valids:
-                discards_count["no_variant_complete"] = discards_count.get("no_variant_complete", 0) + 1
-                if len(discards_sample) < 20:
-                    discards_sample.append({
-                        "product_id": p.get("id"),
-                        "handle": p.get("handle"),
-                        "title": p.get("title"),
-                        "reason": "no_variant_complete",
-                    })
-                continue
+            handle = p.get("handle")
+            product_url = f"{self.store_base}/products/{handle}" if handle else self.store_base
+            buy_url = product_url  # podrías cambiarlo a /cart/add si quieres “Comprar ahora”
 
-            image = None
-            if (p.get("images") or []):
-                # primera imagen
-                image = (p["images"][0].get("src") or "").strip() or None
-
-            body_text = strip_html(p.get("body_html") or "")
-            tags = ",".join((p.get("tags") or "").split(",")).strip()
-
-            cur.execute(ins_p, (
-                int(p["id"]),
-                p.get("handle"),
-                p.get("title"),
-                body_text,
-                tags,
-                p.get("vendor"),
-                p.get("product_type"),
-                image,
-            ))
-            n_products += 1
-
-            for v in valids:
-                cur.execute(ins_v, (
-                    int(v["id"]),
-                    int(p["id"]),
-                    v.get("sku"),
-                    v.get("price"),
-                    v.get("compare_at_price"),
-                    int(v["inventory_item_id"]) if v.get("inventory_item_id") else None,
-                ))
-                n_variants += 1
-
-                # inventario
-                for lvl in v["inventory"]:
-                    loc_id = int(lvl["location_id"])
-                    cur.execute(ins_inv, (
-                        int(v["id"]),
-                        loc_id,
-                        self._location_map.get(loc_id, str(loc_id)),
-                        int(lvl.get("available") or 0),
-                    ))
-
-        conn.commit()
-
-        # poblar FTS si está habilitado
-        if self._fts_enabled:
-            cur.execute("INSERT INTO products_fts (rowid, title, body, tags) SELECT id, title, body, tags FROM products")
-            conn.commit()
-
-        conn.close()
-
-        self._stats["products"] = n_products
-        self._stats["variants"] = n_variants
-        self._discards_sample = discards_sample
-        self._discards_count = discards_count
-
-    # ---------- reporting ----------
-    def stats(self) -> Dict[str, Any]:
-        return dict(self._stats)
-
-    def discard_stats(self) -> Dict[str, Any]:
-        # transformar a lista ordenada para fácil consumo en consola
-        by_reason = [{"reason": k, "count": v} for k, v in sorted(self._discards_count.items(), key=lambda x: -x[1])]
-        return {"ok": True, "by_reason": by_reason, "sample": self._discards_sample}
-
-    def sample_products(self, limit: int = 10) -> List[Dict[str, Any]]:
-        conn = self._conn_read()
-        cur = conn.cursor()
-        rows = list(cur.execute("SELECT id, handle, title, vendor, product_type FROM products LIMIT ?", (int(limit),)))
-        conn.close()
-        return rows
-
-    # ---------- búsqueda ----------
-    def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
-        if not query:
-            return []
-
-        conn = self._conn_read()
-        cur = conn.cursor()
-
-        terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 1]
-        fts_query = " ".join(terms) if terms else query
-
-        ids: List[int] = []
-
-        # 1) FTS
-        if self._fts_enabled:
-            fts_rows = list(cur.execute(
-                "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                (fts_query, k * 3),
-            ))
-            ids.extend([int(r["rowid"]) for r in fts_rows])
-
-        # 2) Fallback LIKE AND por término
-        if len(ids) < k and terms:
-            where_parts = []
-            params: List[Any] = []
-            for t in terms:
-                like = f"%{t}%"
-                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
-                params.extend([like, like, like])
-            sql = f"SELECT id FROM products WHERE {' AND '.join(where_parts)} LIMIT ?"
-            params.append(k * 3)
-            like_rows = list(cur.execute(sql, tuple(params)))
-            ids.extend([int(r["id"]) for r in like_rows])
-
-        # únicos/top-k
-        seen, order = set(), []
-        for i in ids:
-            if i not in seen:
-                seen.add(i)
-                order.append(i)
-        ids = order[:k]
-
-        results: List[Dict[str, Any]] = []
-        for pid in ids:
-            p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
-            if not p:
-                continue
-            vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
-            # filtrar variantes “presentables”: precio, (stock si se exige)
-            v_infos: List[Dict[str, Any]] = []
-            for v in vars_:
-                inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
-                total = sum(int(x["available"]) for x in inv) if inv else 0
-                if v["price"] is None:
-                    continue
-                if self.rules["REQUIRE_STOCK"] and total <= 0:
-                    continue
-                if self.rules["REQUIRE_SKU"] and not (v.get("sku") or "").strip():
-                    continue
-                v_infos.append({
-                    "variant_id": v["id"],
-                    "sku": (v.get("sku") or None),
-                    "price": v["price"],
-                    "compare_at_price": v.get("compare_at_price"),
-                    "inventory": [{"name": x["location_name"], "available": int(x["available"])} for x in inv],
-                })
-            if not v_infos:
-                continue
-
-            # ordenar por stock descendente (si no exigimos stock, mantiene orden de inserción)
-            v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
-            best = v_infos[0]
-
-            product_url = f"{self.store_base_url}/products/{p['handle']}"
-            buy_url = f"{self.store_base_url}/cart/{best['variant_id']}:1"
-
-            results.append({
-                "id": p["id"],
-                "title": p["title"],
-                "handle": p["handle"],
-                "image": p["image"],
-                "body": p["body"],
-                "tags": p["tags"],
-                "vendor": p["vendor"],
-                "product_type": p["product_type"],
-                "variant": best,
+            item = {
+                "id": p.get("id"),
+                "title": p.get("title") or "",
+                "handle": handle,
+                "body": strip_html(p.get("body_html") or ""),
+                "image": hero_img,
                 "product_url": product_url,
                 "buy_url": buy_url,
+                "vendor": p.get("vendor"),
+                "product_type": p.get("product_type"),
+                "tags": p.get("tags") or "",
+                "status": p.get("status"),
+                "variant": {
+                    "id": v.get("id"),
+                    "sku": (v.get("sku") or "").strip(),
+                    "price": v.get("price"),
+                    "compare_at_price": v.get("compare_at_price"),
+                    "inventory": inv_list,  # [{location_id, available}]
+                },
+            }
+
+            self.products.append(item)
+            self._id_to_item[item["id"]] = item
+            self._norm_titles.append(item["title"].lower())
+
+    # ------------------------ consulta & utilidades ------------------------
+
+    def stats(self):
+        """Estadísticas rápidas para /api/admin/stats."""
+        return {
+            "products": len(self.products),
+            "variants": len(self.products),  # 1 variant elegido por producto
+            "inventory_levels": sum(len(p["variant"]["inventory"]) for p in self.products),
+        }
+
+    def discard_stats(self):
+        """Resumen de descartes para /api/admin/discards."""
+        by_reason = defaultdict(int)
+        sample = []
+        for pid, handle, reason, title in self._discard_reasons:
+            by_reason[reason] += 1
+        # muestreamos algunos para inspección
+        for it in self._discard_reasons[:20]:
+            pid, handle, reason, title = it
+            sample.append({
+                "product_id": pid,
+                "handle": handle,
+                "reason": reason,
+                "title": title,
             })
+        # ordenado
+        res = [{"reason": r, "count": c} for r, c in sorted(by_reason.items(), key=lambda x: -x[1])]
+        return {"by_reason": res, "sample": sample}
 
-        conn.close()
-        return results
+    def sample_products(self, limit=10):
+        """Devuelve algunos productos del índice (para ver cómo quedaron)."""
+        return self.products[: int(limit)]
 
-    # ---------- util para LLM ----------
-    def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
-        small = []
+    def mini_catalog_json(self, items):
+        """Convierte items seleccionados a un JSON pequeño para el prompt del LLM."""
+        out = []
         for it in items:
             v = it["variant"]
-            small.append({
+            out.append({
                 "title": it["title"],
-                "price": v["price"],
+                "sku": v.get("sku"),
+                "price": v.get("price"),
                 "compare_at_price": v.get("compare_at_price"),
-                "product_url": it["product_url"],
-                "buy_url": it["buy_url"],
-                "stock_total": sum(x["available"] for x in v["inventory"]) if v["inventory"] else 0,
+                "url": it["product_url"],
+                "image": it["image"],
+                "stock_total": sum(x["available"] for x in v["inventory"]),
             })
-        return json.dumps(small, ensure_ascii=False)
+        return json.dumps(out, ensure_ascii=False)
+
+    def search(self, query: str, k=5):
+        """Búsqueda fuzzy por título (se puede enriquecer con más señales)."""
+        if not query:
+            return []
+        q = query.lower().strip()
+
+        # coincidencias por título
+        res = process.extract(q, self._norm_titles, scorer=fuzz.WRatio, limit=max(k * 2, 8))
+        # mapea a items
+        picked = []
+        seen = set()
+        for score, idx, _ in [(r[1], r[2], r[0]) if isinstance(r, tuple) and len(r) == 3 else (r[1], r[2], r[0]) for r in res]:
+            # r con forma (title_str, score, idx) depende de rapidfuzz; garantizamos idx/score
+            title_idx = idx
+            if 0 <= title_idx < len(self.products):
+                item = self.products[title_idx]
+                if item["id"] in seen:
+                    continue
+                seen.add(item["id"])
+                picked.append(item)
+                if len(picked) >= k:
+                    break
+        return picked
