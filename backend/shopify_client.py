@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Cliente REST mínimo para Shopify (Admin API).
-- Maneja versión vía env SHOPIFY_API_VERSION (por defecto 2024-10).
-- Paginación con since_id para /products.json
-- Reintento simple en 429 (rate limit).
-- Logs útiles cuando la API responde != 2xx.
-- Incluye método 'probe()' para diagnóstico rápido desde /api/admin/diag.
+Cliente REST muy simple para Shopify.
+- Usa paginación por since_id.
+- Incluye 'image' (featured image) y 'images' (galería) para robustez.
 """
 
 import os
 import time
 import requests
 
-# Usa una versión estable. Si tu tienda soporta otra, cámbiala con SHOPIFY_API_VERSION en Render.
+# Versión de API; puedes sobrescribirla con SHOPIFY_API_VERSION en Render.
 API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
-
 
 class ShopifyClient:
     def __init__(self, token: str = None, store_domain: str = None):
@@ -29,53 +25,41 @@ class ShopifyClient:
             "Accept": "application/json",
         }
 
-    # ----------------------- HTTP helpers -----------------------
-
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        """GET con reintento simple y logging de errores (cuerpo incluido)."""
+    def _get(self, path, params=None):
+        """GET con un reintento simple si devuelve 429."""
         url = f"{self.base}{path}"
         r = requests.get(url, headers=self.headers, params=params, timeout=40)
-
-        # Reintento básico en 429 (rate limit)
         if r.status_code == 429:
-            retry_after = float(r.headers.get("Retry-After", "1.2"))
-            time.sleep(max(retry_after, 1.2))
+            time.sleep(1.2)
             r = requests.get(url, headers=self.headers, params=params, timeout=40)
-
-        if not r.ok:
-            # Log CLI útil (Render logs) para saber por qué falla la llamada.
-            body_preview = r.text[:800] if isinstance(r.text, str) else str(r.text)
-            print(
-                f"[SHOPIFY][GET] {r.status_code} {url} params={params} body={body_preview}",
-                flush=True,
-            )
         r.raise_for_status()
         return r.json()
 
-    # ----------------------- Recursos usados -----------------------
-
-    def list_locations(self) -> list[dict]:
+    def list_locations(self):
         data = self._get("/locations.json")
         return data.get("locations", [])
 
-    def list_products(self) -> list[dict]:
+    def list_products(self):
         """
-        Paginación con since_id (válida en REST).
-        Trae campos necesarios para indexación.
+        Descarga productos en lotes usando since_id.
+        IMPORTANTE: pedimos 'image' y 'images'.
         """
-        products: list[dict] = []
+        products = []
         limit = 250
         since_id = 0
 
-        # IMPORTANTE: incluimos 'image' (singular) además de 'images'
-        # porque muchas tiendas usan sólo el campo principal.
+        # Pedimos sólo los campos que necesitamos para indexar
         fields = (
-            "id,title,handle,body_html,images,image,variants,"
-            "tags,vendor,status,product_type"
+            "id,title,handle,body_html,"
+            "image,images,"              # <-- featured y galería
+            "variants,tags,vendor,status,product_type"
         )
 
         while True:
-            params = {"limit": limit, "fields": fields}
+            params = {
+                "limit": limit,
+                "fields": fields,
+            }
             if since_id:
                 params["since_id"] = since_id
 
@@ -91,12 +75,9 @@ class ShopifyClient:
 
         return products
 
-    def inventory_levels_for_items(self, inventory_item_ids: list[int]) -> list[dict]:
-        """Shopify limita 50 ids por request."""
-        levels: list[dict] = []
-        if not inventory_item_ids:
-            return levels
-
+    def inventory_levels_for_items(self, inventory_item_ids):
+        """Obtiene inventario por inventory_item_id (máx. 50 por llamada)."""
+        levels = []
         chunk = 50
         for i in range(0, len(inventory_item_ids), chunk):
             ids = inventory_item_ids[i : i + chunk]
@@ -104,34 +85,3 @@ class ShopifyClient:
             data = self._get("/inventory_levels.json", params=params)
             levels.extend(data.get("inventory_levels", []))
         return levels
-
-    # ----------------------- Diagnóstico -----------------------
-
-    def probe(self) -> dict:
-        """
-        Hace una llamada mínima para comprobar credenciales y versión.
-        Devuelve muestra de productos y conteo de ubicaciones.
-        """
-        try:
-            sample = self._get(
-                "/products.json",
-                params={"limit": 3, "fields": "id,title,status"},
-            )
-            locs = self.list_locations()
-            return {
-                "ok": True,
-                "sample_products": [
-                    {"id": p["id"], "title": p.get("title"), "status": p.get("status")}
-                    for p in sample.get("products", [])
-                ],
-                "locations": len(locs),
-                "api_version": API_VERSION,
-                "store_domain": self.store_domain,
-            }
-        except Exception as e:
-            return {
-                "ok": False,
-                "error": str(e),
-                "api_version": API_VERSION,
-                "store_domain": self.store_domain,
-            }
