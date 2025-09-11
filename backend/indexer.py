@@ -13,7 +13,6 @@ class CatalogIndexer:
         self.store_base_url = store_base_url.rstrip("/")
         os.makedirs(DB_DIR, exist_ok=True)
 
-    # ----- DB helpers -----
     def _conn(self):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -24,7 +23,6 @@ class CatalogIndexer:
         conn = self._conn()
         cur = conn.cursor()
 
-        # Tablas limpias
         cur.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -92,10 +90,9 @@ class CatalogIndexer:
                 if v.get("inventory_item_id"):
                     all_inv_items.append(v["inventory_item_id"])
 
-        # Niveles de inventario (en lotes)
+        # Niveles de inventario
         levels = self.client.inventory_levels_for_items(all_inv_items) if all_inv_items else []
 
-        # Guardar inventario
         if levels:
             cur.executemany(
                 "INSERT INTO inventory_levels(inventory_item_id, location_id, available) VALUES (?,?,?)",
@@ -105,20 +102,24 @@ class CatalogIndexer:
                 ],
             )
 
-        # Helper para sumar stock por inventory_item_id
         def stock_for(inv_item_id: int) -> int:
             return sum(
                 lv.get("available", 0) for lv in levels if lv["inventory_item_id"] == inv_item_id
             )
 
-        # Reglas de "producto completo"
+        # --------- regla de “producto completo” (ajustada) ----------
         def product_is_complete(p) -> bool:
-            # Imagen principal
-            has_image = bool(p.get("images"))
-            # Descripción (relajamos el mínimo a 10 caracteres)
+            # Imagen: acepta 'images' (plural), 'image' (singular) o imagen en alguna variante
+            images_list = p.get("images") or []
+            has_image = bool(images_list) or bool(p.get("image")) or any(
+                (v.get("image_id") is not None) for v in p.get("variants", [])
+            )
+
+            # Descripción (mínimo 10 caracteres limpios)
             body = strip_html(p.get("body_html", "")) or ""
             has_body = len(body.strip()) >= 10
-            # Variante válida (SKU, precio y stock > 0)
+
+            # Variante con SKU, precio y stock > 0
             ok_variant = False
             for v in p.get("variants", []):
                 sku_ok = bool(v.get("sku"))
@@ -128,11 +129,11 @@ class CatalogIndexer:
                 if sku_ok and price_ok and total > 0:
                     ok_variant = True
                     break
+
             return has_image, has_body, ok_variant
+        # ------------------------------------------------------------
 
         inserted = 0
-
-        # Insertar productos + variantes + FTS (solo si completos y activos)
         for p in products:
             if p.get("status") != "active":
                 continue
@@ -142,7 +143,8 @@ class CatalogIndexer:
                 continue
 
             body = strip_html(p.get("body_html", "")) or ""
-            image = p.get("images", [{}])[0].get("src")
+            # toma imagen principal si existe, si no la primera de la lista
+            image = (p.get("image") or {}).get("src") or (p.get("images", [{}])[0].get("src"))
             cur.execute(
                 "INSERT INTO products(id,title,handle,body,image,tags,vendor,product_type) VALUES (?,?,?,?,?,?,?,?)",
                 (
@@ -158,7 +160,6 @@ class CatalogIndexer:
             )
             inserted += 1
 
-            # Variantes
             v_rows = []
             for v in p.get("variants", []):
                 v_rows.append(
@@ -177,7 +178,6 @@ class CatalogIndexer:
                     v_rows,
                 )
 
-            # FTS
             cur.execute(
                 "INSERT INTO products_fts(rowid, title, body, tags) VALUES (?,?,?,?)",
                 (p["id"], p.get("title", ""), body, p.get("tags", "")),
@@ -186,6 +186,9 @@ class CatalogIndexer:
         conn.commit()
         print(f"[INDEX] Inserted products: {inserted}", flush=True)
         conn.close()
+
+    def _conn_read(self):
+        return self._conn()
 
     def _top_inventory_by_variant(self, conn, inventory_item_id: int):
         q = """
@@ -198,10 +201,9 @@ class CatalogIndexer:
         return [dict(row) for row in conn.execute(q, (inventory_item_id,))]
 
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
-        conn = self._conn()
+        conn = self._conn_read()
         cur = conn.cursor()
 
-        # 1) Búsqueda FTS5
         fts_rows = list(
             cur.execute(
                 "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
@@ -210,7 +212,6 @@ class CatalogIndexer:
         )
         ids = [r[0] for r in fts_rows]
 
-        # 2) Fallback LIKE si no hay suficientes resultados (incluimos tags)
         if len(ids) < k:
             like_rows = list(
                 cur.execute(
@@ -220,13 +221,10 @@ class CatalogIndexer:
             )
             ids += [r[0] for r in like_rows]
 
-        # Unicos preservando orden
-        seen = set()
-        ordered = []
+        seen, ordered = set(), []
         for i in ids:
             if i not in seen:
-                seen.add(i)
-                ordered.append(i)
+                seen.add(i); ordered.append(i)
         ids = ordered[:k]
 
         results = []
@@ -260,7 +258,6 @@ class CatalogIndexer:
             if not v_infos:
                 continue
 
-            # Preferimos la variante con mayor stock
             v_infos.sort(
                 key=lambda x: sum(i["available"] for i in x["inventory"]), reverse=True
             )
