@@ -22,12 +22,21 @@ shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 deeps = DeepseekClient()
 
-# Construye índice al iniciar
+# Construye índice al iniciar (no tumbar la app si falla)
 try:
     indexer.build()
 except Exception as e:
-    # No tumbes la app en arranque; podrás reindexar luego con /api/admin/reindex
     print(f"[WARN] Index build failed at startup: {e}", flush=True)
+
+@app.get("/")
+def home():
+    return (
+        "<h1>Maxter backend</h1>"
+        "<p>OK ✅. Endpoints: "
+        '<a href="/health">/health</a>, '
+        '<code>POST /api/chat</code>, '
+        '<code>POST /api/admin/reindex</code>.</p>'
+    )
 
 @app.get("/health")
 def health():
@@ -79,3 +88,4 @@ def static_files(fname):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
