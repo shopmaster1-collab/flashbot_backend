@@ -16,7 +16,8 @@ USER_TEMPLATE = (
     "Pregunta del usuario: {query}\n\n"
     "Catálogo relevante (JSON):\n{catalog_json}\n\n"
     "Instrucciones de redacción:\n"
-    "- Explica en 2–5 frases directas.\n"
+    "- Explica en 5-20 frases directas.\n"
     "- Menciona nombres de producto cuando ayude.\n"
     "- No inventes precios, existencias ni características: ya van en tarjetas aparte.\n"
 )
+
