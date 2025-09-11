@@ -1,11 +1,9 @@
-# backend/app.py
 # -*- coding: utf-8 -*-
 import os
 import threading
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
-
 from .shopify_client import ShopifyClient
 from .indexer import CatalogIndexer
 from .deepseek_client import DeepseekClient
@@ -25,10 +23,6 @@ shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 deeps = DeepseekClient()
 
-def _admin_ok(req) -> bool:
-    """Valida el header X-Admin-Secret contra ADMIN_REINDEX_SECRET."""
-    return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
-
 # Construye índice al iniciar (no tumbar la app si falla)
 try:
     indexer.build()
@@ -45,9 +39,7 @@ def home():
         '<code>POST /api/admin/reindex</code>, '
         '<code>GET /api/admin/stats</code>, '
         '<code>GET /api/admin/search?q=...</code>, '
-        '<code>GET /api/admin/discards</code>, '
-        '<code>GET /api/admin/products?limit=N</code>, '
-        '<code>GET /api/admin/diag</code>'
+        '<code>GET /api/admin/discards</code>'
         ".</p>"
     )
 
@@ -62,8 +54,14 @@ def chat():
     if not query:
         return jsonify({"answer": "lo siento, no dispongo de esa información", "products": []})
 
-    # Buscar en catálogo
-    items = indexer.search(query, k=5)
+    # Buscar candidatos del índice (subimos k para aumentar chances de encontrar productos con foto)
+    items = indexer.search(query, k=12)
+
+    # Mostrar SOLO productos con imagen (cumple tu requisito de fichas completas visibles)
+    items = [it for it in items if it.get("image")]
+    # si sobran, nos quedamos con los 5 mejores
+    items = items[:5]
+
     if not items:
         return jsonify({"answer": "lo siento, no dispongo de esa información", "products": []})
 
@@ -91,6 +89,10 @@ def chat():
         })
 
     return jsonify({"answer": answer, "products": cards})
+
+# ---------- Admin helpers ----------
+def _admin_ok(req):
+    return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
 def _do_reindex():
     try:
@@ -120,7 +122,7 @@ def admin_search():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     q = (request.args.get("q") or "").strip()
-    items = indexer.search(q, k=5) if q else []
+    items = indexer.search(q, k=10) if q else []
     out = []
     for it in items:
         out.append({
@@ -129,6 +131,7 @@ def admin_search():
             "sku": it["variant"]["sku"],
             "price": it["variant"]["price"],
             "stock": sum(x["available"] for x in it["variant"]["inventory"]),
+            "has_image": bool(it.get("image")),
         })
     return {"ok": True, "q": q, "count": len(out), "items": out}
 
@@ -144,47 +147,6 @@ def admin_products():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     limit = int(request.args.get("limit", 10))
     return {"ok": True, "items": indexer.sample_products(limit=limit)}
-
-@app.get("/api/admin/diag")
-def admin_diag():
-    """Diagnóstico rápido: muestra flags de entorno y prueba Shopify ligera."""
-    if not _admin_ok(request):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    env_info = {
-        "api_version": os.getenv("SHOPIFY_API_VERSION", "2025-01"),
-        "store_domain": os.getenv("SHOPIFY_STORE_DOMAIN", ""),
-        "require_active": os.getenv("REQUIRE_ACTIVE", "1"),
-        "require_image": os.getenv("REQUIRE_IMAGE", "1"),
-        "require_stock": os.getenv("REQUIRE_STOCK", "0"),
-        "require_sku": os.getenv("REQUIRE_SKU", "0"),
-        "min_body_chars": int(os.getenv("MIN_BODY_CHARS", "0")),
-    }
-
-    probe = {"ok": True}
-    try:
-        locs = shop.list_locations()
-        probe["locations"] = len(locs)
-        # muestra 3 productos de forma liviana (id, título, status, #imagenes, #variantes)
-        sample = shop._get(
-            "/products.json",
-            params={"limit": 3, "fields": "id,title,handle,status,images,variants"},
-        ).get("products", [])
-        probe["sample_products"] = [
-            {
-                "id": p.get("id"),
-                "title": p.get("title"),
-                "status": p.get("status"),
-                "images": len(p.get("images", [])),
-                "variants": len(p.get("variants", [])),
-            }
-            for p in sample
-        ]
-    except Exception as e:
-        probe["ok"] = False
-        probe["error"] = str(e)
-
-    return {"ok": True, "env": env_info, "probe": probe}
 
 @app.get("/static/<path:fname>")
 def static_files(fname):
