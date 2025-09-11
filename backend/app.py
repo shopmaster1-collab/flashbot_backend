@@ -16,9 +16,35 @@ STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*").split(",")}})
 
-# --- Servicios (instanciación) ---
+# ---------- CORS ----------
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+CORS(app, resources={
+    r"/api/*": {
+        "origins": _allowed_origins,
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "X-Admin-Secret"],
+        "max_age": 86400,
+    }
+})
+
+@app.after_request
+def _force_cors_headers(resp):
+    # Garantiza headers CORS (útil para preflight y respuestas personalizadas)
+    if request.path.startswith("/api/"):
+        resp.headers.setdefault("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        resp.headers.setdefault("Vary", "Origin")
+        resp.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        resp.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, X-Admin-Secret")
+        resp.headers.setdefault("Access-Control-Max-Age", "86400")
+    return resp
+
+# Preflight genérico para /api/admin/*
+@app.route("/api/admin/<path:subpath>", methods=["OPTIONS"])
+def _admin_preflight(subpath):
+    return ("", 200)
+
+# ---------- Servicios ----------
 shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 deeps = DeepseekClient()
@@ -29,6 +55,7 @@ try:
 except Exception as e:
     print(f"[WARN] Index build failed at startup: {e}", flush=True)
 
+# ---------- Rutas públicas ----------
 @app.get("/")
 def home():
     return (
@@ -38,7 +65,8 @@ def home():
         '<code>POST /api/chat</code>, '
         '<code>POST /api/admin/reindex</code>, '
         '<code>GET /api/admin/stats</code>, '
-        '<code>GET /api/admin/search?q=...</code>'
+        '<code>GET /api/admin/search?q=...</code>, '
+        '<code>GET /api/admin/diag</code>'
         ".</p>"
     )
 
@@ -53,12 +81,10 @@ def chat():
     if not query:
         return jsonify({"answer": "lo siento, no dispongo de esa información", "products": []})
 
-    # Buscar en catálogo
     items = indexer.search(query, k=5)
     if not items:
         return jsonify({"answer": "lo siento, no dispongo de esa información", "products": []})
 
-    # Redacción con Deepseek (contexto limitado)
     context = indexer.mini_catalog_json(items)
     user_msg = USER_TEMPLATE.format(query=query, catalog_json=context)
     try:
@@ -67,7 +93,6 @@ def chat():
         print(f"[WARN] Deepseek chat error: {e}", flush=True)
         answer = "lo siento, no dispongo de esa información"
 
-    # Formateo de tarjetas
     cards = []
     for it in items:
         v = it["variant"]
@@ -80,8 +105,11 @@ def chat():
             "product_url": it["product_url"],
             "inventory": it["variant"]["inventory"],
         })
-
     return jsonify({"answer": answer, "products": cards})
+
+# ---------- Admin (requiere X-Admin-Secret) ----------
+def _admin_ok(req) -> bool:
+    return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
 def _do_reindex():
     try:
@@ -95,26 +123,23 @@ def _do_reindex():
 
 @app.post("/api/admin/reindex")
 def reindex():
-    # Seguridad simple por header
-    if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
+    if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    # Ejecuta el rebuild en background para responder inmediato
     threading.Thread(target=_do_reindex, daemon=True).start()
     return {"ok": True, "message": "reindex started"}
 
 @app.get("/api/admin/stats")
 def admin_stats():
-    if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
+    if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     return {"ok": True, **indexer.stats()}
 
 @app.get("/api/admin/search")
 def admin_search():
-    if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
+    if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     q = (request.args.get("q") or "").strip()
     items = indexer.search(q, k=5) if q else []
-    # devolver resumen ligero
     out = []
     for it in items:
         out.append({
@@ -126,6 +151,18 @@ def admin_search():
         })
     return {"ok": True, "q": q, "count": len(out), "items": out}
 
+@app.get("/api/admin/diag")
+def admin_diag():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    env = {
+        "store_domain": os.getenv("SHOPIFY_STORE_DOMAIN"),
+        "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-10"),
+    }
+    probe = shop.probe()
+    return {"ok": True, "env": env, "probe": probe}
+
+# ---------- Estáticos (widget) ----------
 @app.get("/static/<path:fname>")
 def static_files(fname):
     return send_from_directory(STATIC_DIR, fname)
