@@ -36,7 +36,10 @@ def home():
         "<p>OK ✅. Endpoints: "
         '<a href="/health">/health</a>, '
         '<code>POST /api/chat</code>, '
-        '<code>POST /api/admin/reindex</code>.</p>'
+        '<code>POST /api/admin/reindex</code>, '
+        '<code>GET /api/admin/stats</code>, '
+        '<code>GET /api/admin/search?q=...</code>'
+        ".</p>"
     )
 
 @app.get("/health")
@@ -80,14 +83,48 @@ def chat():
 
     return jsonify({"answer": answer, "products": cards})
 
+def _do_reindex():
+    try:
+        print("[INDEX] Reindex started", flush=True)
+        indexer.build()
+        print("[INDEX] Reindex finished", flush=True)
+        print(f"[INDEX] Stats: {indexer.stats()}", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[INDEX] Reindex failed: {e}\n{traceback.format_exc()}", flush=True)
+
 @app.post("/api/admin/reindex")
 def reindex():
     # Seguridad simple por header
     if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     # Ejecuta el rebuild en background para responder inmediato
-    threading.Thread(target=indexer.build, daemon=True).start()
+    threading.Thread(target=_do_reindex, daemon=True).start()
     return {"ok": True, "message": "reindex started"}
+
+@app.get("/api/admin/stats")
+def admin_stats():
+    if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    return {"ok": True, **indexer.stats()}
+
+@app.get("/api/admin/search")
+def admin_search():
+    if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    q = (request.args.get("q") or "").strip()
+    items = indexer.search(q, k=5) if q else []
+    # devolver resumen ligero
+    out = []
+    for it in items:
+        out.append({
+            "title": it["title"],
+            "handle": it["handle"],
+            "sku": it["variant"]["sku"],
+            "price": it["variant"]["price"],
+            "stock": sum(x["available"] for x in it["variant"]["inventory"]),
+        })
+    return {"ok": True, "q": q, "count": len(out), "items": out}
 
 @app.get("/static/<path:fname>")
 def static_files(fname):
