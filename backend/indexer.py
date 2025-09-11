@@ -1,83 +1,300 @@
 # -*- coding: utf-8 -*-
-ORDER BY locations.name ASC
-"""
-return [dict(row) for row in conn.execute(q, (inventory_item_id,))]
+import os
+import sqlite3
+from typing import List, Dict, Any
+from .utils import strip_html
 
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "catalog.db")
 
-def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
-conn = self._conn()
-cur = conn.cursor()
-# 1) Búsqueda FTS5
-fts = list(cur.execute(
-"SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?", (query, k*2)
-))
-ids = [r[0] for r in fts]
-# 2) Fallback: LIKE por si el FTS no trae suficiente
-if len(ids) < k:
-like = list(cur.execute(
-"SELECT id FROM products WHERE title LIKE ? OR body LIKE ? LIMIT ?",
-(f"%{query}%", f"%{query}%", k*2)
-))
-ids += [r[0] for r in like]
-# uniq pero preservando orden
-seen = set(); ordered = []
-for i in ids:
-if i not in seen:
-seen.add(i); ordered.append(i)
-ids = ordered[:k]
-results = []
-for pid in ids:
-p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
-if not p: continue
-# variantes con stock > 0 (sumado)
-variants = cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)).fetchall()
-v_infos = []
-for v in variants:
-inv = self._top_inventory_by_variant(conn, v["inventory_item_id"]) if v["inventory_item_id"] else []
-total_stock = sum(x["available"] for x in inv)
-if total_stock > 0 and v["price"] is not None and v["sku"]:
-v_infos.append({
-"variant_id": v["id"],
-"sku": v["sku"],
-"price": v["price"],
-"compare_at_price": v["compare_at_price"],
-"inventory": inv,
-})
-if not v_infos:
-continue
-# elegir variante preferida: mayor stock
-v_infos.sort(key=lambda x: sum(i["available"] for i in x["inventory"]), reverse=True)
-best = v_infos[0]
-product_url = f"{self.store_base_url}/products/{p['handle']}"
-buy_url = f"{self.store_base_url}/cart/{best['variant_id']}:1"
-results.append({
-"id": p["id"],
-"title": p["title"],
-"handle": p["handle"],
-"image": p["image"],
-"body": p["body"],
-"tags": p["tags"],
-"vendor": p["vendor"],
-"product_type": p["product_type"],
-"variant": best,
-"product_url": product_url,
-"buy_url": buy_url,
-})
-conn.close()
-return results
+class CatalogIndexer:
+    def __init__(self, shopify_client, store_base_url: str):
+        self.client = shopify_client
+        self.store_base_url = store_base_url.rstrip("/")
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
+    # ----- DB helpers -----
+    def _conn(self):
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-def mini_catalog_json(self, items: List[Dict[str,Any]]) -> str:
-import json
-# Reducido para mandar al modelo sin credenciales ni urls privadas
-safe = []
-for it in items:
-safe.append({
-"title": it["title"],
-"short": it["body"][:400],
-"tags": it["tags"],
-"price": it["variant"]["price"],
-"compare_at_price": it["variant"]["compare_at_price"],
-"sku": it["variant"]["sku"],
-})
-return json.dumps(safe, ensure_ascii=False, indent=2)
+    def build(self):
+        """Descarga catálogo, filtra productos completos y crea FTS5."""
+        conn = self._conn()
+        cur = conn.cursor()
+
+        # Tablas limpias
+        cur.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+
+            DROP TABLE IF EXISTS products;
+            DROP TABLE IF EXISTS variants;
+            DROP TABLE IF EXISTS locations;
+            DROP TABLE IF EXISTS inventory_levels;
+            DROP TABLE IF EXISTS products_fts;
+
+            CREATE TABLE products (
+                id INTEGER PRIMARY KEY,
+                title TEXT,
+                handle TEXT,
+                body TEXT,
+                image TEXT,
+                tags TEXT,
+                vendor TEXT,
+                product_type TEXT
+            );
+
+            CREATE TABLE variants (
+                id INTEGER PRIMARY KEY,
+                product_id INTEGER,
+                sku TEXT,
+                price REAL,
+                compare_at_price REAL,
+                inventory_item_id INTEGER,
+                FOREIGN KEY(product_id) REFERENCES products(id)
+            );
+
+            CREATE TABLE locations (
+                id INTEGER PRIMARY KEY,
+                name TEXT
+            );
+
+            CREATE TABLE inventory_levels (
+                inventory_item_id INTEGER,
+                location_id INTEGER,
+                available INTEGER
+            );
+
+            CREATE VIRTUAL TABLE products_fts USING fts5(
+                title, body, tags, content='products', content_rowid='id'
+            );
+            """
+        )
+        conn.commit()
+
+        # Ubicaciones
+        locations = self.client.list_locations()
+        if locations:
+            cur.executemany(
+                "INSERT INTO locations(id, name) VALUES (?,?)",
+                [(loc["id"], loc["name"]) for loc in locations],
+            )
+
+        # Productos
+        products = self.client.list_products()
+
+        # Recolectar inventory_item_ids de variantes
+        all_inv_items = []
+        for p in products:
+            for v in p.get("variants", []):
+                if v.get("inventory_item_id"):
+                    all_inv_items.append(v["inventory_item_id"])
+
+        # Niveles de inventario (en lotes)
+        levels = self.client.inventory_levels_for_items(all_inv_items) if all_inv_items else []
+
+        # Guardar inventario
+        if levels:
+            cur.executemany(
+                "INSERT INTO inventory_levels(inventory_item_id, location_id, available) VALUES (?,?,?)",
+                [
+                    (lv["inventory_item_id"], lv["location_id"], lv.get("available", 0))
+                    for lv in levels
+                ],
+            )
+
+        # Helper para sumar stock por inventory_item_id
+        def stock_for(inv_item_id: int) -> int:
+            return sum(
+                lv.get("available", 0) for lv in levels if lv["inventory_item_id"] == inv_item_id
+            )
+
+        # Reglas de "producto completo"
+        def product_is_complete(p) -> bool:
+            # Imagen principal
+            has_image = bool(p.get("images"))
+            # Descripción
+            body = strip_html(p.get("body_html", "")) or ""
+            has_body = len(body) >= 30
+            # Variante válida (SKU, precio y stock > 0)
+            ok_variant = False
+            for v in p.get("variants", []):
+                sku_ok = bool(v.get("sku"))
+                price_ok = v.get("price") not in (None, "")
+                inv_item = v.get("inventory_item_id")
+                total = stock_for(inv_item) if inv_item else 0
+                if sku_ok and price_ok and total > 0:
+                    ok_variant = True
+                    break
+            return has_image, has_body, ok_variant
+
+        # Insertar productos + variantes + FTS (solo si completos y activos)
+        for p in products:
+            if p.get("status") != "active":
+                continue
+
+            has_image, has_body, ok_variant = product_is_complete(p)
+            if not (has_image and has_body and ok_variant):
+                continue
+
+            body = strip_html(p.get("body_html", "")) or ""
+            image = p.get("images", [{}])[0].get("src")
+            cur.execute(
+                "INSERT INTO products(id,title,handle,body,image,tags,vendor,product_type) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    p["id"],
+                    p.get("title"),
+                    p.get("handle"),
+                    body,
+                    image,
+                    p.get("tags", ""),
+                    p.get("vendor", ""),
+                    p.get("product_type", ""),
+                ),
+            )
+
+            # Variantes
+            v_rows = []
+            for v in p.get("variants", []):
+                v_rows.append(
+                    (
+                        v["id"],
+                        p["id"],
+                        v.get("sku", ""),
+                        float(v["price"]) if v.get("price") else None,
+                        float(v["compare_at_price"]) if v.get("compare_at_price") else None,
+                        v.get("inventory_item_id"),
+                    )
+                )
+            if v_rows:
+                cur.executemany(
+                    "INSERT INTO variants(id,product_id,sku,price,compare_at_price,inventory_item_id) VALUES (?,?,?,?,?,?)",
+                    v_rows,
+                )
+
+            # FTS
+            cur.execute(
+                "INSERT INTO products_fts(rowid, title, body, tags) VALUES (?,?,?,?)",
+                (p["id"], p.get("title", ""), body, p.get("tags", "")),
+            )
+
+        conn.commit()
+        conn.close()
+
+    def _top_inventory_by_variant(self, conn, inventory_item_id: int):
+        q = """
+        SELECT locations.name AS location, inventory_levels.available AS available
+        FROM inventory_levels
+        JOIN locations ON locations.id = inventory_levels.location_id
+        WHERE inventory_levels.inventory_item_id = ? AND inventory_levels.available > 0
+        ORDER BY locations.name ASC
+        """
+        return [dict(row) for row in conn.execute(q, (inventory_item_id,))]
+
+    def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
+        conn = self._conn()
+        cur = conn.cursor()
+
+        # 1) Búsqueda FTS5
+        fts_rows = list(
+            cur.execute(
+                "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
+                (query, k * 2),
+            )
+        )
+        ids = [r[0] for r in fts_rows]
+
+        # 2) Fallback LIKE si no hay suficientes resultados
+        if len(ids) < k:
+            like_rows = list(
+                cur.execute(
+                    "SELECT id FROM products WHERE title LIKE ? OR body LIKE ? LIMIT ?",
+                    (f"%{query}%", f"%{query}%", k * 2),
+                )
+            )
+            ids += [r[0] for r in like_rows]
+
+        # Unicos preservando orden
+        seen = set()
+        ordered = []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                ordered.append(i)
+        ids = ordered[:k]
+
+        results = []
+        for pid in ids:
+            p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+            if not p:
+                continue
+
+            variants = cur.execute(
+                "SELECT * FROM variants WHERE product_id=?", (pid,)
+            ).fetchall()
+
+            v_infos = []
+            for v in variants:
+                inv = (
+                    self._top_inventory_by_variant(conn, v["inventory_item_id"])
+                    if v["inventory_item_id"]
+                    else []
+                )
+                total_stock = sum(x["available"] for x in inv)
+                if total_stock > 0 and v["price"] is not None and v["sku"]:
+                    v_infos.append(
+                        {
+                            "variant_id": v["id"],
+                            "sku": v["sku"],
+                            "price": v["price"],
+                            "compare_at_price": v["compare_at_price"],
+                            "inventory": inv,
+                        }
+                    )
+            if not v_infos:
+                continue
+
+            # Preferimos la variante con mayor stock
+            v_infos.sort(
+                key=lambda x: sum(i["available"] for i in x["inventory"]), reverse=True
+            )
+            best = v_infos[0]
+
+            product_url = f"{self.store_base_url}/products/{p['handle']}"
+            buy_url = f"{self.store_base_url}/cart/{best['variant_id']}:1"
+
+            results.append(
+                {
+                    "id": p["id"],
+                    "title": p["title"],
+                    "handle": p["handle"],
+                    "image": p["image"],
+                    "body": p["body"],
+                    "tags": p["tags"],
+                    "vendor": p["vendor"],
+                    "product_type": p["product_type"],
+                    "variant": best,
+                    "product_url": product_url,
+                    "buy_url": buy_url,
+                }
+            )
+
+        conn.close()
+        return results
+
+    def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
+        import json
+        safe = []
+        for it in items:
+            safe.append(
+                {
+                    "title": it["title"],
+                    "short": (it["body"] or "")[:400],
+                    "tags": it["tags"],
+                    "price": it["variant"]["price"],
+                    "compare_at_price": it["variant"]["compare_at_price"],
+                    "sku": it["variant"]["sku"],
+                }
+            )
+        return json.dumps(safe, ensure_ascii=False, indent=2)
