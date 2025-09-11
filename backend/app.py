@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import threading
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -57,7 +58,11 @@ def chat():
     # Redacción con Deepseek (contexto limitado)
     context = indexer.mini_catalog_json(items)
     user_msg = USER_TEMPLATE.format(query=query, catalog_json=context)
-    answer = deeps.chat(SYSTEM_PROMPT, user_msg)
+    try:
+        answer = deeps.chat(SYSTEM_PROMPT, user_msg)
+    except Exception as e:
+        print(f"[WARN] Deepseek chat error: {e}", flush=True)
+        answer = "lo siento, no dispongo de esa información"
 
     # Formateo de tarjetas
     cards = []
@@ -77,10 +82,12 @@ def chat():
 
 @app.post("/api/admin/reindex")
 def reindex():
+    # Seguridad simple por header
     if request.headers.get("X-Admin-Secret") != os.getenv("ADMIN_REINDEX_SECRET", ""):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    indexer.build()
-    return {"ok": True}
+    # Ejecuta el rebuild en background para responder inmediato
+    threading.Thread(target=indexer.build, daemon=True).start()
+    return {"ok": True, "message": "reindex started"}
 
 @app.get("/static/<path:fname>")
 def static_files(fname):
@@ -88,4 +95,3 @@ def static_files(fname):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
