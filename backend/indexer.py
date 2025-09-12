@@ -137,21 +137,12 @@ class ShopifyREST:
         return out
 
 
-# ---------- Indexador ----------
 class CatalogIndexer:
-    # sinónimos (expansión de consulta)
-    _SYNONYMS: Dict[str, List[str]] = {
-        "decodificador": ["decodificador", "convertidor", "sintonizador", "tdt", "atsc", "mv-tdtplus", "tv digital"],
-        "divisor": ["divisor", "splitter", "repartidor", "hdmi sp", "hdmisp", "1x2", "1×2", "1x4", "1×4", "switch"],
-        "antena": ["antena", "uhf", "tvant", "aérea", "aerea", "exterior", "interior"],
-        "control": ["control", "remoto", "rm-", "hme-", "lcd-", "samsung", "roku", "streaming", "sony", "lg", "tcl"],
-        "hdmi": ["hdmi", "microhdmi", "8k", "4k", "ultra alta definición", "ultra alta definicion"],
-        "rca": ["rca", "audio video", "av", "3.5mm a rca", "2rca"],
-        "cctv": ["cctv", "cámara", "camara", "dvr"],
-        "soporte": ["soporte", "pared", "brazo", "inclinable", "fijo", "32", "55", "75"]
-    }
-
     def __init__(self, shop_client, store_base_url: str):
+        """
+        shop_client: instancia de ShopifyClient (puede ser None).
+        Si FORCE_REST=1 o faltan métodos en el cliente, se usa ShopifyREST.
+        """
         self.client = shop_client
         self.store_base_url = (store_base_url or "").rstrip("/") or "https://master.com.mx"
 
@@ -202,12 +193,12 @@ class CatalogIndexer:
             s = self._img_src(i)
             if s:
                 return s
-        # ✅ corrección del typo aquí:
+        # mapear por id para variantes con image_id
         images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
         for v in (p.get("variants") or []):
             iid = str(v.get("image_id") or "")
-            if iid:
-                s = self._img_src(images_by_id.get(iid))
+            if iid and iid in images_by_id:
+                s = self._img_src(images_by_id[iid])
                 if s:
                     return s
         return None
@@ -258,6 +249,7 @@ class CatalogIndexer:
         if force_rest and self._rest_fallback:
             return self._rest_fallback.list_products_active_all(limit=limit)
 
+        # intentar con el cliente inyectado si expone paginación
         try:
             if hasattr(self.client, "list_products"):
                 acc: List[Dict[str, Any]] = []
@@ -279,6 +271,7 @@ class CatalogIndexer:
         except Exception:
             pass
 
+        # fallback final
         if self._rest_fallback:
             return self._rest_fallback.list_products_active_all(limit=limit)
         return []
@@ -286,6 +279,7 @@ class CatalogIndexer:
     # ---------- build ----------
     def build(self) -> None:
         """Crea esquema primero y luego llena datos (robusto)."""
+        # reset archivo
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)
@@ -470,111 +464,67 @@ class CatalogIndexer:
 
         print(f"[INDEX] done: products={n_products} variants={n_variants} inventory_levels={self._stats['inventory_levels']}", flush=True)
 
+    # ---------- reporting ----------
+    def stats(self) -> Dict[str, Any]:
+        return dict(self._stats)
+
+    def discard_stats(self) -> Dict[str, Any]:
+        by_reason = [{"reason": k, "count": v} for k, v in sorted(self._discards_count.items(), key=lambda x: -x[1])]
+        return {"ok": True, "by_reason": by_reason, "sample": self._discards_sample}
+
+    def sample_products(self, limit: int = 10) -> List[Dict[str, Any]]:
+        conn = self._conn_read()
+        cur = conn.cursor()
+        rows = list(cur.execute(
+            "SELECT id, handle, title, vendor, product_type, image FROM products LIMIT ?",
+            (int(limit),),
+        ))
+        conn.close()
+        return rows
+
     # ---------- búsqueda ----------
-    @staticmethod
-    def _tokenize(q: str) -> List[str]:
-        return [t for t in re.findall(r"[a-z0-9áéíóúüñ]+", q.lower()) if len(t) > 1]
-
-    def _expand_terms(self, terms: List[str]) -> List[str]:
-        out = list(terms)
-        for t in terms:
-            for key, syns in self._SYNONYMS.items():
-                if t == key or t in syns:
-                    for s in syns:
-                        if s not in out:
-                            out.append(s)
-        return out
-
-    def _post_rank(self, cur: sqlite3.Cursor, ids: List[int], terms_all: List[str]) -> List[int]:
-        """Aplica un re-ranking favoreciendo título/handle/tags."""
-        if not ids:
-            return []
-        placeholders = ",".join("?" for _ in ids)
-        rows = list(cur.execute(f"SELECT * FROM products WHERE id IN ({placeholders})", tuple(ids)))
-
-        def score(p: Dict[str, Any]) -> float:
-            title = (p.get("title") or "").lower()
-            handle = (p.get("handle") or "").lower()
-            tags = (p.get("tags") or "").lower()
-            body = (p.get("body") or "").lower()
-            s = 0.0
-            for t in terms_all:
-                if t in title:  s += 5.0
-                if t in handle: s += 3.0
-                if t in tags:   s += 2.0
-                if t in body:   s += 1.0
-            return s
-
-        rows.sort(key=lambda p: (-score(p), p["id"]))
-        return [int(p["id"]) for p in rows]
-
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
             return []
-
         conn = self._conn_read()
         cur = conn.cursor()
 
-        # tokens y expansión por sinónimos
-        terms_raw = self._tokenize(query)
-        terms_all = self._expand_terms(terms_raw)
-        fts_query = " ".join(terms_all) if terms_all else query
-
+        terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 1]
+        fts_query = " ".join(terms) if terms else query
         ids: List[int] = []
 
-        # 1) FTS con bm25 para mejores resultados + más candidatos
-        candidate_multiplier = 10
         if self._fts_enabled:
-            try:
-                rows = list(cur.execute(
-                    "SELECT rowid, bm25(products_fts) AS rank "
-                    "FROM products_fts WHERE products_fts MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fts_query, k * candidate_multiplier),
-                ))
-                ids.extend([int(r["rowid"]) for r in rows])
-            except Exception:
-                rows = list(cur.execute(
-                    "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_query, k * candidate_multiplier),
-                ))
-                ids.extend([int(r["rowid"]) for r in rows])
+            rows = list(cur.execute(
+                "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
+                (fts_query, k * 3),
+            ))
+            ids.extend([int(r["rowid"]) for r in rows])
 
-        # 2) Fallback LIKE (AND por término)
-        if len(ids) < k and terms_all:
-            where_parts = []
-            params: List[Any] = []
-            for t in terms_all:
+        if len(ids) < k and terms:
+            where, params = [], []
+            for t in terms:
                 like = f"%{t}%"
-                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
-                params.extend([like, like, like, like])
-            sql = f"SELECT id FROM products WHERE {' AND '.join(where_parts)} LIMIT ?"
-            params.append(k * candidate_multiplier)
-            like_rows = list(cur.execute(sql, tuple(params)))
-            ids.extend([int(r["id"]) for r in like_rows])
+                where.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
+                params += [like, like, like]
+            sql = f"SELECT id FROM products WHERE {' AND '.join(where)} LIMIT ?"
+            params.append(k * 3)
+            rows = list(cur.execute(sql, tuple(params)))
+            ids.extend([int(r["id"]) for r in rows])
 
-        # únicos conservando orden preliminar
         seen, order = set(), []
         for i in ids:
             if i not in seen:
                 seen.add(i)
                 order.append(i)
-
-        # 3) re-ranking propio usando coincidencias por campo
-        ranked_ids = self._post_rank(cur, order, terms_all) if order else []
-
-        # top-k final
-        final_ids = (ranked_ids or order)[:k]
+        ids = order[:k]
 
         results: List[Dict[str, Any]] = []
-        for pid in final_ids:
+        for pid in ids:
             p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
             if not p:
                 continue
-
             vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
             v_infos: List[Dict[str, Any]] = []
-
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
                 v_infos.append({
@@ -584,14 +534,9 @@ class CatalogIndexer:
                     "compare_at_price": v.get("compare_at_price"),
                     "inventory": [{"name": x["location_name"], "available": int(x["available"])} for x in inv],
                 })
-
             if not v_infos:
                 continue
-
-            v_infos.sort(
-                key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0,
-                reverse=True,
-            )
+            v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
             product_url = f"{self.store_base_url}/products/{p['handle']}" if p.get("handle") else self.store_base_url
