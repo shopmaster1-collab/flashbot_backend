@@ -17,6 +17,7 @@ except Exception:
     DeepseekClient = None  # type: ignore
 
 BASE_DIR = os.path.dirname(__file__)
+# El directorio real del widget está en el raíz del repo: /widget
 STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
 
 load_dotenv()
@@ -90,7 +91,7 @@ def _detect_patterns(q: str) -> dict:
     if m:
         pat["matrix"] = f"{m.group(1)}x{m.group(2)}"
     # pulgadas (número entre 19 y 100 aprox), muy común en soportes/pantallas
-    inch = re.findall(r"\b(1[9-9]|[2-9]\d|100)\b", ql)
+    inch = re.findall(r"\b(1[9]|[2-9]\d|100)\b", ql)
     if inch:
         pat["inches"] = list(set(inch))
     # categorías rápidas
@@ -213,7 +214,7 @@ def chat():
             user_prompt = base_answer
             pretty = deeps.chat(system_prompt, user_prompt)
             # Precaución: si por alguna razón quita bullets, usamos la base.
-            if pretty and pretty.count("- ") >= simple and len(pretty) > 40:
+            if pretty and pretty.count("- ") >= len(simple) and len(pretty) > 40:
                 answer = pretty
             else:
                 answer = base_answer
@@ -332,8 +333,15 @@ def admin_diag():
     return {"ok": True, "env": env, "probe": probe}
 
 
+# --- Rutas de estáticos del widget ---
 @app.get("/static/<path:fname>")
 def static_files(fname):
+    # Ruta histórica /static/...  -> sirve archivos desde /widget
+    return send_from_directory(STATIC_DIR, fname)
+
+@app.get("/widget/<path:fname>")
+def widget_files(fname):
+    # Alias conveniente /widget/...
     return send_from_directory(STATIC_DIR, fname)
 
 
