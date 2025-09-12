@@ -33,9 +33,9 @@ CORS(
 # --- Servicios / inicialización segura ---
 shop = None
 try:
-    shop = ShopifyClient()  # ahora acepta SHOPIFY_TOKEN o SHOPIFY_ACCESS_TOKEN; SHOPIFY_SHOP o SHOPIFY_STORE_DOMAIN
+    # Acepta alias: SHOPIFY_TOKEN/SHOPIFY_ACCESS_TOKEN y SHOPIFY_STORE_DOMAIN/SHOPIFY_SHOP (ver shopify_client.py)
+    shop = ShopifyClient()
 except Exception as e:
-    # No tumbar la app si falta config; Indexer usará fallback REST si está disponible
     print(f"[WARN] ShopifyClient init failed: {e}", flush=True)
 
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
@@ -157,51 +157,82 @@ def admin_products():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     limit = int(request.args.get("limit", 10))
-    return {"ok": True, "items": indexer.sample_products(limit=limit)}
+    try:
+        items = indexer.sample_products(limit=limit)
+        return {"ok": True, "items": items}
+    except Exception as e:
+        # Si la DB aún no existe
+        return {"ok": False, "items": [], "error": str(e)}
 
 @app.get("/api/admin/diag")
 def admin_diag():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     try:
-        # No crear clientes nuevos aquí; solo inspeccionar entorno y hacer sondas ligeras
         shop_domain = (os.getenv("SHOPIFY_STORE_DOMAIN") or os.getenv("SHOPIFY_SHOP") or "").strip()
         token = (
             os.getenv("SHOPIFY_ACCESS_TOKEN")
             or os.getenv("SHOPIFY_TOKEN")
-            or os.getenv("SHOPIFY_ACCES_TOKEN")
+            or os.getenv("SHOPIFY_ACCES_TOKEN")  # compatibilidad con typo anterior
             or ""
         ).strip()
-        api_version = os.getenv("SHOPIFY_API_VERSION", "2024-10")
+        api_version = os.getenv("SHOPIFY_API_VERSION", "2024-10").strip()
         sqlite_path = (os.getenv("SQLITE_PATH") or os.path.join(BASE_DIR, "data", "catalog.sqlite3")).strip()
         force_rest = os.getenv("FORCE_REST", "0") == "1"
+        require_active = os.getenv("REQUIRE_ACTIVE", "1")
+
+        # Chequeos del filesystem
+        db_dir = os.path.dirname(sqlite_path)
+        dir_exists = os.path.isdir(db_dir)
+        try:
+            can_write_dir = False
+            if dir_exists:
+                testfile = os.path.join(db_dir, ".write_test")
+                with open(testfile, "w") as f:
+                    f.write("ok")
+                os.remove(testfile)
+                can_write_dir = True
+        except Exception:
+            can_write_dir = False
+
+        file_exists = os.path.isfile(sqlite_path)
+
+        # Sonda ligera de DB sin romper el diag
+        sample = []
+        db_error = None
+        try:
+            sample = indexer.sample_products(limit=3)
+        except Exception as e:
+            db_error = str(e)
 
         env = {
             "shop": shop_domain,
             "api_version": api_version,
-            "sqlite_path": sqlite_path,
             "token_present": bool(token),
-            "require_active": os.getenv("REQUIRE_ACTIVE", "0"),
+            "require_active": require_active,
             "force_rest": force_rest,
+            "sqlite_path": sqlite_path,
+            "db_dir_exists": dir_exists,
+            "db_dir_writable": can_write_dir,
+            "db_file_exists": file_exists,
         }
 
-        probe = {"ok": True}
-        # prueba muy ligera; si no hay cliente, devuelve 0 sin romper
+        probe = {
+            "ok": True,
+            "sample_count": len(sample) if isinstance(sample, list) else 0,
+            "db_error": db_error,  # e.g. "no such table: products"
+        }
+
+        # Probar Shopify muy ligeramente (no romper si falla)
         try:
             probe["locations"] = len(shop.list_locations()) if shop else 0
         except Exception:
             probe["locations"] = 0
             probe["ok"] = False
 
-        probe["sample_products"] = indexer.sample_products(limit=3)
-
         return {"ok": True, "env": env, "probe": probe}
     except Exception as e:
-        return {
-            "ok": False,
-            "error": str(e),
-            "trace": traceback.format_exc(),
-        }, 200  # nunca devolver 500 en diag
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}, 200  # nunca 500 en diag
 
 @app.get("/static/<path:fname>")
 def static_files(fname):
