@@ -378,7 +378,7 @@ class CatalogIndexer:
                 iid = int(lev["inventory_item_id"])
                 self._inventory_map.setdefault(iid, []).append({
                     "location_id": int(lev["location_id"]),
-                    "available": int(lev.get("available") or 0),
+                    "available": int(lv.get("available") or 0),
                 })
             except Exception:
                 continue
@@ -492,7 +492,7 @@ class CatalogIndexer:
         if not query:
             return []
 
-        # 1) Normalización y stopwords (ES)
+        # Stopwords + expansión de sinónimos ES
         STOP = {
             "el","la","los","las","un","una","unos","unas",
             "de","del","al","y","o","u","en","a","con","por","para",
@@ -500,27 +500,42 @@ class CatalogIndexer:
             "busco","busca","buscar","quiero","necesito","tienes","tienen","hay",
             "producto","productos"
         }
+        SYN = {
+            "divisor": ["splitter", "duplicador", "repartidor"],
+            "splitter": ["divisor", "duplicador", "repartidor"],
+            "hdmi": ["hdmi"],
+            "agua": ["inundacion", "inundación", "fuga", "nivel", "liquido", "líquido"],
+            "sensor": ["detector", "sonda"],
+            "cable": ["cordon", "cordón"],
+        }
+
+        # normaliza y tokeniza
         raw_terms = [t.strip().lower() for t in re.findall(r"\w+", query, re.UNICODE)]
         terms = [t for t in raw_terms if len(t) >= 3 and t not in STOP]
         if not terms:
             terms = [t for t in raw_terms if len(t) >= 3]
 
-        # dedup y tope
+        # agrega sinónimos
+        expanded: List[str] = []
         seen = set()
-        clean_terms: List[str] = []
         for t in terms:
             if t not in seen:
-                clean_terms.append(t)
+                expanded.append(t)
                 seen.add(t)
-            if len(clean_terms) >= 6:
-                break
+            for s in SYN.get(t, []):
+                if s not in seen:
+                    expanded.append(s)
+                    seen.add(s)
+
+        # corta a 8 términos
+        clean_terms = expanded[:8] if expanded else []
 
         conn = self._conn_read()
         cur = conn.cursor()
 
         ids: List[int] = []
 
-        # 2) FTS5 (OR + NEAR entre los 2 primeros términos)
+        # FTS5 (OR + NEAR entre los 2 primeros términos)
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = ""
@@ -537,14 +552,14 @@ class CatalogIndexer:
             except Exception:
                 pass
 
-        # 3) Fallback LIKE (OR) si hace falta
+        # Fallback LIKE (OR) incluyendo handle
         if len(ids) < k and clean_terms:
             where_parts = []
             params: List[Any] = []
             for t in clean_terms:
                 like = f"%{t}%"
-                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
-                params.extend([like, like, like])
+                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
+                params.extend([like, like, like, like])
             sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
             params.append(k * 5)
             try:
@@ -553,14 +568,14 @@ class CatalogIndexer:
             except Exception:
                 pass
 
-        # únicos y top-k (con pequeño margen)
+        # únicos y top-k (con margen)
         uniq: List[int] = []
         seen2 = set()
         for i in ids:
             if i not in seen2:
                 seen2.add(i)
                 uniq.append(i)
-        ids = uniq[:max(k, 6)]
+        ids = uniq[:max(k, 8)]
 
         results: List[Dict[str, Any]] = []
         for pid in ids:
@@ -570,7 +585,6 @@ class CatalogIndexer:
 
             vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
             v_infos: List[Dict[str, Any]] = []
-
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
                 v_infos.append({
@@ -584,7 +598,6 @@ class CatalogIndexer:
             if not v_infos:
                 continue
 
-            # ordena por stock total desc
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
