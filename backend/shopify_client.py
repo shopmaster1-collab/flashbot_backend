@@ -1,87 +1,128 @@
 # -*- coding: utf-8 -*-
 """
-Cliente REST muy simple para Shopify.
-- Usa paginación por since_id.
-- Incluye 'image' (featured image) y 'images' (galería) para robustez.
+ShopifyClient: cliente REST mínimo con paginación (page_info) y compatibilidad de variables.
+
+Variables aceptadas (cualquiera de los alias):
+- Dominio:
+    SHOPIFY_STORE_DOMAIN   | SHOPIFY_SHOP
+- Token:
+    SHOPIFY_TOKEN          | SHOPIFY_ACCESS_TOKEN
+- Versión API (opcional, default 2024-10):
+    SHOPIFY_API_VERSION
 """
+
+from __future__ import annotations
 
 import os
 import time
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, parse_qs
 import requests
 
-# Versión de API; puedes sobrescribirla con SHOPIFY_API_VERSION en Render.
-API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
 
 class ShopifyClient:
-    def __init__(self, token: str = None, store_domain: str = None):
-        self.token = token or os.getenv("SHOPIFY_TOKEN")
-        self.store_domain = store_domain or os.getenv("SHOPIFY_STORE_DOMAIN")
-        if not self.token or not self.store_domain:
-            raise RuntimeError("Configura SHOPIFY_TOKEN y SHOPIFY_STORE_DOMAIN")
+    def __init__(self):
+        # ---- dominios/alias aceptados ----
+        store_domain = (
+            os.getenv("SHOPIFY_STORE_DOMAIN")
+            or os.getenv("SHOPIFY_SHOP")
+            or ""
+        ).strip()
+        token = (
+            os.getenv("SHOPIFY_TOKEN")
+            or os.getenv("SHOPIFY_ACCESS_TOKEN")
+            or ""
+        ).strip()
+        api_ver = (os.getenv("SHOPIFY_API_VERSION") or "2024-10").strip()
 
-        self.base = f"https://{self.store_domain}/admin/api/{API_VERSION}"
-        self.headers = {
-            "X-Shopify-Access-Token": self.token,
+        if store_domain.startswith("https://") or store_domain.startswith("http://"):
+            store_domain = urlparse(store_domain).netloc
+
+        if not store_domain or not token:
+            raise RuntimeError(
+                "Configura SHOPIFY_TOKEN/SHOPIFY_ACCESS_TOKEN y "
+                "SHOPIFY_STORE_DOMAIN/SHOPIFY_SHOP"
+            )
+
+        self.store_domain = store_domain
+        self.api_ver = api_ver
+        self.base = f"https://{self.store_domain}/admin/api/{self.api_ver}"
+        self.session = requests.Session()
+        self.session.headers.update({
+            "X-Shopify-Access-Token": token,
+            "Content-Type": "application/json",
             "Accept": "application/json",
-        }
+        })
 
-    def _get(self, path, params=None):
-        """GET con un reintento simple si devuelve 429."""
+    # ------------- helpers internos -------------
+
+    def _get(self, path: str, params: Dict[str, Any]) -> requests.Response:
         url = f"{self.base}{path}"
-        r = requests.get(url, headers=self.headers, params=params, timeout=40)
-        if r.status_code == 429:
-            time.sleep(1.2)
-            r = requests.get(url, headers=self.headers, params=params, timeout=40)
+        # manejo simple de rate limits
+        for attempt in range(4):
+            r = self.session.get(url, params=params, timeout=40)
+            if r.status_code == 429:
+                time.sleep(1.0 + attempt)
+                continue
+            r.raise_for_status()
+            return r
         r.raise_for_status()
-        return r.json()
+        return r  # nunca llega
 
-    def list_locations(self):
-        data = self._get("/locations.json")
-        return data.get("locations", [])
-
-    def list_products(self):
+    @staticmethod
+    def _next_page_info(resp: requests.Response) -> Optional[str]:
         """
-        Descarga productos en lotes usando since_id.
-        IMPORTANTE: pedimos 'image' y 'images'.
+        Lee el header Link para extraer el cursor page_info de la 'next' page.
+        Formato:
+          <https://...page_info=AAA>; rel="previous", <https://...page_info=BBB>; rel="next"
         """
-        products = []
-        limit = 250
-        since_id = 0
+        link = resp.headers.get("Link") or resp.headers.get("link") or ""
+        for part in link.split(","):
+            if 'rel="next"' in part:
+                start = part.find("<")
+                end = part.find(">")
+                if start >= 0 and end > start:
+                    url = part[start + 1:end]
+                    qs = parse_qs(urlparse(url).query)
+                    return (qs.get("page_info") or [None])[0]
+        return None
 
-        # Pedimos sólo los campos que necesitamos para indexar
-        fields = (
-            "id,title,handle,body_html,"
-            "image,images,"              # <-- featured y galería
-            "variants,tags,vendor,status,product_type"
-        )
+    # ------------- API públicas usadas por el indexer -------------
 
-        while True:
-            params = {
-                "limit": limit,
-                "fields": fields,
-            }
-            if since_id:
-                params["since_id"] = since_id
+    def list_products(self, status: Optional[str] = None, limit: int = 250,
+                      page_info: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Devuelve un dict {'products': [...], 'next_page_info': '...'} para facilitar la paginación
+        desde el indexador actual.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        if page_info:
+            params["page_info"] = page_info
 
-            data = self._get("/products.json", params=params)
-            batch = data.get("products", [])
-            if not batch:
-                break
+        r = self._get("/products.json", params=params)
+        data = r.json() or {}
+        products = data.get("products") or []
+        next_pi = self._next_page_info(r)
 
-            products.extend(batch)
-            since_id = batch[-1]["id"]
-            if len(batch) < limit:
-                break
+        return {"products": products, "next_page_info": next_pi}
 
-        return products
+    def list_locations(self) -> List[Dict[str, Any]]:
+        r = self._get("/locations.json", params={})
+        return (r.json() or {}).get("locations") or []
 
-    def inventory_levels_for_items(self, inventory_item_ids):
-        """Obtiene inventario por inventory_item_id (máx. 50 por llamada)."""
-        levels = []
-        chunk = 50
-        for i in range(0, len(inventory_item_ids), chunk):
-            ids = inventory_item_ids[i : i + chunk]
-            params = {"inventory_item_ids": ",".join(map(str, ids))}
-            data = self._get("/inventory_levels.json", params=params)
-            levels.extend(data.get("inventory_levels", []))
-        return levels
+    def inventory_levels_for_items(self, item_ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Llama /inventory_levels.json en lotes para evitar URIs largas.
+        """
+        out: List[Dict[str, Any]] = []
+        CHUNK = 50
+        for i in range(0, len(item_ids), CHUNK):
+            chunk = item_ids[i:i + CHUNK]
+            if not chunk:
+                continue
+            params = {"inventory_item_ids": ",".join(str(x) for x in chunk), "limit": 250}
+            r = self._get("/inventory_levels.json", params=params)
+            out.extend((r.json() or {}).get("inventory_levels") or [])
+        return out
