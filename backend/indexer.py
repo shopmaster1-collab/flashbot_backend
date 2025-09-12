@@ -378,7 +378,7 @@ class CatalogIndexer:
                 iid = int(lev["inventory_item_id"])
                 self._inventory_map.setdefault(iid, []).append({
                     "location_id": int(lev["location_id"]),
-                    "available": int(lv.get("available") or 0),
+                    "available": int(lev.get("available") or 0),
                 })
             except Exception:
                 continue
@@ -487,8 +487,8 @@ class CatalogIndexer:
         conn.close()
         return rows
 
-    # ---------- búsqueda ----------
-        def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
+    # ---------- búsqueda (con stopwords, sinónimos, OR/NEAR y re-ranking semántico ligero) ----------
+    def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
             return []
 
@@ -624,15 +624,15 @@ class CatalogIndexer:
                 s += 4 * hits(hdl, t)
                 s += 3 * hits(tgs, t)
                 s += 1 * hits(bdy, t)
-            # Bonus por aparición completa “sensor + agua” (o sinónimos) en campos fuertes
+            # Bonus por aparición “sensor + agua” (o sinónimos) en campos fuertes
             if wants_water_sensor:
                 title_tokens = set(re.findall(r"\w+", ttl.lower()))
                 handle_tokens = set(re.findall(r"\w+", hdl.lower()))
                 tag_tokens = set(re.findall(r"\w+", tgs.lower()))
                 strong = title_tokens | handle_tokens | tag_tokens
-                if (strong & WATER) and (strong & SENSOR):
-                    s += 40  # gran boost si cumple la intención exacta
-            # Bonus leve si el término principal aparece al inicio del título
+                if (strong & {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","water","leak"}) and (strong & {"sensor","detector","sonda"}):
+                    s += 40
+            # Bonus leve si el primer término aparece al inicio del título
             if clean_terms:
                 first = clean_terms[0]
                 if ttl.lower().startswith(first):
@@ -640,7 +640,7 @@ class CatalogIndexer:
             # Bonus por stock
             stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock > 0:
-                s += min(stock, 20)  # cap
+                s += min(stock, 20)
             return s
 
         candidates.sort(key=score_item, reverse=True)
