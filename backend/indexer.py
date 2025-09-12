@@ -488,11 +488,11 @@ class CatalogIndexer:
         return rows
 
     # ---------- búsqueda ----------
-    def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
+        def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
             return []
 
-        # Stopwords + expansión de sinónimos ES
+        # Stopwords y sinónimos
         STOP = {
             "el","la","los","las","un","una","unos","unas",
             "de","del","al","y","o","u","en","a","con","por","para",
@@ -501,34 +501,32 @@ class CatalogIndexer:
             "producto","productos"
         }
         SYN = {
-            "divisor": ["splitter", "duplicador", "repartidor"],
-            "splitter": ["divisor", "duplicador", "repartidor"],
+            "divisor": ["splitter","duplicador","repartidor"],
+            "splitter": ["divisor","duplicador","repartidor"],
+            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak"],
+            "sensor": ["detector","sonda"],
             "hdmi": ["hdmi"],
-            "agua": ["inundacion", "inundación", "fuga", "nivel", "liquido", "líquido"],
-            "sensor": ["detector", "sonda"],
-            "cable": ["cordon", "cordón"],
+            "cable": ["cordon","cordón"],
         }
+        WATER = {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","water","leak"}
+        SENSOR = {"sensor","detector","sonda"}
 
-        # normaliza y tokeniza
         raw_terms = [t.strip().lower() for t in re.findall(r"\w+", query, re.UNICODE)]
-        terms = [t for t in raw_terms if len(t) >= 3 and t not in STOP]
-        if not terms:
-            terms = [t for t in raw_terms if len(t) >= 3]
+        base_terms = [t for t in raw_terms if len(t) >= 3 and t not in STOP] or [t for t in raw_terms if len(t) >= 3]
 
-        # agrega sinónimos
-        expanded: List[str] = []
+        # Expansión de sinónimos
         seen = set()
-        for t in terms:
+        expanded: List[str] = []
+        for t in base_terms:
             if t not in seen:
-                expanded.append(t)
-                seen.add(t)
+                expanded.append(t); seen.add(t)
             for s in SYN.get(t, []):
                 if s not in seen:
-                    expanded.append(s)
-                    seen.add(s)
-
-        # corta a 8 términos
+                    expanded.append(s); seen.add(s)
         clean_terms = expanded[:8] if expanded else []
+
+        # Señal “combo sensor+agua” en la intención
+        wants_water_sensor = any(t in WATER for t in clean_terms) and any(t in SENSOR for t in clean_terms)
 
         conn = self._conn_read()
         cur = conn.cursor()
@@ -538,15 +536,12 @@ class CatalogIndexer:
         # FTS5 (OR + NEAR entre los 2 primeros términos)
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
-            near_clause = ""
-            if len(clean_terms) >= 2:
-                near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})"
+            near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
             fts_q = f"({or_clause}){near_clause}"
-
             try:
                 rows = list(cur.execute(
                     "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_q, k * 5),
+                    (fts_q, k * 8),
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
             except Exception:
@@ -554,36 +549,36 @@ class CatalogIndexer:
 
         # Fallback LIKE (OR) incluyendo handle
         if len(ids) < k and clean_terms:
-            where_parts = []
-            params: List[Any] = []
+            where_parts, params = [], []
             for t in clean_terms:
                 like = f"%{t}%"
                 where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
                 params.extend([like, like, like, like])
             sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
-            params.append(k * 5)
+            params.append(k * 8)
             try:
                 like_rows = list(cur.execute(sql, tuple(params)))
                 ids.extend([int(r["id"]) for r in like_rows])
             except Exception:
                 pass
 
-        # únicos y top-k (con margen)
-        uniq: List[int] = []
+        # Únicos (margen amplio para reordenar)
+        uniq_ids: List[int] = []
         seen2 = set()
         for i in ids:
             if i not in seen2:
                 seen2.add(i)
-                uniq.append(i)
-        ids = uniq[:max(k, 8)]
+                uniq_ids.append(i)
 
-        results: List[Dict[str, Any]] = []
-        for pid in ids:
+        # Construye candidatos completos
+        candidates: List[Dict[str, Any]] = []
+        for pid in uniq_ids:
             p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
             if not p:
                 continue
-
             vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
+            if not vars_:
+                continue
             v_infos: List[Dict[str, Any]] = []
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
@@ -594,35 +589,76 @@ class CatalogIndexer:
                     "compare_at_price": v.get("compare_at_price"),
                     "inventory": [{"name": x["location_name"], "available": int(x["available"])} for x in inv],
                 })
-
             if not v_infos:
                 continue
 
+            # stock total para desempate
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
-            product_url = f"{self.store_base_url}/products/{p['handle']}" if p.get("handle") else self.store_base_url
-            buy_url = f"{self.store_base_url}/cart/{best['variant_id']}:1"
-
-            results.append({
+            candidates.append({
                 "id": p["id"],
-                "title": p["title"],
-                "handle": p["handle"],
-                "image": p["image"],
-                "body": p["body"],
-                "tags": p["tags"],
-                "vendor": p["vendor"],
-                "product_type": p["product_type"],
-                "product_url": product_url,
-                "buy_url": buy_url,
+                "title": p["title"] or "",
+                "handle": p.get("handle") or "",
+                "image": p.get("image"),
+                "body": p.get("body") or "",
+                "tags": p.get("tags") or "",
+                "vendor": p.get("vendor"),
+                "product_type": p.get("product_type"),
                 "variant": best,
             })
 
-            if len(results) >= k:
-                break
+        # ---- Re-ranking por relevancia semántica ligera ----
+        def hits(text: str, term: str) -> int:
+            t = text.lower()
+            try:
+                return t.count(term.lower())
+            except Exception:
+                return 0
+
+        def score_item(it: Dict[str, Any]) -> int:
+            ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
+            s = 0
+            for t in clean_terms:
+                s += 6 * hits(ttl, t)
+                s += 4 * hits(hdl, t)
+                s += 3 * hits(tgs, t)
+                s += 1 * hits(bdy, t)
+            # Bonus por aparición completa “sensor + agua” (o sinónimos) en campos fuertes
+            if wants_water_sensor:
+                title_tokens = set(re.findall(r"\w+", ttl.lower()))
+                handle_tokens = set(re.findall(r"\w+", hdl.lower()))
+                tag_tokens = set(re.findall(r"\w+", tgs.lower()))
+                strong = title_tokens | handle_tokens | tag_tokens
+                if (strong & WATER) and (strong & SENSOR):
+                    s += 40  # gran boost si cumple la intención exacta
+            # Bonus leve si el término principal aparece al inicio del título
+            if clean_terms:
+                first = clean_terms[0]
+                if ttl.lower().startswith(first):
+                    s += 5
+            # Bonus por stock
+            stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
+            if stock > 0:
+                s += min(stock, 20)  # cap
+            return s
+
+        candidates.sort(key=score_item, reverse=True)
+
+        # Armar resultado final con URLs
+        results: List[Dict[str, Any]] = []
+        for it in candidates[:max(k, 10)]:
+            v = it["variant"]
+            product_url = f"{self.store_base_url}/products/{it['handle']}" if it["handle"] else self.store_base_url
+            buy_url = f"{self.store_base_url}/cart/{v['variant_id']}:1"
+            results.append({
+                **it,
+                "product_url": product_url,
+                "buy_url": buy_url,
+            })
 
         conn.close()
-        return results
+        return results[:k]
 
     # ---------- util para LLM ----------
     def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
