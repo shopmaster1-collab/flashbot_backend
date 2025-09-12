@@ -1,37 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-Indexer del catálogo Shopify -> SQLite (+FTS5) para el buscador del bot.
+Indexer Shopify -> SQLite (+FTS5)
 
-Reglas de filtrado (configurables por variables de entorno):
+Reglas (solo una):
 - REQUIRE_ACTIVE=1  -> exige product.status == "active"
 
-(No se consideran imagen, SKU, stock ni tamaño de descripción.)
+No se consideran imagen, SKU, stock ni tamaño de descripción.
 
-Tablas:
-- products(id, handle, title, body, tags, vendor, product_type, image)
-- variants(id, product_id, sku, price, compare_at_price, inventory_item_id)
-- inventory(variant_id, location_id, location_name, available)
-- products_fts (FTS5 sobre title/body/tags) si está disponible; fallback a LIKE.
-
-Uso:
-- build() descarga catálogo y crea/llena SQLite.
-- search(q, k) consulta por FTS/LIKE y devuelve tarjetas listas para el widget.
-- stats(), discard_stats(), sample_products() para endpoints admin.
+Variables de entorno usadas (para fallback REST directo a Shopify):
+- SHOPIFY_SHOP               (p.ej. master-electronicos.myshopify.com)
+- SHOPIFY_ACCESS_TOKEN       (Admin API access token)
+- SHOPIFY_API_VERSION        (ej. 2024-10)
+- SQLITE_PATH                (p.ej. /data/catalog.db)
 """
+
 from __future__ import annotations
 
 import os
 import re
 import json
+import time
 import sqlite3
 from typing import Any, Dict, List, Tuple, Optional
+from urllib.parse import urlparse, parse_qs
+import requests
+
 from .utils import strip_html
 
-# ---------- Paths / Data dir ----------
+# ---------------- Paths / DB ----------------
 BASE_DIR = os.path.dirname(__file__)
 DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
 
-# Si nos pasan una ruta completa de SQLite vía entorno, úsala (Render: SQLITE_PATH=/data/catalog.db)
 SQLITE_PATH_ENV = os.getenv("SQLITE_PATH", "").strip()
 if SQLITE_PATH_ENV:
     DATA_DIR = os.path.dirname(SQLITE_PATH_ENV)
@@ -50,12 +49,110 @@ def _row_factory(cursor, row):
     return d
 
 
+# ---------------- Shopify REST helpers ----------------
+class ShopifyREST:
+    """Fallback REST client para recorrer TODAS las páginas via Link: rel=next."""
+    def __init__(self):
+        self.shop = (os.getenv("SHOPIFY_SHOP") or "").strip().rstrip("/")
+        self.token = (os.getenv("SHOPIFY_ACCESS_TOKEN") or "").strip()
+        self.api_ver = (os.getenv("SHOPIFY_API_VERSION") or "2024-10").strip()
+        if self.shop.startswith("https://"):
+            self.shop = urlparse(self.shop).netloc
+        if not self.shop:
+            raise RuntimeError("SHOPIFY_SHOP no configurado")
+        if not self.token:
+            raise RuntimeError("SHOPIFY_ACCESS_TOKEN no configurado")
+
+        self.base = f"https://{self.shop}/admin/api/{self.api_ver}"
+        self.session = requests.Session()
+        self.session.headers.update({
+            "X-Shopify-Access-Token": self.token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        })
+
+    def _get(self, path: str, params: Dict[str, Any]) -> requests.Response:
+        url = f"{self.base}{path}"
+        # Respeta límites de tasa básicos
+        for attempt in range(3):
+            r = self.session.get(url, params=params, timeout=40)
+            if r.status_code == 429:
+                time.sleep(1.0 + attempt)
+                continue
+            r.raise_for_status()
+            return r
+        r.raise_for_status()
+        return r
+
+    @staticmethod
+    def _next_page_info(resp: requests.Response) -> Optional[str]:
+        link = resp.headers.get("Link") or resp.headers.get("link") or ""
+        # Ejemplo: <...page_info=xxxxx>; rel="previous", <...page_info=yyyyy>; rel="next"
+        for part in link.split(","):
+            if 'rel="next"' in part:
+                start = part.find("<")
+                end = part.find(">")
+                if start >= 0 and end > start:
+                    url = part[start + 1:end]
+                    qs = parse_qs(urlparse(url).query)
+                    p = qs.get("page_info", [None])[0]
+                    return p
+        return None
+
+    def list_products_active_all(self, limit: int = 250) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        page_info: Optional[str] = None
+        while True:
+            params = {"limit": limit, "status": "active"}
+            if page_info:
+                params["page_info"] = page_info
+            r = self._get("/products.json", params=params)
+            data = r.json() or {}
+            items = data.get("products") or []
+            out.extend(items)
+            nxt = self._next_page_info(r)
+            if not nxt or not items:
+                break
+            page_info = nxt
+        return out
+
+    def list_locations(self) -> List[Dict[str, Any]]:
+        r = self._get("/locations.json", params={})
+        return (r.json() or {}).get("locations") or []
+
+    def inventory_levels_for_items(self, item_ids: List[int]) -> List[Dict[str, Any]]:
+        """Consulta inventario por lotes (Shopify permite lista separada por coma)."""
+        out: List[Dict[str, Any]] = []
+        CHUNK = 50  # seguro
+        for i in range(0, len(item_ids), CHUNK):
+            chunk = item_ids[i:i + CHUNK]
+            if not chunk:
+                continue
+            params = {"inventory_item_ids": ",".join(str(x) for x in chunk), "limit": 250}
+            r = self._get("/inventory_levels.json", params=params)
+            levels = (r.json() or {}).get("inventory_levels") or []
+            out.extend(levels)
+        return out
+
+
 class CatalogIndexer:
     def __init__(self, shop_client, store_base_url: str):
+        """
+        shop_client: si tu cliente propio NO maneja paginación, este indexer
+        usará automáticamente el fallback REST nativo (ShopifyREST).
+        """
         self.client = shop_client
+        self.rest_fallback: Optional[ShopifyREST] = None
+        try:
+            # Si hay token/tienda, prepararnos para fallback
+            self.rest_fallback = ShopifyREST()
+        except Exception:
+            # Si faltan credenciales, solo se usará el cliente inyectado
+            self.rest_fallback = None
+
         self.store_base_url = store_base_url.rstrip("/")
 
-        # Única regla: por defecto solo productos ACTIVO
+        # ÚNICA regla (default=1)
         self.rules = {
             "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1",
         }
@@ -63,22 +160,13 @@ class CatalogIndexer:
         self.db_path = DB_PATH
         self._fts_enabled = False
 
-        # métricas del último build
-        self._stats: Dict[str, int] = {
-            "products": 0,
-            "variants": 0,
-            "inventory_levels": 0,
-        }
-
-        # diagnóstico de descartes
+        self._stats: Dict[str, int] = {"products": 0, "variants": 0, "inventory_levels": 0}
         self._discards_sample: List[Dict[str, Any]] = []
         self._discards_count: Dict[str, int] = {}
+        self._location_map: Dict[int, str] = {}
+        self._inventory_map: Dict[int, List[Dict]] = {}
 
-        # cachés auxiliares
-        self._location_map: Dict[int, str] = {}            # location_id -> name
-        self._inventory_map: Dict[int, List[Dict]] = {}    # inventory_item_id -> [{location_id, available}, ...]
-
-    # ---------- conexión ----------
+    # ------------- conexión -------------
     def _conn_rw(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = _row_factory
@@ -89,42 +177,38 @@ class CatalogIndexer:
         conn.row_factory = _row_factory
         return conn
 
-    # ---------- util imágenes (solo para mostrar, NO para filtrar) ----------
+    # ------------- imágenes (solo para mostrar) -------------
     @staticmethod
-    def _img_src(img_dict: Optional[Dict[str, Any]]) -> Optional[str]:
-        if not img_dict:
+    def _img_src(img: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not img:
             return None
-        src = (img_dict.get("src") or img_dict.get("url") or "").strip()
+        src = (img.get("src") or img.get("url") or "").strip()
         return src or None
 
     def _extract_hero_image(self, p: Dict[str, Any]) -> Optional[str]:
-        # 1) destacada
-        featured = self._img_src(p.get("image"))
-        if featured:
-            return featured
-        # 2) primera de la galería
+        s = self._img_src(p.get("image"))
+        if s:
+            return s
         for i in (p.get("images") or []):
-            src = self._img_src(i)
-            if src:
-                return src
-        # 3) por variante (mapeando image_id)
+            s = self._img_src(i)
+            if s:
+                return s
         images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
         for v in (p.get("variants") or []):
             iid = str(v.get("image_id") or "")
             if iid:
-                src = self._img_src(images_by_id.get(iid))
-                if src:
-                    return src
+                s = self._img_src(images_by_id.get(iid))
+                if s:
+                    return s
         return None
 
-    # ---------- reglas ----------
+    # ------------- reglas -------------
     def _passes_product_rules(self, p: Dict[str, Any]) -> Tuple[bool, str]:
         if self.rules["REQUIRE_ACTIVE"] and p.get("status") != "active":
             return False, "status!=active"
         return True, ""
 
     def _select_valid_variants(self, variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Mínimo: variante con precio numérico (no exigimos SKU ni stock)."""
         out: List[Dict[str, Any]] = []
         for v in variants or []:
             price = v.get("price")
@@ -151,93 +235,78 @@ class CatalogIndexer:
                 "compare_at_price": cap_f,
                 "inventory_item_id": int(inv_item_id) if inv_item_id else None,
                 "inventory": [
-                    {
-                        "location_id": int(lv["location_id"]),
-                        "available": int(lv.get("available") or 0),
-                    }
+                    {"location_id": int(lv["location_id"]), "available": int(lv.get("available") or 0)}
                     for lv in inv_levels
                 ],
             })
         return out
 
-    # ---------- fetch completo con paginación ----------
-    def _fetch_all_active(self, limit: int = 250) -> List[Dict[str, Any]]:
+    # ------------- fetch productos / locations / inventario -------------
+    def _fetch_products_active_all(self) -> List[Dict[str, Any]]:
         """
-        Trae TODAS las páginas de productos activos usando cursor `page_info`.
-        Soporta varios formatos de retorno del cliente:
-        - dict con keys: items / next_page_info
-        - tuple: (items, next_page_info)
-        - list simple (sin next): se asume una sola página
+        Intenta primero con el cliente inyectado (si EXPRESAMENTE soporta paginación).
+        Si detectamos 'solo 1 página' o no hay soporte, usa fallback REST nativo.
         """
-        out: List[Dict[str, Any]] = []
-        cursor: Optional[str] = None
-
-        while True:
-            # Intento flexible: pasar kwargs comunes; si el cliente no los acepta, cae al siguiente
-            try:
-                batch = self.client.list_products(limit=limit, status="active", page_info=cursor)
-            except TypeError:
-                # cliente no acepta kwargs -> intenta solo limit/status
-                try:
-                    batch = self.client.list_products(limit=limit, status="active")
-                except TypeError:
-                    # cliente sin kwargs -> última alternativa
-                    batch = self.client.list_products()
-
-            items, next_cursor = self._normalize_products_batch(batch)
-
-            if not items:
-                break
-
-            out.extend(items)
-            if not next_cursor:
-                break
-            cursor = next_cursor
-
-        return out
-
-    @staticmethod
-    def _normalize_products_batch(batch) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """
-        Normaliza las distintas respuestas posibles del cliente:
-        - {'items': [...], 'next_page_info': '...'}
-        - {'products': [...], 'next_page_info': '...'}
-        - ([...], '...')
-        - [...]
-        """
-        # dict con items
-        if isinstance(batch, dict):
-            items = batch.get("items") or batch.get("products") or batch.get("data") or []
-            npi = batch.get("next_page_info") or batch.get("next") or None
-            return list(items or []), (npi or None)
-
-        # tuple (items, next)
-        if isinstance(batch, tuple) and len(batch) >= 1:
-            items = batch[0] or []
-            npi = batch[1] if len(batch) > 1 else None
-            return list(items or []), (npi or None)
-
-        # lista simple (sin next)
-        if isinstance(batch, list):
-            return list(batch), None
-
-        # formato desconocido
-        return [], None
-
-    # ---------- build ----------
-    def build(self) -> None:
-        """Descarga catálogo y levanta índice en SQLite."""
-        # locations
+        # Intento con cliente inyectado (si tiene método extendido)
         try:
-            locations = self.client.list_locations()
+            products = self.client.list_products(status="active", limit=250, page_info=None)
+            # Si es dict, intenta leer 'next_page_info'
+            if isinstance(products, dict) and products.get("next_page_info"):
+                items = products.get("items") or products.get("products") or []
+                acc = list(items)
+                cursor = products.get("next_page_info")
+                while cursor:
+                    batch = self.client.list_products(status="active", limit=250, page_info=cursor)
+                    items = (batch.get("items") or batch.get("products") or [])
+                    acc.extend(items or [])
+                    cursor = batch.get("next_page_info")
+                if acc:
+                    return acc
+            # Si es lista, asume una página (posible 1ª)
+            if isinstance(products, list) and len(products) > 5:
+                return products
         except Exception:
-            locations = []
+            pass
+
+        # Fallback REST nativo (solución robusta)
+        if self.rest_fallback:
+            return self.rest_fallback.list_products_active_all(limit=250)
+
+        # Último recurso: lo que sea que devuelva el cliente (probable 1 página)
+        try:
+            any_products = self.client.list_products()
+            if isinstance(any_products, dict):
+                return any_products.get("items") or any_products.get("products") or []
+            return list(any_products or [])
+        except Exception:
+            return []
+
+    def _fetch_locations(self) -> List[Dict[str, Any]]:
+        try:
+            return self.client.list_locations()
+        except Exception:
+            if self.rest_fallback:
+                return self.rest_fallback.list_locations()
+            return []
+
+    def _fetch_inventory_levels(self, item_ids: List[int]) -> List[Dict[str, Any]]:
+        try:
+            return self.client.inventory_levels_for_items(item_ids)
+        except Exception:
+            if self.rest_fallback:
+                return self.rest_fallback.inventory_levels_for_items(item_ids)
+            return []
+
+    # ------------- build -------------
+    def build(self) -> None:
+        # locations
+        locations = self._fetch_locations()
         self._location_map = {int(x["id"]): (x.get("name") or str(x["id"])) for x in locations}
 
-        # productos activos (todas las páginas)
-        products = self._fetch_all_active(limit=250)
+        # productos ACTIVO (todas las páginas)
+        products = self._fetch_products_active_all()
 
-        # recoger todos los inventory_item_id
+        # inventory_item_ids
         all_inv_ids: List[int] = []
         for p in products:
             for v in p.get("variants") or []:
@@ -247,11 +316,10 @@ class CatalogIndexer:
                     except Exception:
                         pass
 
-        # inventario por item id (batched en el cliente)
-        levels = self.client.inventory_levels_for_items(all_inv_ids) if all_inv_ids else []
+        # inventario
+        levels = self._fetch_inventory_levels(all_inv_ids) if all_inv_ids else []
         self._stats["inventory_levels"] = len(levels)
 
-        # build inventory map
         self._inventory_map = {}
         for lev in levels:
             try:
@@ -263,7 +331,7 @@ class CatalogIndexer:
             except Exception:
                 continue
 
-        # crear DB limpia
+        # reset DB
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)
@@ -273,7 +341,6 @@ class CatalogIndexer:
         conn = self._conn_rw()
         cur = conn.cursor()
 
-        # tablas
         cur.executescript("""
             PRAGMA journal_mode=WAL;
 
@@ -308,9 +375,7 @@ class CatalogIndexer:
 
         # FTS opcional
         try:
-            cur.execute(
-                "CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')"
-            )
+            cur.execute("CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')")
             self._fts_enabled = True
         except sqlite3.OperationalError:
             self._fts_enabled = False
@@ -325,67 +390,35 @@ class CatalogIndexer:
         n_variants = 0
 
         for p in products:
-            # 1) Única regla de producto
             ok, reason = self._passes_product_rules(p)
             if not ok:
                 discards_count[reason] = discards_count.get(reason, 0) + 1
                 if len(discards_sample) < 20:
-                    discards_sample.append({
-                        "product_id": p.get("id"),
-                        "handle": p.get("handle"),
-                        "title": p.get("title"),
-                        "reason": reason,
-                    })
+                    discards_sample.append({"product_id": p.get("id"), "handle": p.get("handle"), "title": p.get("title"), "reason": reason})
                 continue
 
-            # 2) Variantes válidas (mínimo: precio)
             valids = self._select_valid_variants(p.get("variants") or [])
             if not valids:
                 discards_count["no_variant_complete"] = discards_count.get("no_variant_complete", 0) + 1
                 if len(discards_sample) < 20:
-                    discards_sample.append({
-                        "product_id": p.get("id"),
-                        "handle": p.get("handle"),
-                        "title": p.get("title"),
-                        "reason": "no_variant_complete",
-                    })
+                    discards_sample.append({"product_id": p.get("id"), "handle": p.get("handle"), "title": p.get("title"), "reason": "no_variant_complete"})
                 continue
 
             body_text = strip_html(p.get("body_html") or "")
             tags = (p.get("tags") or "").strip()
-            hero_img = self._extract_hero_image(p)  # opcional, solo para mostrar
+            hero_img = self._extract_hero_image(p)
 
-            cur.execute(ins_p, (
-                int(p["id"]),
-                p.get("handle"),
-                p.get("title"),
-                body_text,
-                tags,
-                p.get("vendor"),
-                p.get("product_type"),
-                hero_img,
-            ))
+            cur.execute(ins_p, (int(p["id"]), p.get("handle"), p.get("title"), body_text, tags, p.get("vendor"), p.get("product_type"), hero_img))
             n_products += 1
 
             for v in valids:
-                cur.execute(ins_v, (
-                    int(v["id"]),
-                    int(p["id"]),
-                    v.get("sku"),
-                    v.get("price"),
-                    v.get("compare_at_price"),
-                    int(v["inventory_item_id"]) if v.get("inventory_item_id") else None,
-                ))
+                cur.execute(ins_v, (int(v["id"]), int(p["id"]), v.get("sku"), v.get("price"), v.get("compare_at_price"),
+                                    int(v["inventory_item_id"]) if v.get("inventory_item_id") else None))
                 n_variants += 1
 
                 for lvl in v["inventory"]:
                     loc_id = int(lvl["location_id"])
-                    cur.execute(ins_inv, (
-                        int(v["id"]),
-                        loc_id,
-                        self._location_map.get(loc_id, str(loc_id)),
-                        int(lvl.get("available") or 0),
-                    ))
+                    cur.execute(ins_inv, (int(v["id"]), loc_id, self._location_map.get(loc_id, str(loc_id)), int(lvl.get("available") or 0)))
 
         conn.commit()
 
@@ -400,7 +433,7 @@ class CatalogIndexer:
         self._discards_sample = discards_sample
         self._discards_count = discards_count
 
-    # ---------- reporting ----------
+    # ------------- reporting -------------
     def stats(self) -> Dict[str, Any]:
         return dict(self._stats)
 
@@ -411,18 +444,14 @@ class CatalogIndexer:
     def sample_products(self, limit: int = 10) -> List[Dict[str, Any]]:
         conn = self._conn_read()
         cur = conn.cursor()
-        rows = list(cur.execute(
-            "SELECT id, handle, title, vendor, product_type, image FROM products LIMIT ?",
-            (int(limit),),
-        ))
+        rows = list(cur.execute("SELECT id, handle, title, vendor, product_type, image FROM products LIMIT ?", (int(limit),)))
         conn.close()
         return rows
 
-    # ---------- búsqueda ----------
+    # ------------- búsqueda -------------
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
             return []
-
         conn = self._conn_read()
         cur = conn.cursor()
 
@@ -430,28 +459,21 @@ class CatalogIndexer:
         fts_query = " ".join(terms) if terms else query
         ids: List[int] = []
 
-        # 1) FTS
         if self._fts_enabled:
-            fts_rows = list(cur.execute(
-                "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                (fts_query, k * 3),
-            ))
-            ids.extend([int(r["rowid"]) for r in fts_rows])
+            rows = list(cur.execute("SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?", (fts_query, k * 3)))
+            ids.extend([int(r["rowid"]) for r in rows])
 
-        # 2) Fallback LIKE (AND por término)
         if len(ids) < k and terms:
-            where_parts = []
-            params: List[Any] = []
+            where, params = [], []
             for t in terms:
                 like = f"%{t}%"
-                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
-                params.extend([like, like, like])
-            sql = f"SELECT id FROM products WHERE {' AND '.join(where_parts)} LIMIT ?"
+                where.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
+                params += [like, like, like]
+            sql = f"SELECT id FROM products WHERE {' AND '.join(where)} LIMIT ?"
             params.append(k * 3)
-            like_rows = list(cur.execute(sql, tuple(params)))
-            ids.extend([int(r["id"]) for r in like_rows])
+            rows = list(cur.execute(sql, tuple(params)))
+            ids.extend([int(r["id"]) for r in rows])
 
-        # únicos y top-k
         seen, order = set(), []
         for i in ids:
             if i not in seen:
@@ -464,15 +486,12 @@ class CatalogIndexer:
             p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
             if not p:
                 continue
-
             vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
             v_infos: List[Dict[str, Any]] = []
-
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
                 if v["price"] is None:
                     continue
-
                 v_infos.append({
                     "variant_id": v["id"],
                     "sku": (v.get("sku") or None),
@@ -480,48 +499,32 @@ class CatalogIndexer:
                     "compare_at_price": v.get("compare_at_price"),
                     "inventory": [{"name": x["location_name"], "available": int(x["available"])} for x in inv],
                 })
-
             if not v_infos:
                 continue
-
-            v_infos.sort(
-                key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0,
-                reverse=True,
-            )
+            v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
             product_url = f"{self.store_base_url}/products/{p['handle']}" if p.get("handle") else self.store_base_url
             buy_url = f"{self.store_base_url}/cart/{best['variant_id']}:1"
 
             results.append({
-                "id": p["id"],
-                "title": p["title"],
-                "handle": p["handle"],
-                "image": p["image"],
-                "body": p["body"],
-                "tags": p["tags"],
-                "vendor": p["vendor"],
-                "product_type": p["product_type"],
-                "product_url": product_url,
-                "buy_url": buy_url,
-                "variant": best,
+                "id": p["id"], "title": p["title"], "handle": p["handle"], "image": p["image"],
+                "body": p["body"], "tags": p["tags"], "vendor": p["vendor"], "product_type": p["product_type"],
+                "product_url": product_url, "buy_url": buy_url, "variant": best,
             })
 
         conn.close()
         return results
 
-    # ---------- util para LLM ----------
+    # ------------- util LLM -------------
     def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
         out = []
         for it in items:
             v = it["variant"]
             out.append({
-                "title": it["title"],
-                "price": v["price"],
-                "sku": v.get("sku"),
+                "title": it["title"], "price": v["price"], "sku": v.get("sku"),
                 "compare_at_price": v.get("compare_at_price"),
-                "product_url": it["product_url"],
-                "buy_url": it["buy_url"],
+                "product_url": it["product_url"], "buy_url": it["buy_url"],
                 "stock_total": sum(x["available"] for x in v["inventory"]) if v["inventory"] else 0,
                 "image": it["image"],
             })
