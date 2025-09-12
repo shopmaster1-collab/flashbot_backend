@@ -565,8 +565,10 @@ class CatalogIndexer:
         base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
 
         # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
-        if re.search(r"\b\d+\s*[x×]\s*\d+\b", q_norm):
-            base_terms.append(re.sub(r"\s+", "", re.search(r"\b\d+\s*[x×]\s*\d+\b", q_norm).group(0)).replace("×", "x"))
+        m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
+        if m_q:
+            base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("×", "x"))
+        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None  # matriz pedida en la consulta
 
         seen = set()
         expanded: List[str] = []
@@ -676,7 +678,6 @@ class CatalogIndexer:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
         if candidates and combo_hits:
-            # Si hay al menos un candidato que cumpla algún combo, filtramos al subconjunto que cumpla (para alta precisión)
             subset: List[Dict[str, Any]] = []
             for it in candidates:
                 st = strong_text(it)
@@ -690,11 +691,13 @@ class CatalogIndexer:
             if subset:
                 candidates = subset
 
-        # ---- Re-ranking por relevancia semántica ligera ----
+        # ---- Re-ranking por relevancia con priorización de matriz exacta ----
         def hits(text: str, term: str) -> int:
-            # cuenta ocurrencias normalizadas
             t = _norm(text)
             return t.count(term)
+
+        def _has_matrix(text_norm: str, mx: str) -> bool:
+            return (mx in text_norm) or (mx.replace("x", "×") in text_norm)
 
         def score_item(it: Dict[str, Any]) -> int:
             ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
@@ -707,25 +710,43 @@ class CatalogIndexer:
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
                 s += 1 * hits(bdy, t)
+
             # Combos (gran boost)
             st = strong_text(it)
             for A, B, bonus in combo_hits:
                 if any(a in st for a in A) and any(b in st for b in B):
                     s += bonus
+
             # Inicio de título con primer término
             if clean_terms:
                 first = clean_terms[0]
                 if _norm(ttl).startswith(first):
                     s += 6
+
             # Boost por SKU si aparece exacto en la consulta
             q_tokens = set(clean_terms)
             sku_set = {_norm(sk) for sk in (it["skus"] or [])}
             if q_tokens & sku_set:
                 s += 25
+
             # Boost por stock (cap)
             stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock > 0:
                 s += min(stock, 20)
+
+            # --- Priorizar matriz exacta solicitada y penalizar matrices diferentes ---
+            if q_matrix:
+                st_full = _norm(it["title"] + " " + it["handle"] + " " + it["tags"])
+                if _has_matrix(st_full, q_matrix):
+                    s += 60  # fuerte boost si coincide la matriz pedida (p. ej., 1x4)
+                else:
+                    other = re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
+                    for a, b in other:
+                        mx = f"{a}x{b}"
+                        if mx != q_matrix:
+                            s -= 12  # leve penalización si menciona otra matriz
+                            break
+
             return s
 
         candidates.sort(key=score_item, reverse=True)
