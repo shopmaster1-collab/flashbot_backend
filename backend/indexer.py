@@ -104,11 +104,12 @@ class ShopifyREST:
         r.raise_for_status()
         return r
 
-    def list_products_active_all(self, limit: int = 250) -> List[Dict[str, Any]]:
+    # NUEVO: traer todas las páginas de /products.json SIN status en el request
+    def list_products_all(self, limit: int = 250) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         page: Optional[str] = None
         while True:
-            params = {"limit": limit, "status": "active"}
+            params = {"limit": limit}
             if page:
                 params["page_info"] = page
             r = self._get("/products.json", params)
@@ -243,18 +244,22 @@ class CatalogIndexer:
 
     # ---------- fetch productos ----------
     def _fetch_all_active(self, limit: int = 250) -> List[Dict[str, Any]]:
-        """Devuelve TODOS los productos activos. Respeta FORCE_REST=1."""
+        """Devuelve productos ACTIVOS. Usa REST paginado sin status en el request y filtra en Python."""
         force_rest = os.getenv("FORCE_REST", "0") == "1"
-        if force_rest and self._rest_fallback:
-            return self._rest_fallback.list_products_active_all(limit=limit)
 
-        # intentar con el cliente inyectado si expone paginación
+        # Preferimos REST con paginación robusta
+        if force_rest and self._rest_fallback:
+            all_items = self._rest_fallback.list_products_all(limit=limit)
+            return [p for p in all_items if (p.get("status") == "active")]
+
+        # Intento con cliente inyectado (si tiene paginación propia)
         try:
             if hasattr(self.client, "list_products"):
                 acc: List[Dict[str, Any]] = []
                 page = None
                 while True:
-                    resp = self.client.list_products(status="active", limit=limit, page_info=page)
+                    # sin status en el request; filtramos después
+                    resp = self.client.list_products(limit=limit, page_info=page)
                     if isinstance(resp, dict):
                         items = (resp.get("products") or resp.get("items") or []) or []
                         acc.extend(items)
@@ -262,18 +267,18 @@ class CatalogIndexer:
                         if not page or not items:
                             break
                     else:
-                        # si devuelve lista (no paginada), la usamos y salimos
                         if isinstance(resp, list):
                             acc = list(resp)
                         break
                 if acc:
-                    return acc
+                    return [p for p in acc if (p.get("status") == "active")]
         except Exception:
             pass
 
-        # fallback final
+        # Fallback final a REST
         if self._rest_fallback:
-            return self._rest_fallback.list_products_active_all(limit=limit)
+            all_items = self._rest_fallback.list_products_all(limit=limit)
+            return [p for p in all_items if (p.get("status") == "active")]
         return []
 
     # ---------- build ----------
