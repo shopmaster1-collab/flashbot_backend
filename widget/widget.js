@@ -1,4 +1,4 @@
-/* MAXTER widget.js — UI y lógica de chat
+/* MAXTER widget.js — UI y lógica de chat + tracking GA4/Meta
    Requiere widget.css cargado en el theme. */
 (function () {
   // Lee atributos del <script> que carga este archivo
@@ -10,7 +10,7 @@
   const POS      = ATTR("data-position", "left");   // left | right
   const PRIMARY  = ATTR("data-primary", "#0b73ff"); // color barra/botón principal
 
-  // Helpers
+  // ------- Helpers -------
   const moneyToNumber = (m) => {
     if (typeof m === "number") return m;
     if (!m) return null;
@@ -21,7 +21,66 @@
   const fmt = (n) =>
     new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 2 }).format(n || 0);
 
-  // Crear contenedores
+  // UTM helper para atribución
+  const addUTM = (url, params) => {
+    try {
+      const u = new URL(url, location.origin);
+      Object.entries(params || {}).forEach(([k,v]) => u.searchParams.set(k, v));
+      return u.toString();
+    } catch { return url; }
+  };
+
+  // ------- Tracking (GA4 + Meta Pixel + Beacon de respaldo) -------
+  const track = (eventName, payload = {}) => {
+    // GA4
+    try {
+      const dl = (window.dataLayer = window.dataLayer || []);
+      dl.push({ event: eventName, ...payload });
+    } catch {}
+    // Meta Pixel
+    try {
+      if (typeof window.fbq === "function") {
+        // Usamos trackCustom para no interferir con configuraciones existentes
+        window.fbq("trackCustom", eventName, payload);
+        // Hints estándar cuando aplica
+        if (eventName === "maxter_view_product") {
+          window.fbq("track", "ViewContent", {
+            content_name: payload?.product?.title,
+            currency: "MXN",
+            value: payload?.product?.price_num || 0
+          });
+        }
+        if (eventName === "maxter_buy_click") {
+          window.fbq("track", "AddToCart", {
+            content_name: payload?.product?.title,
+            currency: "MXN",
+            value: payload?.product?.price_num || 0
+          });
+        }
+      }
+    } catch {}
+
+    // Respaldo: enviar a un endpoint “nulo” si se define (no requerido)
+    try {
+      const url = (window.MAXTER_TRACK_ENDPOINT || "").trim();
+      if (url && navigator.sendBeacon) {
+        const blob = new Blob([JSON.stringify({ t: Date.now(), event: eventName, payload })], { type: "application/json" });
+        navigator.sendBeacon(url, blob);
+      }
+    } catch {}
+  };
+
+  const trackImpressions = (products = [], queryText = "") => {
+    const items = products.slice(0, 20).map((p, i) => ({
+      index: i,
+      title: p.title,
+      price: p.price,
+      product_url: p.product_url
+    }));
+    track("maxter_products_shown", { query: queryText, items_count: products.length, items });
+  };
+
+  // ------- UI -------
   const root = document.createElement("div");
   document.body.appendChild(root);
 
@@ -70,8 +129,8 @@
   const closeBtn = panel.querySelector(".mx-close");
 
   // UX básico
-  const open = () => { panel.classList.add("mx-open"); setTimeout(() => txt.focus(), 50); };
-  const close = () => panel.classList.remove("mx-open");
+  const open = () => { panel.classList.add("mx-open"); setTimeout(() => txt.focus(), 50); track("maxter_panel_open"); };
+  const close = () => { panel.classList.remove("mx-open"); track("maxter_panel_close"); };
 
   fab.addEventListener("click", () => {
     if (panel.classList.contains("mx-open")) close(); else open();
@@ -87,8 +146,8 @@
     body.scrollTop = body.scrollHeight;
   };
 
-  // Render de productos
-  const renderProducts = (products = []) => {
+  // Render de productos (con tracking en clicks)
+  const renderProducts = (products = [], queryText = "") => {
     if (!products || !products.length) return;
     const wrap = document.createElement("div");
     wrap.className = "mx-products";
@@ -98,6 +157,18 @@
       const old   = moneyToNumber(p.compare_at_price);
       const hasOff = old && price && old > price;
       const inv = Array.isArray(p.inventory) ? p.inventory : [];
+
+      // URLs con UTM para atribución
+      const productUrl = addUTM(p.product_url || "#", {
+        utm_source: "maxter_widget",
+        utm_medium: "chat",
+        utm_campaign: "view_product"
+      });
+      const buyUrl = addUTM(p.buy_url || "#", {
+        utm_source: "maxter_widget",
+        utm_medium: "chat",
+        utm_campaign: "buy_now"
+      });
 
       const card = document.createElement("article");
       card.className = "mx-card";
@@ -110,8 +181,8 @@
             ${hasOff ? `<span class="mx-old">${fmt(old)}</span>` : ``}
           </div>
           <div class="mx-row">
-            <a class="mx-btn mx-btn--buy" href="${p.buy_url}" target="_self" rel="nofollow noopener">Comprar ahora</a>
-            <a class="mx-link" href="${p.product_url}" target="_blank" rel="noopener">Ver producto</a>
+            <a class="mx-btn mx-btn--buy" href="${buyUrl}" target="_self" rel="nofollow noopener">Comprar ahora</a>
+            <a class="mx-link" href="${productUrl}" target="_blank" rel="noopener">Ver producto</a>
           </div>
           <div class="mx-inv">
             <b>Inventario:</b><br>
@@ -123,11 +194,35 @@
           </div>
         </div>
       `;
+
+      // Tracking de clicks
+      const clickPayload = {
+        query: queryText,
+        product: {
+          title: p.title,
+          price: p.price,
+          price_num: typeof price === "number" ? price : null,
+          product_url: p.product_url,
+          buy_url: p.buy_url
+        }
+      };
+
+      card.querySelector(".mx-btn--buy").addEventListener("click", () => {
+        track("maxter_buy_click", clickPayload);
+      });
+
+      card.querySelector(".mx-link").addEventListener("click", () => {
+        track("maxter_view_product", clickPayload);
+      });
+
       wrap.appendChild(card);
     });
 
     body.appendChild(wrap);
     body.scrollTop = body.scrollHeight;
+
+    // Impressions
+    trackImpressions(products, queryText);
   };
 
   // Enviar consulta
@@ -137,6 +232,7 @@
     addMsg(q, "user");
     txt.value = "";
     send.disabled = true;
+    track("maxter_query_sent", { query: q });
 
     try {
       const r = await fetch(`${BACKEND}/api/chat`, {
@@ -147,10 +243,12 @@
       const data = await r.json();
       const ans = data && data.answer ? String(data.answer) : "Lo siento, no tengo esa info por ahora.";
       addMsg(ans, "bot");
-      if (Array.isArray(data.products)) renderProducts(data.products);
+      if (Array.isArray(data.products)) renderProducts(data.products, q);
+      track("maxter_query_answered", { query: q, products: (data.products || []).length });
     } catch (e) {
       addMsg("Hubo un problema al consultar. Intenta de nuevo.", "bot");
       console.error("[MAXTER] error", e);
+      track("maxter_query_error", { message: String(e && e.message || e) });
     } finally {
       send.disabled = false;
     }
@@ -168,6 +266,7 @@
     if (!greeted && panel.classList.contains("mx-open")) {
       addMsg("¡Hola! Soy MAXTER. Pregúntame por productos (p. ej. “divisor HDMI 1×4”, “antena UHF exterior”, “control remoto Samsung”).");
       greeted = true;
+      track("maxter_greeting_shown");
     }
   });
 
