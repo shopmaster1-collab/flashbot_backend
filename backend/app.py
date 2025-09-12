@@ -17,7 +17,7 @@ except Exception:
     DeepseekClient = None  # type: ignore
 
 BASE_DIR = os.path.dirname(__file__)
-# El directorio real del widget está en el raíz del repo: /widget
+# Servimos los assets del widget desde /widget (mantenlo así en el repo)
 STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
 
 load_dotenv()
@@ -90,8 +90,8 @@ def _detect_patterns(q: str) -> dict:
     m = _PAT_ONE_BY_N.search(ql)
     if m:
         pat["matrix"] = f"{m.group(1)}x{m.group(2)}"
-    # pulgadas (número entre 19 y 100 aprox), muy común en soportes/pantallas
-    inch = re.findall(r"\b(1[9]|[2-9]\d|100)\b", ql)
+    # pulgadas (entre 19 y 100) para soportes/pantallas
+    inch = re.findall(r"\b(1[9-9]|[2-9]\d|100)\b", ql)
     if inch:
         pat["inches"] = list(set(inch))
     # categorías rápidas
@@ -111,38 +111,21 @@ def _detect_patterns(q: str) -> dict:
 
 def _format_answer(query: str, items: list) -> str:
     """
-    Arma una respuesta clara con bullets + breve explicación de por qué se sugieren.
+    Respuesta breve, sin repetir títulos (eso ya lo muestran las tarjetas).
     """
     pat = _detect_patterns(query)
-    intro_bits = []
-
+    bits = []
     if pat.get("matrix"):
-        intro_bits.append(f"patrón {pat['matrix']}")
+        bits.append(f"{pat['matrix']}")
     if pat.get("inches"):
-        intro_bits.append(f"tamaño {', '.join(sorted(pat['inches']))}”")
+        bits.append(f"{', '.join(sorted(pat['inches']))}”")
     if pat.get("cats"):
-        intro_bits.append("categoría " + ", ".join(pat["cats"]))
+        bits.append(", ".join(pat["cats"]))
     if pat.get("water"):
-        intro_bits.append("términos de agua/nivel")
+        bits.append("agua/nivel")
 
-    if intro_bits:
-        intro = f"Encontré opciones relevantes para “{query}” ({'; '.join(intro_bits)}):"
-    else:
-        intro = f"Encontré estas opciones relacionadas con “{query}”:"
-
-    lines = [intro]
-    for it in items:
-        title = it.get("title") or "Producto"
-        sku = it.get("sku") or ""
-        price = it.get("price") or ""
-        url = it.get("product_url") or ""
-        sku_txt = f" — {sku}" if sku else ""
-        price_txt = f" — {price}" if price else ""
-        lines.append(f"- {title}{sku_txt}{price_txt}\n  {url}")
-
-    lines.append("\n¿Quieres que filtre por precio, marca, disponibilidad o tipo (p. ej. 1×2, 1×4, ‘para 55”’, ‘UHF’, etc.)?")
-    return "\n".join(lines)
-
+    detail = f" ({'; '.join(bits)})" if bits else ""
+    return f"¡Claro! Encontré {len(items)} opción(es){detail} que coinciden con tu búsqueda. Aquí van:"
 
 def _cards_from_items(items):
     """Transforma resultados del indexer a tarjetas del widget/chat."""
@@ -162,7 +145,7 @@ def _cards_from_items(items):
 
 
 def _plain_items(items):
-    """Versión simple (para enviar al LLM o a la redacción) con precio ya formateado."""
+    """Versión simple (para el copy) con precio ya formateado."""
     out = []
     for it in items:
         v = it["variant"]
@@ -198,26 +181,20 @@ def chat():
     # Tarjetas (para el widget)
     cards = _cards_from_items(items)
 
-    # Redacción base determinística (si luego usamos Deepseek, preservamos la lista)
+    # Redacción base determinística (breve)
     simple = _plain_items(items)
     base_answer = _format_answer(query, simple)
 
-    # Reescritura opcional con Deepseek
+    # Reescritura opcional con Deepseek (manteniendo contenido)
     if deeps is not None:
         try:
-            # Prompt minimalista y restrictivo: que NO borre la lista ni la estructura.
             system_prompt = (
                 "Eres un asistente de una tienda. Mejora la redacción del mensaje del usuario manteniendo SIEMPRE "
-                "la lista de productos tal como aparece (mismos bullets, títulos, SKU, precios y enlaces). "
-                "Corrige estilo y añade una frase final de ayuda, sin inventar información."
+                "el sentido y sin inventar información. Sé breve y amable."
             )
             user_prompt = base_answer
             pretty = deeps.chat(system_prompt, user_prompt)
-            # Precaución: si por alguna razón quita bullets, usamos la base.
-            if pretty and pretty.count("- ") >= len(simple) and len(pretty) > 40:
-                answer = pretty
-            else:
-                answer = base_answer
+            answer = pretty or base_answer
         except Exception as e:
             print(f"[WARN] Deepseek chat error: {e}", flush=True)
             answer = base_answer
@@ -251,7 +228,15 @@ def reindex():
 def admin_stats():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    return {"ok": True, **indexer.stats()}
+    try:
+        return {"ok": True, **indexer.stats()}
+    except Exception as e:
+        import traceback
+        return {
+            "ok": False,
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }, 200
 
 
 @app.get("/api/admin/search")
@@ -276,7 +261,6 @@ def admin_search():
     if not debug:
         return {"ok": True, "q": q, "count": len(out), "items": out}
 
-    # info de depuración: patrones detectados
     dbg = _detect_patterns(q)
     return {"ok": True, "q": q, "count": len(out), "items": out, "debug": dbg}
 
@@ -293,7 +277,11 @@ def admin_products():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     limit = int(request.args.get("limit", 10))
-    return {"ok": True, "items": indexer.sample_products(limit=limit)}
+    try:
+        return {"ok": True, "items": indexer.sample_products(limit=limit)}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
 
 
 @app.get("/api/admin/diag")
@@ -316,32 +304,31 @@ def admin_diag():
         "token_present": bool(os.getenv("SHOPIFY_ACCESS_TOKEN") or os.getenv("SHOPIFY_TOKEN")),
     }
 
-    probe = {"ok": True, "db_error": None}
+    probe = {"ok": True}
     try:
-        # leer conteo rápido
-        stats = indexer.stats()
-        probe["sample_count"] = stats.get("products", 0)
+        probe["stats"] = indexer.stats()
     except Exception as e:
+        import traceback
         probe["ok"] = False
-        probe["db_error"] = str(e)
+        probe["error"] = str(e)
+        probe["trace"] = traceback.format_exc()
 
     try:
         probe["locations"] = len(shop.list_locations())
     except Exception:
         probe["locations"] = 0
 
+    try:
+        probe["sample_products"] = indexer.sample_products(limit=3)
+    except Exception:
+        probe["sample_products"] = []
+
     return {"ok": True, "env": env, "probe": probe}
 
 
-# --- Rutas de estáticos del widget ---
 @app.get("/static/<path:fname>")
 def static_files(fname):
-    # Ruta histórica /static/...  -> sirve archivos desde /widget
-    return send_from_directory(STATIC_DIR, fname)
-
-@app.get("/widget/<path:fname>")
-def widget_files(fname):
-    # Alias conveniente /widget/...
+    # Servimos desde /widget para mantener el path público /static/*
     return send_from_directory(STATIC_DIR, fname)
 
 
