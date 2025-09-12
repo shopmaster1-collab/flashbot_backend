@@ -19,30 +19,35 @@ except Exception:
 load_dotenv()
 
 app = Flask(__name__)
+
+# CORS
+_allowed = [o.strip() for o in (os.getenv("ALLOWED_ORIGINS") or "*").split(",") if o.strip()]
 CORS(
     app,
-    resources={r"/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*").split(",")}},
-    supports_credentials=False,
+    resources={r"/*": {
+        "origins": _allowed,
+        "allow_headers": ["Content-Type", "X-Admin-Secret"],
+        "methods": ["GET", "POST", "OPTIONS"],
+    }},
 )
 
-# --- Paths y clientes ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
+# --- Servicios (sin kwargs: ShopifyClient lee envs internamente) ---
+shop = ShopifyClient()
+indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 
-store_base = os.getenv("STORE_BASE_URL", "https://master.com.mx").rstrip("/")
-shop_client = ShopifyClient(
-    shop=os.getenv("SHOPIFY_STORE_DOMAIN") or os.getenv("SHOPIFY_SHOP", ""),
-    token=os.getenv("SHOPIFY_ACCESS_TOKEN") or os.getenv("SHOPIFY_TOKEN", ""),
-    api_version=os.getenv("SHOPIFY_API_VERSION", "2024-10"),
-)
-indexer = CatalogIndexer(shop_client, store_base)
-
+CHAT_WRITER = (os.getenv("CHAT_WRITER") or "none").strip().lower()  # none | deepseek
 deeps = None
-if os.getenv("CHAT_WRITER", "none").lower() == "deepseek" and DeepseekClient:
+if CHAT_WRITER == "deepseek" and DeepseekClient is not None:
     try:
-        deeps = DeepseekClient(api_key=os.getenv("DEEPSEEK_API_KEY", ""))
+        deeps = DeepseekClient()
     except Exception:
         deeps = None
+
+# Construye índice al iniciar (no tumbar la app si falla)
+try:
+    indexer.build()
+except Exception as e:
+    print(f"[WARN] Index build failed at startup: {e}", flush=True)
 
 
 def _admin_ok(req) -> bool:
@@ -71,58 +76,55 @@ def health():
     return {"ok": True}
 
 
-# --------- util de redacción/explicación ----------
+# --------- utils de patrón/explicación ----------
 _PAT_ONE_BY_N = re.compile(r"\b(\d+)\s*[x×]\s*(\d+)\b", re.IGNORECASE)
 
 def _detect_patterns(q: str) -> dict:
-    """Detecta patrones útiles para explicar relevancia (1x4, pulgadas, 'uhf', etc.)."""
-    ql = q.lower()
+    ql = (q or "").lower()
     pat = {}
     m = _PAT_ONE_BY_N.search(ql)
     if m:
         pat["matrix"] = f"{m.group(1)}x{m.group(2)}"
-    # pulgadas (número entre 19 y 100 aprox), muy común en soportes/pantallas
+
     inch = re.findall(r"\b(1[9]|[2-9]\d|100)\b", ql)
     if inch:
         pat["inches"] = list(set(inch))
-    # categorías rápidas
-    cat = []
+
+    cats = []
     for key in ["hdmi", "rca", "coaxial", "antena", "soporte", "control", "cctv", "vga", "usb"]:
         if key in ql:
-            cat.append(key)
-    if cat:
-        pat["cats"] = cat
-    # agua / nivel
+            cats.append(key)
+    if cats:
+        pat["cats"] = cats
+
     for w in ["agua", "fuga", "inundacion", "inundación", "nivel", "boya", "cisterna", "tinaco"]:
         if w in ql:
             pat["water"] = True
             break
-
     return pat
 
 
-def _format_answer(query: str, items):
-    """Texto corto basado solo en lo encontrado (sin inventar info)."""
+def _format_answer(query: str, items: list) -> str:
     pat = _detect_patterns(query)
+    intro_bits = []
+    if pat.get("water"):
+        intro_bits.append("monitoreo de nivel de agua en tinacos/cisternas")
+    if pat.get("matrix"):
+        intro_bits.append(f"patrón {pat['matrix']}")
+    if pat.get("inches"):
+        intro_bits.append(f"tamaño {', '.join(sorted(pat['inches']))}”")
+    if pat.get("cats"):
+        intro_bits.append("categorías: " + ", ".join(pat["cats"]))
+
     lines = []
-    if "water" in pat:
-        lines.append("Te muestro opciones para medir/monitorear nivel de agua en tinacos o cisternas.")
-    if "matrix" in pat:
-        lines.append(f"También consideré la matriz solicitada ({pat['matrix']}).")
-    if "inches" in pat:
-        pulgadas = ", ".join(sorted(pat["inches"]))
-        lines.append(f"Detecté tamaño(s) en pulgadas: {pulgadas}.")
-    if "cats" in pat:
-        cats = ", ".join(pat["cats"])
-        lines.append(f"Categorías relevantes: {cats}.")
-    if not lines:
-        lines.append("Estas son las opciones más relevantes que encontré.")
-    lines.append("Si quieres, puedo acotar por precio, marca, disponibilidad o tipo (p. ej. 1×2, 1×4, ‘para 55”’, ‘UHF’, etc.)?")
+    if intro_bits:
+        lines.append("Consideré: " + "; ".join(intro_bits) + ".")
+    lines.append("Estas son las opciones más relevantes que encontré.")
+    lines.append("¿Quieres acotar por precio, marca, disponibilidad o tipo?")
     return "\n".join(lines)
 
 
 def _cards_from_items(items):
-    """Transforma resultados del indexer a tarjetas del widget/chat."""
     cards = []
     for it in items:
         v = it["variant"]
@@ -133,13 +135,12 @@ def _cards_from_items(items):
             "compare_at_price": money(v["compare_at_price"]) if v.get("compare_at_price") else None,
             "buy_url": it["buy_url"],
             "product_url": it["product_url"],
-            "inventory": it["variant"]["inventory"],
+            "inventory": v.get("inventory"),
         })
     return cards
 
 
 def _plain_items(items):
-    """Versión simple (para enviar al LLM o a la redacción) con precio ya formateado."""
     out = []
     for it in items:
         v = it["variant"]
@@ -160,7 +161,6 @@ def _rerank_for_water(query: str, items: list):
     if not water_intent or not items:
         return items
 
-    # Señales específicas por modelo
     pref_map = {
         "iot-waterv": 0,
         "iot-waterultra": 0,
@@ -169,7 +169,6 @@ def _rerank_for_water(query: str, items: list):
         "easy-waterultra": 0,
         "easy-water": 0,
     }
-    # Ajustes por calificadores en la consulta
     if ("valvula" in ql) or ("válvula" in ql):
         pref_map["iot-waterv"] += 40
     if ("ultra" in ql) or ("ultrason" in ql) or ("ultrasónico" in ql) or ("ultrasonico" in ql):
@@ -199,14 +198,11 @@ def _rerank_for_water(query: str, items: list):
 
     def fam_score(st: str) -> int:
         s = 0
-        # Palabras genéricas que deberían existir
         if any(w in st for w in ["tinaco","cisterna","nivel","agua"]):
             s += 20
-        # Ponderaciones por familia
         for key, bonus in pref_map.items():
             if key in st:
                 s += 60 + bonus
-        # Tolerancia a guiones/variantes
         if "iot water" in st: s += 25
         if "easy water" in st: s += 25
         return s
@@ -236,21 +232,15 @@ def chat():
     # Rerank si hay intención de agua/tinaco
     items = _rerank_for_water(query, items)
 
-    # Si no hay resultados, responde claro
     if not items:
         return jsonify({
             "answer": "No encontré resultados directos. Prueba con palabras clave específicas (p. ej. ‘divisor hdmi 1×4’, ‘soporte pared 55”’, ‘antena exterior UHF’, ‘control Samsung’, ‘cable RCA audio video’).",
             "products": []
         })
 
-    # Armar tarjetas para el widget
     cards = _cards_from_items(items)
-
-    # Redacción breve (sin inventar info)
-    simple = _plain_items(items)
     base_answer = _format_answer(query, items)
 
-    # Si hay deepseek y lo pediste, intenta embellecer (con fallback seguro)
     if deeps:
         try:
             system_prompt = (
@@ -260,11 +250,7 @@ def chat():
             )
             user_prompt = base_answer
             pretty = deeps.chat(system_prompt, user_prompt)
-            # Precaución: si por alguna razón quita bullets, usamos la base.
-            if pretty and pretty.count("- ") >= len(simple) and len(pretty) > 40:
-                answer = pretty
-            else:
-                answer = base_answer
+            answer = pretty if (pretty and len(pretty) > 40) else base_answer
         except Exception as e:
             print(f"[WARN] Deepseek chat error: {e}", flush=True)
             answer = base_answer
@@ -358,7 +344,6 @@ def admin_diag():
 
     probe = {"ok": True, "db_error": None}
     try:
-        # leer conteo rápido
         stats = indexer.stats()
         probe["sample_count"] = stats.get("products", 0)
     except Exception as e:
@@ -370,14 +355,15 @@ def admin_diag():
 
 
 # --- Rutas de estáticos del widget ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
+
 @app.get("/static/<path:fname>")
 def static_files(fname):
-    # Ruta histórica /static/...  -> sirve archivos desde /widget
     return send_from_directory(STATIC_DIR, fname)
 
 @app.get("/widget/<path:fname>")
 def widget_files(fname):
-    # Alias conveniente /widget/...
     return send_from_directory(STATIC_DIR, fname)
 
 
