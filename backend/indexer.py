@@ -20,6 +20,7 @@ import re
 import json
 import time
 import sqlite3
+import unicodedata
 from typing import Any, Dict, List, Tuple, Optional
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -46,6 +47,15 @@ def _row_factory(cursor, row):
     for idx, col in enumerate(cursor.description):
         d[col[0]] = row[idx]
     return d
+
+
+def _norm(s: str) -> str:
+    """minúsculas + sin acentos (para comparaciones robustas)."""
+    if not s:
+        return ""
+    s = s.lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    return s
 
 
 # ---------- REST nativo (paginación con page_info) ----------
@@ -487,53 +497,106 @@ class CatalogIndexer:
         conn.close()
         return rows
 
-    # ---------- búsqueda (con stopwords, sinónimos, OR/NEAR y re-ranking semántico ligero) ----------
+    # ---------- búsqueda ecommerce-aware ----------
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
             return []
 
-        # Stopwords y sinónimos
+        q_norm = _norm(query)
+
+        # Stopwords y sinónimos amplios
         STOP = {
             "el","la","los","las","un","una","unos","unas",
             "de","del","al","y","o","u","en","a","con","por","para",
-            "que","cual","cuales","cuál","cuáles","donde","dónde",
+            "que","cual","cuales","cual","cuales","donde","donde",
             "busco","busca","buscar","quiero","necesito","tienes","tienen","hay",
             "producto","productos"
         }
         SYN = {
-            "divisor": ["splitter","duplicador","repartidor"],
-            "splitter": ["divisor","duplicador","repartidor"],
-            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak"],
-            "sensor": ["detector","sonda"],
-            "hdmi": ["hdmi"],
-            "cable": ["cordon","cordón"],
+            # vídeo / pantallas / soportes
+            "tv": ["televisor","pantalla"],
+            "pantalla": ["tv","televisor","monitor"],
+            "soporte": ["base","bracket","montaje","mount","pared","techo","mural"],
+            # cables / conectividad
+            "cable": ["cordon","cordon","conector","conexion","conexión"],
+            "hdmi": ["hdmi","uhd","4k","8k","microhdmi","mini hdmi","arc","earc"],
+            "rca": ["av","audio video","a/v"],
+            "vga": ["dsub","d-sub"],
+            "coaxial": ["rg6","rg59","f"],
+            # divisores y switches
+            "divisor": ["splitter","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
+            "splitter": ["divisor","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
+            "switch": ["conmutador","selector"],
+            # antenas
+            "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
+            # controles
+            "control": ["remoto","remote"],
+            "remoto": ["control","remote"],
+            # cámaras / seguridad
+            "camara": ["cámara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
+            "cámara": ["camara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
+            # audio
+            "bocina": ["parlante","altavoz","speaker"],
+            "microfono": ["micrófono","mic","micro"],
+            "amplificador": ["ampli","amp"],
+            # sensores comunes
+            "sensor": ["detector","sonda","modulo","módulo"],
+            "movimiento": ["pir"],
+            # agua / nivel
+            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
+            # energía y básicos
+            "pila": ["bateria","batería","aa","aaa","18650","9v"],
+            "cargador": ["charger","fuente","eliminador","adaptador","power"],
+            # adaptadores / convertidores
+            "adaptador": ["converter","convertidor"],
+            "conector": ["terminal","plug","jack"],
         }
-        WATER = {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","water","leak"}
-        SENSOR = {"sensor","detector","sonda"}
 
-        raw_terms = [t.strip().lower() for t in re.findall(r"\w+", query, re.UNICODE)]
-        base_terms = [t for t in raw_terms if len(t) >= 3 and t not in STOP] or [t for t in raw_terms if len(t) >= 3]
+        # combos que definen intención (gran boost si ambos lados aparecen)
+        COMBOS = [
+            ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
+            ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
+            ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
+            ({"sensor","detector","sonda"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
+        ]
 
-        # Expansión de sinónimos
+        # extraer tokens y expandir sinónimos
+        raw_terms = [t for t in re.findall(r"[\w]+", q_norm, re.UNICODE)]
+        base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
+
+        # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
+        if re.search(r"\b\d+\s*[x×]\s*\d+\b", q_norm):
+            base_terms.append(re.sub(r"\s+", "", re.search(r"\b\d+\s*[x×]\s*\d+\b", q_norm).group(0)).replace("×", "x"))
+
         seen = set()
         expanded: List[str] = []
         for t in base_terms:
             if t not in seen:
                 expanded.append(t); seen.add(t)
             for s in SYN.get(t, []):
-                if s not in seen:
-                    expanded.append(s); seen.add(s)
-        clean_terms = expanded[:8] if expanded else []
+                s_n = _norm(s)
+                if s_n not in seen:
+                    expanded.append(s_n); seen.add(s_n)
 
-        # Señal “combo sensor+agua” en la intención
-        wants_water_sensor = any(t in WATER for t in clean_terms) and any(t in SENSOR for t in clean_terms)
+        clean_terms = expanded[:12] if expanded else []
+
+        # intención por combos
+        def detect_combo(tokens: List[str]) -> List[Tuple[set, set, int]]:
+            tokset = set(tokens)
+            hits = []
+            for A, B, bonus in COMBOS:
+                if (tokset & A) and (tokset & B):
+                    hits.append((A, B, bonus))
+            return hits
+
+        combo_hits = detect_combo(clean_terms)
 
         conn = self._conn_read()
         cur = conn.cursor()
 
         ids: List[int] = []
 
-        # FTS5 (OR + NEAR entre los 2 primeros términos)
+        # FTS5 (OR + NEAR entre primeros 2 términos si existen)
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
@@ -541,7 +604,7 @@ class CatalogIndexer:
             try:
                 rows = list(cur.execute(
                     "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_q, k * 8),
+                    (fts_q, k * 10),
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
             except Exception:
@@ -555,14 +618,14 @@ class CatalogIndexer:
                 where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
                 params.extend([like, like, like, like])
             sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
-            params.append(k * 8)
+            params.append(k * 10)
             try:
                 like_rows = list(cur.execute(sql, tuple(params)))
                 ids.extend([int(r["id"]) for r in like_rows])
             except Exception:
                 pass
 
-        # Únicos (margen amplio para reordenar)
+        # únicos
         uniq_ids: List[int] = []
         seen2 = set()
         for i in ids:
@@ -570,7 +633,7 @@ class CatalogIndexer:
                 seen2.add(i)
                 uniq_ids.append(i)
 
-        # Construye candidatos completos
+        # candidatos (cargar filas y variantes)
         candidates: List[Dict[str, Any]] = []
         for pid in uniq_ids:
             p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
@@ -591,8 +654,7 @@ class CatalogIndexer:
                 })
             if not v_infos:
                 continue
-
-            # stock total para desempate
+            # elegir variante con más stock
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
@@ -603,41 +665,64 @@ class CatalogIndexer:
                 "image": p.get("image"),
                 "body": p.get("body") or "",
                 "tags": p.get("tags") or "",
-                "vendor": p.get("vendor"),
-                "product_type": p.get("product_type"),
+                "vendor": p.get("vendor") or "",
+                "product_type": p.get("product_type") or "",
                 "variant": best,
+                "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
+
+        # --- Filtro contextual ligero: si combo HDMi+Divisor, prioriza los que mencionan hdmi+1xN/divisor en campos fuertes ---
+        def strong_text(it: Dict[str, Any]) -> str:
+            return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
+
+        if candidates and combo_hits:
+            # Si hay al menos un candidato que cumpla algún combo, filtramos al subconjunto que cumpla (para alta precisión)
+            subset: List[Dict[str, Any]] = []
+            for it in candidates:
+                st = strong_text(it)
+                ok_any = False
+                for A, B, _ in combo_hits:
+                    if any(a in st for a in A) and any(b in st for b in B):
+                        ok_any = True
+                        break
+                if ok_any:
+                    subset.append(it)
+            if subset:
+                candidates = subset
 
         # ---- Re-ranking por relevancia semántica ligera ----
         def hits(text: str, term: str) -> int:
-            t = text.lower()
-            try:
-                return t.count(term.lower())
-            except Exception:
-                return 0
+            # cuenta ocurrencias normalizadas
+            t = _norm(text)
+            return t.count(term)
 
         def score_item(it: Dict[str, Any]) -> int:
             ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
+            vendor = it["vendor"]; ptype = it["product_type"]
             s = 0
             for t in clean_terms:
-                s += 6 * hits(ttl, t)
-                s += 4 * hits(hdl, t)
+                s += 7 * hits(ttl, t)
+                s += 5 * hits(hdl, t)
                 s += 3 * hits(tgs, t)
+                s += 2 * hits(ptype, t)
+                s += 1 * hits(vendor, t)
                 s += 1 * hits(bdy, t)
-            # Bonus por aparición “sensor + agua” (o sinónimos) en campos fuertes
-            if wants_water_sensor:
-                title_tokens = set(re.findall(r"\w+", ttl.lower()))
-                handle_tokens = set(re.findall(r"\w+", hdl.lower()))
-                tag_tokens = set(re.findall(r"\w+", tgs.lower()))
-                strong = title_tokens | handle_tokens | tag_tokens
-                if (strong & {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","water","leak"}) and (strong & {"sensor","detector","sonda"}):
-                    s += 40
-            # Bonus leve si el primer término aparece al inicio del título
+            # Combos (gran boost)
+            st = strong_text(it)
+            for A, B, bonus in combo_hits:
+                if any(a in st for a in A) and any(b in st for b in B):
+                    s += bonus
+            # Inicio de título con primer término
             if clean_terms:
                 first = clean_terms[0]
-                if ttl.lower().startswith(first):
-                    s += 5
-            # Bonus por stock
+                if _norm(ttl).startswith(first):
+                    s += 6
+            # Boost por SKU si aparece exacto en la consulta
+            q_tokens = set(clean_terms)
+            sku_set = {_norm(sk) for sk in (it["skus"] or [])}
+            if q_tokens & sku_set:
+                s += 25
+            # Boost por stock (cap)
             stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock > 0:
                 s += min(stock, 20)
@@ -647,14 +732,22 @@ class CatalogIndexer:
 
         # Armar resultado final con URLs
         results: List[Dict[str, Any]] = []
-        for it in candidates[:max(k, 10)]:
+        for it in candidates[:max(k, 12)]:
             v = it["variant"]
             product_url = f"{self.store_base_url}/products/{it['handle']}" if it["handle"] else self.store_base_url
             buy_url = f"{self.store_base_url}/cart/{v['variant_id']}:1"
             results.append({
-                **it,
+                "id": it["id"],
+                "title": it["title"],
+                "handle": it["handle"],
+                "image": it["image"],
+                "body": it["body"],
+                "tags": it["tags"],
+                "vendor": it["vendor"],
+                "product_type": it["product_type"],
                 "product_url": product_url,
                 "buy_url": buy_url,
+                "variant": v,
             })
 
         conn.close()
