@@ -94,28 +94,19 @@ class CatalogIndexer:
     def _img_src(img_dict: Optional[Dict[str, Any]]) -> Optional[str]:
         if not img_dict:
             return None
-        # REST: 'src'; GraphQL puede traer 'url'
         src = (img_dict.get("src") or img_dict.get("url") or "").strip()
         return src or None
 
     def _extract_hero_image(self, p: Dict[str, Any]) -> Optional[str]:
-        """
-        Selecciona una imagen 'hero' para tarjetas (si existe):
-        1) product.image.src
-        2) primera de la galería
-        3) la primera imagen asociada a una variante (image_id)
-        """
         # 1) destacada
         featured = self._img_src(p.get("image"))
         if featured:
             return featured
-
         # 2) primera de la galería
         for i in (p.get("images") or []):
             src = self._img_src(i)
             if src:
                 return src
-
         # 3) por variante (mapeando image_id)
         images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
         for v in (p.get("variants") or []):
@@ -124,22 +115,16 @@ class CatalogIndexer:
                 src = self._img_src(images_by_id.get(iid))
                 if src:
                     return src
-
         return None
 
     # ---------- reglas ----------
     def _passes_product_rules(self, p: Dict[str, Any]) -> Tuple[bool, str]:
-        """Devuelve (ok, reason). Única validación: estado activo (si se exige)."""
         if self.rules["REQUIRE_ACTIVE"] and p.get("status") != "active":
             return False, "status!=active"
         return True, ""
 
     def _select_valid_variants(self, variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Selección mínima de variantes:
-        - Requiere precio numérico (necesario para la tarjeta y buy_url).
-        - NO exige SKU ni stock.
-        """
+        """Mínimo: variante con precio numérico (no exigimos SKU ni stock)."""
         out: List[Dict[str, Any]] = []
         for v in variants or []:
             price = v.get("price")
@@ -175,6 +160,70 @@ class CatalogIndexer:
             })
         return out
 
+    # ---------- fetch completo con paginación ----------
+    def _fetch_all_active(self, limit: int = 250) -> List[Dict[str, Any]]:
+        """
+        Trae TODAS las páginas de productos activos usando cursor `page_info`.
+        Soporta varios formatos de retorno del cliente:
+        - dict con keys: items / next_page_info
+        - tuple: (items, next_page_info)
+        - list simple (sin next): se asume una sola página
+        """
+        out: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+
+        while True:
+            # Intento flexible: pasar kwargs comunes; si el cliente no los acepta, cae al siguiente
+            try:
+                batch = self.client.list_products(limit=limit, status="active", page_info=cursor)
+            except TypeError:
+                # cliente no acepta kwargs -> intenta solo limit/status
+                try:
+                    batch = self.client.list_products(limit=limit, status="active")
+                except TypeError:
+                    # cliente sin kwargs -> última alternativa
+                    batch = self.client.list_products()
+
+            items, next_cursor = self._normalize_products_batch(batch)
+
+            if not items:
+                break
+
+            out.extend(items)
+            if not next_cursor:
+                break
+            cursor = next_cursor
+
+        return out
+
+    @staticmethod
+    def _normalize_products_batch(batch) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Normaliza las distintas respuestas posibles del cliente:
+        - {'items': [...], 'next_page_info': '...'}
+        - {'products': [...], 'next_page_info': '...'}
+        - ([...], '...')
+        - [...]
+        """
+        # dict con items
+        if isinstance(batch, dict):
+            items = batch.get("items") or batch.get("products") or batch.get("data") or []
+            npi = batch.get("next_page_info") or batch.get("next") or None
+            return list(items or []), (npi or None)
+
+        # tuple (items, next)
+        if isinstance(batch, tuple) and len(batch) >= 1:
+            items = batch[0] or []
+            npi = batch[1] if len(batch) > 1 else None
+            return list(items or []), (npi or None)
+
+        # lista simple (sin next)
+        if isinstance(batch, list):
+            return list(batch), None
+
+        # formato desconocido
+        return [], None
+
     # ---------- build ----------
     def build(self) -> None:
         """Descarga catálogo y levanta índice en SQLite."""
@@ -185,9 +234,8 @@ class CatalogIndexer:
             locations = []
         self._location_map = {int(x["id"]): (x.get("name") or str(x["id"])) for x in locations}
 
-        # productos (REST paginado) — asegúrate que el cliente incluya:
-        # id, handle, title, status, body_html, tags, vendor, product_type, image, images, variants
-        products = self.client.list_products()  # puede tardar
+        # productos activos (todas las páginas)
+        products = self._fetch_all_active(limit=250)
 
         # recoger todos los inventory_item_id
         all_inv_ids: List[int] = []
@@ -277,7 +325,7 @@ class CatalogIndexer:
         n_variants = 0
 
         for p in products:
-            # 1) Reglas de producto (solo estado activo si se exige)
+            # 1) Única regla de producto
             ok, reason = self._passes_product_rules(p)
             if not ok:
                 discards_count[reason] = discards_count.get(reason, 0) + 1
@@ -290,7 +338,7 @@ class CatalogIndexer:
                     })
                 continue
 
-            # 2) Variantes válidas (mínimo: tener precio numérico)
+            # 2) Variantes válidas (mínimo: precio)
             valids = self._select_valid_variants(p.get("variants") or [])
             if not valids:
                 discards_count["no_variant_complete"] = discards_count.get("no_variant_complete", 0) + 1
@@ -422,7 +470,6 @@ class CatalogIndexer:
 
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
-                # No filtramos por stock ni SKU
                 if v["price"] is None:
                     continue
 
@@ -437,7 +484,6 @@ class CatalogIndexer:
             if not v_infos:
                 continue
 
-            # Orden preferente por mayor disponibilidad total (si aplica)
             v_infos.sort(
                 key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0,
                 reverse=True,
