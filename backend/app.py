@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import threading
+
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -17,25 +18,19 @@ STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
 load_dotenv()
 
 app = Flask(__name__)
-# CORS sólo para /api/*
 CORS(app, resources={r"/api/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*").split(",")}})
 
-# ---------- Servicios ----------
-shop = ShopifyClient()  # usa SHOPIFY_TOKEN y SHOPIFY_STORE_DOMAIN de env
+# --- servicios ---
+shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 deeps = DeepseekClient()
 
-# ---------- Helpers ----------
+# IMPORTANTE: NO reconstruir índice en el arranque (para no bloquear el puerto de Render)
+# El reindex se hace con POST /api/admin/reindex
+
 def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
-# Construir índice al iniciar, sin romper la app si falla
-try:
-    indexer.build()
-except Exception as e:
-    print(f"[WARN] Index build failed at startup: {e}", flush=True)
-
-# ---------- Rutas públicas ----------
 @app.get("/")
 def home():
     return (
@@ -44,10 +39,10 @@ def home():
         '<a href="/health">/health</a>, '
         '<code>POST /api/chat</code>, '
         '<code>POST /api/admin/reindex</code>, '
-        '<code>GET /api/admin/diag</code>, '
         '<code>GET /api/admin/stats</code>, '
         '<code>GET /api/admin/discards</code>, '
-        '<code>GET /api/admin/products</code>, '
+        '<code>GET /api/admin/products?limit=10</code>, '
+        '<code>GET /api/admin/diag</code>, '
         '<code>GET /api/admin/search?q=...</code>'
         ".</p>"
     )
@@ -67,7 +62,6 @@ def chat():
     if not items:
         return jsonify({"answer": "lo siento, no dispongo de esa información", "products": []})
 
-    # Redacción con Deepseek usando un mini catálogo de contexto
     context = indexer.mini_catalog_json(items)
     user_msg = USER_TEMPLATE.format(query=query, catalog_json=context)
     try:
@@ -76,11 +70,8 @@ def chat():
         print(f"[WARN] Deepseek chat error: {e}", flush=True)
         answer = "lo siento, no dispongo de esa información"
 
-    # Tarjetas visibles: sólo mostramos productos con imagen
     cards = []
     for it in items:
-        if not it.get("image"):
-            continue
         v = it["variant"]
         cards.append({
             "title": it["title"],
@@ -89,12 +80,12 @@ def chat():
             "compare_at_price": money(v["compare_at_price"]) if v["compare_at_price"] else None,
             "buy_url": it["buy_url"],
             "product_url": it["product_url"],
-            "inventory": it["variant"]["inventory"],
+            "inventory": v["inventory"],  # [{name, available}]
         })
 
     return jsonify({"answer": answer, "products": cards})
 
-# ---------- Admin: mantenimiento / diagnóstico ----------
+# --------- admin ---------
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True)
@@ -131,6 +122,30 @@ def admin_products():
     limit = int(request.args.get("limit", 10))
     return {"ok": True, "items": indexer.sample_products(limit=limit)}
 
+@app.get("/api/admin/diag")
+def admin_diag():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    env_info = {
+        "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-10"),
+        "require_active": os.getenv("REQUIRE_ACTIVE", "0"),
+        "require_image": os.getenv("REQUIRE_IMAGE", "0"),
+        "require_stock": os.getenv("REQUIRE_STOCK", "0"),
+        "require_sku": os.getenv("REQUIRE_SKU", "0"),
+        "min_body_chars": int(os.getenv("MIN_BODY_CHARS", "0")),
+        "store_domain": os.getenv("SHOPIFY_STORE_DOMAIN"),
+    }
+    # pequeña sonda
+    try:
+        locs = shop.list_locations()
+        ok = True
+        sample = indexer.sample_products(limit=3)
+    except Exception:
+        ok = False
+        sample = []
+    return {"ok": True, "env": env_info, "probe": {"ok": ok, "locations": len(locs) if ok else 0, "sample_products": sample}}
+
 @app.get("/api/admin/search")
 def admin_search():
     if not _admin_ok(request):
@@ -139,54 +154,20 @@ def admin_search():
     items = indexer.search(q, k=5) if q else []
     out = []
     for it in items:
+        v = it["variant"]
         out.append({
             "title": it["title"],
             "handle": it["handle"],
-            "sku": it["variant"]["sku"],
-            "price": it["variant"]["price"],
-            "stock": sum(x["available"] for x in it["variant"]["inventory"]),
+            "sku": v.get("sku"),
+            "price": v.get("price"),
+            "stock": sum(x["available"] for x in v["inventory"]) if v["inventory"] else 0,
         })
     return {"ok": True, "q": q, "count": len(out), "items": out}
 
-@app.get("/api/admin/diag")
-def admin_diag():
-    """
-    Diagnóstico rápido: devuelve flags de entorno y una pequeña prueba de conectividad
-    a Shopify (locations) más una muestra del catálogo ya indexado.
-    """
-    if not _admin_ok(request):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    env_info = {
-        "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-10"),
-        "require_active": os.getenv("REQUIRE_ACTIVE", "0"),
-        "require_image": os.getenv("REQUIRE_IMAGE", "0"),
-        "require_sku": os.getenv("REQUIRE_SKU", "0"),
-        "require_stock": os.getenv("REQUIRE_STOCK", "0"),
-        "min_body_chars": int(os.getenv("MIN_BODY_CHARS", "0")),
-        "store_domain": os.getenv("SHOPIFY_STORE_DOMAIN", ""),
-    }
-    probe = {"ok": True}
-    try:
-        locs = shop.list_locations()
-        probe["locations"] = len(locs)
-    except Exception as e:
-        probe["ok"] = False
-        probe["locations_error"] = str(e)
-
-    try:
-        probe["sample_products"] = indexer.sample_products(limit=3)
-    except Exception as e:
-        probe["ok"] = False
-        probe["sample_error"] = str(e)
-
-    return {"ok": True, "env": env_info, "probe": probe}
-
-# ---------- Archivos estáticos del widget ----------
 @app.get("/static/<path:fname>")
 def static_files(fname):
     return send_from_directory(STATIC_DIR, fname)
 
-# ---------- Main ----------
 if __name__ == "__main__":
+    # Render detecta el puerto automáticamente; sólo asegúrate de respetar PORT si lo proveen.
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
