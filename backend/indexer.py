@@ -4,10 +4,8 @@ Indexer del catálogo Shopify -> SQLite (+FTS5) para el buscador del bot.
 
 Reglas de filtrado (configurables por variables de entorno):
 - REQUIRE_ACTIVE=1  -> exige product.status == "active"
-- REQUIRE_IMAGE=1   -> exige al menos una imagen (featured, galería o por variante)
-- REQUIRE_STOCK=0/1 -> exige stock > 0 por variante
-- REQUIRE_SKU=0/1   -> exige SKU no vacío
-- MIN_BODY_CHARS=N  -> mínimo de caracteres de descripción (HTML limpiado)
+
+(No se consideran imagen, SKU, stock ni tamaño de descripción.)
 
 Tablas:
 - products(id, handle, title, body, tags, vendor, product_type, image)
@@ -57,13 +55,9 @@ class CatalogIndexer:
         self.client = shop_client
         self.store_base_url = store_base_url.rstrip("/")
 
-        # Reglas desde entorno (DEFAULTS: ahora ACTIVE=1 para considerar sólo Activos)
+        # Única regla: por defecto solo productos ACTIVO
         self.rules = {
-            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1",  # <— default cambiado a "1"
-            "REQUIRE_IMAGE": os.getenv("REQUIRE_IMAGE", "0") == "1",
-            "REQUIRE_STOCK": os.getenv("REQUIRE_STOCK", "0") == "1",
-            "REQUIRE_SKU": os.getenv("REQUIRE_SKU", "0") == "1",
-            "MIN_BODY_CHARS": int(os.getenv("MIN_BODY_CHARS", "0")),
+            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1",
         }
 
         self.db_path = DB_PATH
@@ -95,7 +89,7 @@ class CatalogIndexer:
         conn.row_factory = _row_factory
         return conn
 
-    # ---------- util imágenes ----------
+    # ---------- util imágenes (solo para mostrar, NO para filtrar) ----------
     @staticmethod
     def _img_src(img_dict: Optional[Dict[str, Any]]) -> Optional[str]:
         if not img_dict:
@@ -104,34 +98,9 @@ class CatalogIndexer:
         src = (img_dict.get("src") or img_dict.get("url") or "").strip()
         return src or None
 
-    def has_image(self, p: Dict[str, Any]) -> bool:
-        """Verdadero si el producto tiene:
-         - imagen destacada (p.image.src), o
-         - cualquier imagen de galería (p.images[].src), o
-         - alguna variante con image_id que mapee a p.images[].src
-        """
-        # 1) destacada
-        if self._img_src(p.get("image")):
-            return True
-
-        # 2) galería
-        for i in (p.get("images") or []):
-            if self._img_src(i):
-                return True
-
-        # 3) variante -> image_id vs images[]
-        if p.get("variants"):
-            images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
-            for v in p["variants"]:
-                iid = str(v.get("image_id") or "")
-                if iid and self._img_src(images_by_id.get(iid)):
-                    return True
-
-        return False
-
     def _extract_hero_image(self, p: Dict[str, Any]) -> Optional[str]:
         """
-        Selecciona una imagen 'hero' razonable para tarjetas:
+        Selecciona una imagen 'hero' para tarjetas (si existe):
         1) product.image.src
         2) primera de la galería
         3) la primera imagen asociada a una variante (image_id)
@@ -159,25 +128,18 @@ class CatalogIndexer:
         return None
 
     # ---------- reglas ----------
-    def _passes_product_rules(self, p: Dict[str, Any]) -> Tuple[bool, str, Optional[str]]:
-        """Devuelve (ok, reason, hero_img)."""
+    def _passes_product_rules(self, p: Dict[str, Any]) -> Tuple[bool, str]:
+        """Devuelve (ok, reason). Única validación: estado activo (si se exige)."""
         if self.rules["REQUIRE_ACTIVE"] and p.get("status") != "active":
-            return False, "status!=active", None
-
-        hero_img = self._extract_hero_image(p)
-
-        if self.rules["REQUIRE_IMAGE"] and not self.has_image(p):
-            return False, "no_image", None
-
-        if self.rules["MIN_BODY_CHARS"] > 0:
-            text = strip_html(p.get("body_html") or "")
-            if len(text) < self.rules["MIN_BODY_CHARS"]:
-                return False, "short_body", hero_img
-
-        return True, "", hero_img
+            return False, "status!=active"
+        return True, ""
 
     def _select_valid_variants(self, variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Aplica reglas por variante (precio, SKU/stock según flags)."""
+        """
+        Selección mínima de variantes:
+        - Requiere precio numérico (necesario para la tarjeta y buy_url).
+        - NO exige SKU ni stock.
+        """
         out: List[Dict[str, Any]] = []
         for v in variants or []:
             price = v.get("price")
@@ -188,15 +150,8 @@ class CatalogIndexer:
             if price_f is None:
                 continue
 
-            sku = (v.get("sku") or "").strip()
             inv_item_id = v.get("inventory_item_id")
             inv_levels = self._inventory_map.get(int(inv_item_id), []) if inv_item_id else []
-            total = sum(int(x.get("available") or 0) for x in inv_levels)
-
-            if self.rules["REQUIRE_SKU"] and not sku:
-                continue
-            if self.rules["REQUIRE_STOCK"] and total <= 0:
-                continue
 
             cap = v.get("compare_at_price")
             try:
@@ -206,7 +161,7 @@ class CatalogIndexer:
 
             out.append({
                 "id": int(v["id"]),
-                "sku": sku or None,
+                "sku": (v.get("sku") or None),
                 "price": price_f,
                 "compare_at_price": cap_f,
                 "inventory_item_id": int(inv_item_id) if inv_item_id else None,
@@ -230,7 +185,8 @@ class CatalogIndexer:
             locations = []
         self._location_map = {int(x["id"]): (x.get("name") or str(x["id"])) for x in locations}
 
-        # productos (REST paginado) — asegúrate que el cliente incluya: image, images, variants, status, body_html, tags...
+        # productos (REST paginado) — asegúrate que el cliente incluya:
+        # id, handle, title, status, body_html, tags, vendor, product_type, image, images, variants
         products = self.client.list_products()  # puede tardar
 
         # recoger todos los inventory_item_id
@@ -321,8 +277,8 @@ class CatalogIndexer:
         n_variants = 0
 
         for p in products:
-            # reglas por producto (incluye cálculo de hero_img)
-            ok, reason, hero_img = self._passes_product_rules(p)
+            # 1) Reglas de producto (solo estado activo si se exige)
+            ok, reason = self._passes_product_rules(p)
             if not ok:
                 discards_count[reason] = discards_count.get(reason, 0) + 1
                 if len(discards_sample) < 20:
@@ -334,7 +290,7 @@ class CatalogIndexer:
                     })
                 continue
 
-            # variantes válidas
+            # 2) Variantes válidas (mínimo: tener precio numérico)
             valids = self._select_valid_variants(p.get("variants") or [])
             if not valids:
                 discards_count["no_variant_complete"] = discards_count.get("no_variant_complete", 0) + 1
@@ -349,6 +305,7 @@ class CatalogIndexer:
 
             body_text = strip_html(p.get("body_html") or "")
             tags = (p.get("tags") or "").strip()
+            hero_img = self._extract_hero_image(p)  # opcional, solo para mostrar
 
             cur.execute(ins_p, (
                 int(p["id"]),
@@ -465,13 +422,8 @@ class CatalogIndexer:
 
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
-                total = sum(int(x["available"]) for x in inv) if inv else 0
-
+                # No filtramos por stock ni SKU
                 if v["price"] is None:
-                    continue
-                if self.rules["REQUIRE_STOCK"] and total <= 0:
-                    continue
-                if self.rules["REQUIRE_SKU"] and not (v.get("sku") or "").strip():
                     continue
 
                 v_infos.append({
@@ -485,6 +437,7 @@ class CatalogIndexer:
             if not v_infos:
                 continue
 
+            # Orden preferente por mayor disponibilidad total (si aplica)
             v_infos.sort(
                 key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0,
                 reverse=True,
