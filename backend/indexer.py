@@ -57,9 +57,9 @@ class CatalogIndexer:
         self.client = shop_client
         self.store_base_url = store_base_url.rstrip("/")
 
-        # Reglas desde entorno (defaults relajados; ajústalos en Render)
+        # Reglas desde entorno (DEFAULTS: ahora ACTIVE=1 para considerar sólo Activos)
         self.rules = {
-            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "0") == "1",
+            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1",  # <— default cambiado a "1"
             "REQUIRE_IMAGE": os.getenv("REQUIRE_IMAGE", "0") == "1",
             "REQUIRE_STOCK": os.getenv("REQUIRE_STOCK", "0") == "1",
             "REQUIRE_SKU": os.getenv("REQUIRE_SKU", "0") == "1",
