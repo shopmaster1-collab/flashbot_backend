@@ -14,44 +14,35 @@ from .utils import money
 try:
     from .deepseek_client import DeepseekClient
 except Exception:
-    DeepseekClient = None  # type: ignore
-
-BASE_DIR = os.path.dirname(__file__)
-# El directorio real del widget está en el raíz del repo: /widget
-STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
+    DeepseekClient = None
 
 load_dotenv()
 
 app = Flask(__name__)
-
-# --- CORS (ampliado a todas las rutas) ---
-_allowed = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 CORS(
     app,
-    resources={r"/*": {
-        "origins": _allowed,
-        "allow_headers": ["Content-Type", "X-Admin-Secret"],
-        "methods": ["GET", "POST", "OPTIONS"],
-    }},
+    resources={r"/*": {"origins": os.getenv("ALLOWED_ORIGINS", "*").split(",")}},
+    supports_credentials=False,
 )
 
-# --- Servicios ---
-shop = ShopifyClient()
-indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
+# --- Paths y clientes ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
 
-CHAT_WRITER = (os.getenv("CHAT_WRITER") or "none").strip().lower()  # none | deepseek
+store_base = os.getenv("STORE_BASE_URL", "https://master.com.mx").rstrip("/")
+shop_client = ShopifyClient(
+    shop=os.getenv("SHOPIFY_STORE_DOMAIN") or os.getenv("SHOPIFY_SHOP", ""),
+    token=os.getenv("SHOPIFY_ACCESS_TOKEN") or os.getenv("SHOPIFY_TOKEN", ""),
+    api_version=os.getenv("SHOPIFY_API_VERSION", "2024-10"),
+)
+indexer = CatalogIndexer(shop_client, store_base)
+
 deeps = None
-if CHAT_WRITER == "deepseek" and DeepseekClient is not None:
+if os.getenv("CHAT_WRITER", "none").lower() == "deepseek" and DeepseekClient:
     try:
-        deeps = DeepseekClient()
+        deeps = DeepseekClient(api_key=os.getenv("DEEPSEEK_API_KEY", ""))
     except Exception:
         deeps = None
-
-# Construye índice al iniciar (no tumbar la app si falla)
-try:
-    indexer.build()
-except Exception as e:
-    print(f"[WARN] Index build failed at startup: {e}", flush=True)
 
 
 def _admin_ok(req) -> bool:
@@ -71,7 +62,7 @@ def home():
         '<code>GET /api/admin/discards</code>, '
         '<code>GET /api/admin/products</code>, '
         '<code>GET /api/admin/diag</code>'
-        ".</p>"
+        "</p>"
     )
 
 
@@ -106,41 +97,27 @@ def _detect_patterns(q: str) -> dict:
         if w in ql:
             pat["water"] = True
             break
+
     return pat
 
 
-def _format_answer(query: str, items: list) -> str:
-    """
-    Arma una respuesta clara con bullets + breve explicación de por qué se sugieren.
-    """
+def _format_answer(query: str, items):
+    """Texto corto basado solo en lo encontrado (sin inventar info)."""
     pat = _detect_patterns(query)
-    intro_bits = []
-
-    if pat.get("matrix"):
-        intro_bits.append(f"patrón {pat['matrix']}")
-    if pat.get("inches"):
-        intro_bits.append(f"tamaño {', '.join(sorted(pat['inches']))}”")
-    if pat.get("cats"):
-        intro_bits.append("categoría " + ", ".join(pat["cats"]))
-    if pat.get("water"):
-        intro_bits.append("términos de agua/nivel")
-
-    if intro_bits:
-        intro = f"Encontré opciones relevantes para “{query}” ({'; '.join(intro_bits)}):"
-    else:
-        intro = f"Encontré estas opciones relacionadas con “{query}”:"
-
-    lines = [intro]
-    for it in items:
-        title = it.get("title") or "Producto"
-        sku = it.get("sku") or ""
-        price = it.get("price") or ""
-        url = it.get("product_url") or ""
-        sku_txt = f" — {sku}" if sku else ""
-        price_txt = f" — {price}" if price else ""
-        lines.append(f"- {title}{sku_txt}{price_txt}\n  {url}")
-
-    lines.append("\n¿Quieres que filtre por precio, marca, disponibilidad o tipo (p. ej. 1×2, 1×4, ‘para 55”’, ‘UHF’, etc.)?")
+    lines = []
+    if "water" in pat:
+        lines.append("Te muestro opciones para medir/monitorear nivel de agua en tinacos o cisternas.")
+    if "matrix" in pat:
+        lines.append(f"También consideré la matriz solicitada ({pat['matrix']}).")
+    if "inches" in pat:
+        pulgadas = ", ".join(sorted(pat["inches"]))
+        lines.append(f"Detecté tamaño(s) en pulgadas: {pulgadas}.")
+    if "cats" in pat:
+        cats = ", ".join(pat["cats"])
+        lines.append(f"Categorías relevantes: {cats}.")
+    if not lines:
+        lines.append("Estas son las opciones más relevantes que encontré.")
+    lines.append("Si quieres, puedo acotar por precio, marca, disponibilidad o tipo (p. ej. 1×2, 1×4, ‘para 55”’, ‘UHF’, etc.)?")
     return "\n".join(lines)
 
 
@@ -176,6 +153,74 @@ def _plain_items(items):
     return out
 
 
+# ---------- Re-ranker específico para intención de agua/tinaco ----------
+def _rerank_for_water(query: str, items: list):
+    ql = (query or "").lower()
+    water_intent = any(w in ql for w in ["agua","nivel","tinaco","cisterna","bomba","válvula","valvula"])
+    if not water_intent or not items:
+        return items
+
+    # Señales específicas por modelo
+    pref_map = {
+        "iot-waterv": 0,
+        "iot-waterultra": 0,
+        "iot-waterp": 0,
+        "iot-water": 0,
+        "easy-waterultra": 0,
+        "easy-water": 0,
+    }
+    # Ajustes por calificadores en la consulta
+    if ("valvula" in ql) or ("válvula" in ql):
+        pref_map["iot-waterv"] += 40
+    if ("ultra" in ql) or ("ultrason" in ql) or ("ultrasónico" in ql) or ("ultrasonico" in ql):
+        pref_map["iot-waterultra"] += 40
+        pref_map["easy-waterultra"] += 20
+    if ("presion" in ql) or ("presión" in ql):
+        pref_map["iot-waterp"] += 40
+    if ("bluetooth" in ql):
+        pref_map["easy-water"] += 30
+        pref_map["easy-waterultra"] += 30
+    if ("wifi" in ql) or ("app" in ql):
+        pref_map["iot-water"] += 20
+        pref_map["iot-waterultra"] += 20
+        pref_map["iot-waterv"] += 10
+
+    def strong_text(it):
+        v = it.get("variant", {})
+        skus = " ".join([s for s in (v.get("sku"),) if s]) + " " + " ".join(it.get("skus") or [])
+        return " ".join([
+            (it.get("title") or ""),
+            (it.get("handle") or ""),
+            (it.get("tags") or ""),
+            (it.get("vendor") or ""),
+            (it.get("product_type") or ""),
+            skus
+        ]).lower()
+
+    def fam_score(st: str) -> int:
+        s = 0
+        # Palabras genéricas que deberían existir
+        if any(w in st for w in ["tinaco","cisterna","nivel","agua"]):
+            s += 20
+        # Ponderaciones por familia
+        for key, bonus in pref_map.items():
+            if key in st:
+                s += 60 + bonus
+        # Tolerancia a guiones/variantes
+        if "iot water" in st: s += 25
+        if "easy water" in st: s += 25
+        return s
+
+    rescored = []
+    for idx, it in enumerate(items):
+        st = strong_text(it)
+        base = max(0, 30 - idx)  # mantener orden original si no hay señales
+        rescored.append((fam_score(st) + base, it))
+
+    rescored.sort(key=lambda x: x[0], reverse=True)
+    return [it for _, it in rescored]
+
+
 @app.post("/api/chat")
 def chat():
     data = request.get_json(force=True) or {}
@@ -183,33 +228,35 @@ def chat():
     k = int(data.get("k") or 5)
 
     if not query:
-        return jsonify({"answer": "¿Qué producto buscas? Puedo ayudarte con divisores HDMI, soportes, antenas, controles, cables, sensores y más.", "products": []})
+        return jsonify({"answer": "¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.", "products": []})
 
     # Buscar en el índice
     items = indexer.search(query, k=k)
 
+    # Rerank si hay intención de agua/tinaco
+    items = _rerank_for_water(query, items)
+
     # Si no hay resultados, responde claro
     if not items:
         return jsonify({
-            "answer": f"No encontré resultados directos para “{query}”. Prueba con palabras clave específicas (p. ej. ‘divisor hdmi 1×4’, ‘soporte pared 55”, ‘antena exterior UHF’, ‘control Samsung’, ‘cable RCA audio video’).",
+            "answer": "No encontré resultados directos. Prueba con palabras clave específicas (p. ej. ‘divisor hdmi 1×4’, ‘soporte pared 55”’, ‘antena exterior UHF’, ‘control Samsung’, ‘cable RCA audio video’).",
             "products": []
         })
 
-    # Tarjetas (para el widget)
+    # Armar tarjetas para el widget
     cards = _cards_from_items(items)
 
-    # Redacción base determinística (si luego usamos Deepseek, preservamos la lista)
+    # Redacción breve (sin inventar info)
     simple = _plain_items(items)
-    base_answer = _format_answer(query, simple)
+    base_answer = _format_answer(query, items)
 
-    # Reescritura opcional con Deepseek
-    if deeps is not None:
+    # Si hay deepseek y lo pediste, intenta embellecer (con fallback seguro)
+    if deeps:
         try:
-            # Prompt minimalista y restrictivo: que NO borre la lista ni la estructura.
             system_prompt = (
-                "Eres un asistente de una tienda. Mejora la redacción del mensaje del usuario manteniendo SIEMPRE "
-                "la lista de productos tal como aparece (mismos bullets, títulos, SKU, precios y enlaces). "
-                "Corrige estilo y añade una frase final de ayuda, sin inventar información."
+                "Actúa como asesor de compras para una tienda retail de electrónica. "
+                "Responde claro, breve (5-20 frases), sin inventar datos. "
+                "No modifiques ni repitas los precios; ya van en tarjetas."
             )
             user_prompt = base_answer
             pretty = deeps.chat(system_prompt, user_prompt)
@@ -227,7 +274,7 @@ def chat():
     return jsonify({"answer": answer, "products": cards})
 
 
-# ---- Reindex en background ----
+# --- Reindex en background ---
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True)
@@ -244,14 +291,14 @@ def reindex():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     threading.Thread(target=_do_reindex, daemon=True).start()
-    return {"ok": True, "message": "reindex started"}
+    return {"ok": True}
 
 
 @app.get("/api/admin/stats")
 def admin_stats():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    return {"ok": True, **indexer.stats()}
+    return indexer.stats()
 
 
 @app.get("/api/admin/search")
@@ -259,41 +306,34 @@ def admin_search():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     q = (request.args.get("q") or "").strip()
-    k = int(request.args.get("k") or 5)
-    debug = (request.args.get("debug") == "1")
-
-    items = indexer.search(q, k=k) if q else []
-    out = []
-    for it in items:
-        out.append({
-            "title": it["title"],
-            "handle": it["handle"],
-            "sku": it["variant"]["sku"],
-            "price": it["variant"]["price"],
-            "stock": sum(x["available"] for x in it["variant"]["inventory"]),
-        })
-
-    if not debug:
-        return {"ok": True, "q": q, "count": len(out), "items": out}
-
-    # info de depuración: patrones detectados
-    dbg = _detect_patterns(q)
-    return {"ok": True, "q": q, "count": len(out), "items": out, "debug": dbg}
+    k = int(request.args.get("k") or 12)
+    items = indexer.search(q, k=k)
+    return jsonify({
+        "q": q,
+        "k": k,
+        "items": _plain_items(items),
+    })
 
 
 @app.get("/api/admin/discards")
 def admin_discards():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    return {"ok": True, **indexer.discard_stats()}
+    return jsonify(indexer.discards())
 
 
 @app.get("/api/admin/products")
 def admin_products():
+    """Pequeño viewer para muestrear productos crudos y depurar coincidencias."""
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    limit = int(request.args.get("limit", 10))
-    return {"ok": True, "items": indexer.sample_products(limit=limit)}
+
+    page = int(request.args.get("page") or 1)
+    size = max(1, min(100, int(request.args.get("size") or 20)))
+    filt = (request.args.get("f") or "").strip().lower()
+
+    data = indexer.sample_products(page=page, size=size, q=filt)
+    return jsonify(data)
 
 
 @app.get("/api/admin/diag")
@@ -301,10 +341,10 @@ def admin_diag():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
-    # Estado de DB y entorno
-    sqlite_path = os.getenv("SQLITE_PATH", "")
-    db_dir = os.path.dirname(sqlite_path) if sqlite_path else ""
-    env = {
+    sqlite_path = os.getenv("SQLITE_PATH")
+    db_dir = os.path.dirname(sqlite_path) if sqlite_path else None
+
+    info = {
         "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-10"),
         "shop": os.getenv("SHOPIFY_STORE_DOMAIN", os.getenv("SHOPIFY_SHOP", "")),
         "sqlite_path": sqlite_path or "(default)",
@@ -325,12 +365,8 @@ def admin_diag():
         probe["ok"] = False
         probe["db_error"] = str(e)
 
-    try:
-        probe["locations"] = len(shop.list_locations())
-    except Exception:
-        probe["locations"] = 0
-
-    return {"ok": True, "env": env, "probe": probe}
+    info["probe"] = probe
+    return jsonify(info)
 
 
 # --- Rutas de estáticos del widget ---
