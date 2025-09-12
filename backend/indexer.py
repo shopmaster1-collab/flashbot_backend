@@ -4,7 +4,7 @@ Indexer del catálogo Shopify -> SQLite (+FTS5) para el buscador del bot.
 
 Reglas de filtrado (configurables por variables de entorno):
 - REQUIRE_ACTIVE=1  -> exige product.status == "active"
-- REQUIRE_IMAGE=1   -> exige al menos una imagen (featured o en galería)
+- REQUIRE_IMAGE=1   -> exige al menos una imagen (featured, galería o por variante)
 - REQUIRE_STOCK=0/1 -> exige stock > 0 por variante
 - REQUIRE_SKU=0/1   -> exige SKU no vacío
 - MIN_BODY_CHARS=N  -> mínimo de caracteres de descripción (HTML limpiado)
@@ -26,11 +26,22 @@ import os
 import re
 import json
 import sqlite3
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from .utils import strip_html
 
+# ---------- Paths / Data dir ----------
 BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DEFAULT_DATA_DIR = os.path.join(BASE_DIR, "data")
+
+# Si nos pasan una ruta completa de SQLite vía entorno, úsala (Render: SQLITE_PATH=/data/catalog.db)
+SQLITE_PATH_ENV = os.getenv("SQLITE_PATH", "").strip()
+if SQLITE_PATH_ENV:
+    DATA_DIR = os.path.dirname(SQLITE_PATH_ENV)
+    DB_PATH = SQLITE_PATH_ENV
+else:
+    DATA_DIR = DEFAULT_DATA_DIR
+    DB_PATH = os.path.join(DATA_DIR, "catalog.sqlite3")
+
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
@@ -55,7 +66,7 @@ class CatalogIndexer:
             "MIN_BODY_CHARS": int(os.getenv("MIN_BODY_CHARS", "0")),
         }
 
-        self.db_path = os.path.join(DATA_DIR, "catalog.sqlite3")
+        self.db_path = DB_PATH
         self._fts_enabled = False
 
         # métricas del último build
@@ -84,27 +95,97 @@ class CatalogIndexer:
         conn.row_factory = _row_factory
         return conn
 
-    # ---------- reglas ----------
-    def _passes_product_rules(self, p: Dict[str, Any], hero_img: str | None) -> Tuple[bool, str]:
-        if self.rules["REQUIRE_ACTIVE"] and p.get("status") != "active":
-            return False, "status!=active"
+    # ---------- util imágenes ----------
+    @staticmethod
+    def _img_src(img_dict: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not img_dict:
+            return None
+        # REST: 'src'; GraphQL puede traer 'url'
+        src = (img_dict.get("src") or img_dict.get("url") or "").strip()
+        return src or None
 
-        if self.rules["REQUIRE_IMAGE"] and not hero_img:
-            return False, "no_image"
+    def has_image(self, p: Dict[str, Any]) -> bool:
+        """Verdadero si el producto tiene:
+         - imagen destacada (p.image.src), o
+         - cualquier imagen de galería (p.images[].src), o
+         - alguna variante con image_id que mapee a p.images[].src
+        """
+        # 1) destacada
+        if self._img_src(p.get("image")):
+            return True
+
+        # 2) galería
+        for i in (p.get("images") or []):
+            if self._img_src(i):
+                return True
+
+        # 3) variante -> image_id vs images[]
+        if p.get("variants"):
+            images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
+            for v in p["variants"]:
+                iid = str(v.get("image_id") or "")
+                if iid and self._img_src(images_by_id.get(iid)):
+                    return True
+
+        return False
+
+    def _extract_hero_image(self, p: Dict[str, Any]) -> Optional[str]:
+        """
+        Selecciona una imagen 'hero' razonable para tarjetas:
+        1) product.image.src
+        2) primera de la galería
+        3) la primera imagen asociada a una variante (image_id)
+        """
+        # 1) destacada
+        featured = self._img_src(p.get("image"))
+        if featured:
+            return featured
+
+        # 2) primera de la galería
+        for i in (p.get("images") or []):
+            src = self._img_src(i)
+            if src:
+                return src
+
+        # 3) por variante (mapeando image_id)
+        images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
+        for v in (p.get("variants") or []):
+            iid = str(v.get("image_id") or "")
+            if iid:
+                src = self._img_src(images_by_id.get(iid))
+                if src:
+                    return src
+
+        return None
+
+    # ---------- reglas ----------
+    def _passes_product_rules(self, p: Dict[str, Any]) -> Tuple[bool, str, Optional[str]]:
+        """Devuelve (ok, reason, hero_img)."""
+        if self.rules["REQUIRE_ACTIVE"] and p.get("status") != "active":
+            return False, "status!=active", None
+
+        hero_img = self._extract_hero_image(p)
+
+        if self.rules["REQUIRE_IMAGE"] and not self.has_image(p):
+            return False, "no_image", None
 
         if self.rules["MIN_BODY_CHARS"] > 0:
             text = strip_html(p.get("body_html") or "")
             if len(text) < self.rules["MIN_BODY_CHARS"]:
-                return False, "short_body"
+                return False, "short_body", hero_img
 
-        return True, ""
+        return True, "", hero_img
 
     def _select_valid_variants(self, variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Aplica reglas por variante (precio, SKU/stock según flags)."""
         out: List[Dict[str, Any]] = []
         for v in variants or []:
             price = v.get("price")
-            if price is None:
+            try:
+                price_f = float(price) if price is not None else None
+            except Exception:
+                price_f = None
+            if price_f is None:
                 continue
 
             sku = (v.get("sku") or "").strip()
@@ -117,11 +198,17 @@ class CatalogIndexer:
             if self.rules["REQUIRE_STOCK"] and total <= 0:
                 continue
 
+            cap = v.get("compare_at_price")
+            try:
+                cap_f = float(cap) if cap is not None else None
+            except Exception:
+                cap_f = None
+
             out.append({
                 "id": int(v["id"]),
                 "sku": sku or None,
-                "price": float(price),
-                "compare_at_price": float(v["compare_at_price"]) if v.get("compare_at_price") is not None else None,
+                "price": price_f,
+                "compare_at_price": cap_f,
                 "inventory_item_id": int(inv_item_id) if inv_item_id else None,
                 "inventory": [
                     {
@@ -143,14 +230,18 @@ class CatalogIndexer:
             locations = []
         self._location_map = {int(x["id"]): (x.get("name") or str(x["id"])) for x in locations}
 
-        # productos (REST paginado)
+        # productos (REST paginado) — asegúrate que el cliente incluya: image, images, variants, status, body_html, tags...
         products = self.client.list_products()  # puede tardar
+
         # recoger todos los inventory_item_id
         all_inv_ids: List[int] = []
         for p in products:
             for v in p.get("variants") or []:
                 if v.get("inventory_item_id"):
-                    all_inv_ids.append(int(v["inventory_item_id"]))
+                    try:
+                        all_inv_ids.append(int(v["inventory_item_id"]))
+                    except Exception:
+                        pass
 
         # inventario por item id (batched en el cliente)
         levels = self.client.inventory_levels_for_items(all_inv_ids) if all_inv_ids else []
@@ -159,11 +250,14 @@ class CatalogIndexer:
         # build inventory map
         self._inventory_map = {}
         for lev in levels:
-            iid = int(lev["inventory_item_id"])
-            self._inventory_map.setdefault(iid, []).append({
-                "location_id": int(lev["location_id"]),
-                "available": int(lev.get("available") or 0),
-            })
+            try:
+                iid = int(lev["inventory_item_id"])
+                self._inventory_map.setdefault(iid, []).append({
+                    "location_id": int(lev["location_id"]),
+                    "available": int(lev.get("available") or 0),
+                })
+            except Exception:
+                continue
 
         # crear DB limpia
         if os.path.exists(self.db_path):
@@ -227,15 +321,8 @@ class CatalogIndexer:
         n_variants = 0
 
         for p in products:
-            # imagen “featured” o primera de galería
-            hero_img = None
-            if p.get("image") and (p["image"].get("src")):
-                hero_img = (p["image"]["src"] or "").strip() or None
-            elif p.get("images"):
-                hero_img = (p["images"][0].get("src") or "").strip() or None
-
-            # reglas por producto
-            ok, reason = self._passes_product_rules(p, hero_img)
+            # reglas por producto (incluye cálculo de hero_img)
+            ok, reason, hero_img = self._passes_product_rules(p)
             if not ok:
                 discards_count[reason] = discards_count.get(reason, 0) + 1
                 if len(discards_sample) < 20:
