@@ -104,7 +104,7 @@ class ShopifyREST:
         r.raise_for_status()
         return r
 
-    # NUEVO: traer todas las páginas de /products.json SIN status en el request
+    # Trae TODAS las páginas de /products.json SIN 'status' en el request.
     def list_products_all(self, limit: int = 250) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         page: Optional[str] = None
@@ -491,45 +491,86 @@ class CatalogIndexer:
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
             return []
+
+        # 1) Normalización y stopwords (ES)
+        STOP = {
+            "el","la","los","las","un","una","unos","unas",
+            "de","del","al","y","o","u","en","a","con","por","para",
+            "que","cual","cuales","cuál","cuáles","donde","dónde",
+            "busco","busca","buscar","quiero","necesito","tienes","tienen","hay",
+            "producto","productos"
+        }
+        raw_terms = [t.strip().lower() for t in re.findall(r"\w+", query, re.UNICODE)]
+        terms = [t for t in raw_terms if len(t) >= 3 and t not in STOP]
+        if not terms:
+            terms = [t for t in raw_terms if len(t) >= 3]
+
+        # dedup y tope
+        seen = set()
+        clean_terms: List[str] = []
+        for t in terms:
+            if t not in seen:
+                clean_terms.append(t)
+                seen.add(t)
+            if len(clean_terms) >= 6:
+                break
+
         conn = self._conn_read()
         cur = conn.cursor()
 
-        terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 1]
-        fts_query = " ".join(terms) if terms else query
         ids: List[int] = []
 
-        if self._fts_enabled:
-            rows = list(cur.execute(
-                "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                (fts_query, k * 3),
-            ))
-            ids.extend([int(r["rowid"]) for r in rows])
+        # 2) FTS5 (OR + NEAR entre los 2 primeros términos)
+        if self._fts_enabled and clean_terms:
+            or_clause = " OR ".join(clean_terms)
+            near_clause = ""
+            if len(clean_terms) >= 2:
+                near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})"
+            fts_q = f"({or_clause}){near_clause}"
 
-        if len(ids) < k and terms:
-            where, params = [], []
-            for t in terms:
+            try:
+                rows = list(cur.execute(
+                    "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
+                    (fts_q, k * 5),
+                ))
+                ids.extend([int(r["rowid"]) for r in rows])
+            except Exception:
+                pass
+
+        # 3) Fallback LIKE (OR) si hace falta
+        if len(ids) < k and clean_terms:
+            where_parts = []
+            params: List[Any] = []
+            for t in clean_terms:
                 like = f"%{t}%"
-                where.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
-                params += [like, like, like]
-            sql = f"SELECT id FROM products WHERE {' AND '.join(where)} LIMIT ?"
-            params.append(k * 3)
-            rows = list(cur.execute(sql, tuple(params)))
-            ids.extend([int(r["id"]) for r in rows])
+                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ?)")
+                params.extend([like, like, like])
+            sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
+            params.append(k * 5)
+            try:
+                like_rows = list(cur.execute(sql, tuple(params)))
+                ids.extend([int(r["id"]) for r in like_rows])
+            except Exception:
+                pass
 
-        seen, order = set(), []
+        # únicos y top-k (con pequeño margen)
+        uniq: List[int] = []
+        seen2 = set()
         for i in ids:
-            if i not in seen:
-                seen.add(i)
-                order.append(i)
-        ids = order[:k]
+            if i not in seen2:
+                seen2.add(i)
+                uniq.append(i)
+        ids = uniq[:max(k, 6)]
 
         results: List[Dict[str, Any]] = []
         for pid in ids:
             p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
             if not p:
                 continue
+
             vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
             v_infos: List[Dict[str, Any]] = []
+
             for v in vars_:
                 inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
                 v_infos.append({
@@ -539,8 +580,11 @@ class CatalogIndexer:
                     "compare_at_price": v.get("compare_at_price"),
                     "inventory": [{"name": x["location_name"], "available": int(x["available"])} for x in inv],
                 })
+
             if not v_infos:
                 continue
+
+            # ordena por stock total desc
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
@@ -560,6 +604,9 @@ class CatalogIndexer:
                 "buy_url": buy_url,
                 "variant": best,
             })
+
+            if len(results) >= k:
+                break
 
         conn.close()
         return results
