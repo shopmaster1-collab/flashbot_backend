@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import threading
+import traceback
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -29,8 +30,14 @@ CORS(
     }},
 )
 
-# --- Servicios ---
-shop = ShopifyClient()
+# --- Servicios / inicialización segura ---
+shop = None
+try:
+    shop = ShopifyClient()  # ahora acepta SHOPIFY_TOKEN o SHOPIFY_ACCESS_TOKEN; SHOPIFY_SHOP o SHOPIFY_STORE_DOMAIN
+except Exception as e:
+    # No tumbar la app si falta config; Indexer usará fallback REST si está disponible
+    print(f"[WARN] ShopifyClient init failed: {e}", flush=True)
+
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 deeps = DeepseekClient()
 
@@ -91,10 +98,10 @@ def chat():
             "title": it["title"],
             "image": it["image"],
             "price": money(v["price"]),
-            "compare_at_price": money(v["compare_at_price"]) if v["compare_at_price"] else None,
+            "compare_at_price": money(v["compare_at_price"]) if v.get("compare_at_price") else None,
             "buy_url": it["buy_url"],
             "product_url": it["product_url"],
-            "inventory": it["variant"]["inventory"],
+            "inventory": v.get("inventory") or [],
         })
 
     return jsonify({"answer": answer, "products": cards})
@@ -107,7 +114,6 @@ def _do_reindex():
         print("[INDEX] Reindex finished", flush=True)
         print(f"[INDEX] Stats: {indexer.stats()}", flush=True)
     except Exception as e:
-        import traceback
         print(f"[INDEX] Reindex failed: {e}\n{traceback.format_exc()}", flush=True)
 
 @app.post("/api/admin/reindex")
@@ -134,9 +140,9 @@ def admin_search():
         out.append({
             "title": it["title"],
             "handle": it["handle"],
-            "sku": it["variant"]["sku"],
+            "sku": it["variant"].get("sku"),
             "price": it["variant"]["price"],
-            "stock": sum(x["available"] for x in it["variant"]["inventory"]),
+            "stock": sum(x["available"] for x in it["variant"].get("inventory") or []),
         })
     return {"ok": True, "q": q, "count": len(out), "items": out}
 
@@ -157,22 +163,45 @@ def admin_products():
 def admin_diag():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    env = {
-        "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-10"),
-        "require_active": os.getenv("REQUIRE_ACTIVE", "0"),
-        "require_image": os.getenv("REQUIRE_IMAGE", "0"),
-        "require_sku": os.getenv("REQUIRE_SKU", "0"),
-        "require_stock": os.getenv("REQUIRE_STOCK", "0"),
-        "min_body_chars": int(os.getenv("MIN_BODY_CHARS", "0")),
-    }
-    probe = {"ok": True}
     try:
-        probe["locations"] = len(shop.list_locations())
-    except Exception:
-        probe["locations"] = 0
-        probe["ok"] = False
-    probe["sample_products"] = indexer.sample_products(limit=3)
-    return {"ok": True, "env": env, "probe": probe}
+        # No crear clientes nuevos aquí; solo inspeccionar entorno y hacer sondas ligeras
+        shop_domain = (os.getenv("SHOPIFY_STORE_DOMAIN") or os.getenv("SHOPIFY_SHOP") or "").strip()
+        token = (
+            os.getenv("SHOPIFY_ACCESS_TOKEN")
+            or os.getenv("SHOPIFY_TOKEN")
+            or os.getenv("SHOPIFY_ACCES_TOKEN")
+            or ""
+        ).strip()
+        api_version = os.getenv("SHOPIFY_API_VERSION", "2024-10")
+        sqlite_path = (os.getenv("SQLITE_PATH") or os.path.join(BASE_DIR, "data", "catalog.sqlite3")).strip()
+        force_rest = os.getenv("FORCE_REST", "0") == "1"
+
+        env = {
+            "shop": shop_domain,
+            "api_version": api_version,
+            "sqlite_path": sqlite_path,
+            "token_present": bool(token),
+            "require_active": os.getenv("REQUIRE_ACTIVE", "0"),
+            "force_rest": force_rest,
+        }
+
+        probe = {"ok": True}
+        # prueba muy ligera; si no hay cliente, devuelve 0 sin romper
+        try:
+            probe["locations"] = len(shop.list_locations()) if shop else 0
+        except Exception:
+            probe["locations"] = 0
+            probe["ok"] = False
+
+        probe["sample_products"] = indexer.sample_products(limit=3)
+
+        return {"ok": True, "env": env, "probe": probe}
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "trace": traceback.format_exc(),
+        }, 200  # nunca devolver 500 en diag
 
 @app.get("/static/<path:fname>")
 def static_files(fname):
