@@ -202,7 +202,8 @@ class CatalogIndexer:
             s = self._img_src(i)
             if s:
                 return s
-        images_by_id = {str(i.get("id"))): i for i in (p.get("images") or [])}
+        # ✅ corrección del typo aquí:
+        images_by_id = {str(i.get("id")): i for i in (p.get("images") or [])}
         for v in (p.get("variants") or []):
             iid = str(v.get("image_id") or "")
             if iid:
@@ -533,14 +534,13 @@ class CatalogIndexer:
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
             except Exception:
-                # si bm25 no está disponible, caemos a MATCH simple
                 rows = list(cur.execute(
                     "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
                     (fts_query, k * candidate_multiplier),
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
 
-        # 2) Fallback LIKE (AND por término), también con más candidatos
+        # 2) Fallback LIKE (AND por término)
         if len(ids) < k and terms_all:
             where_parts = []
             params: List[Any] = []
