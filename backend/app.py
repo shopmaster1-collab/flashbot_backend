@@ -137,13 +137,21 @@ _GAS_ALLOW_FAMILIES = [
     "iot gassensorv","iot gassensor","connect gas","easy gas",
 ]
 _GAS_ALLOW_KEYWORDS = ["gas","tanque","estacionario","estacionaria","lp","propano","butano","nivel","medidor","porcentaje","volumen"]
-# penalizar módulos/lab/arduino y sensores no relacionados
+
+# **Blocklist ampliado** para GAS (evita EASY-ELECTRIC y PEST-KILLER, etc.)
 _GAS_BLOCK = [
+    # módulos/lab/arduino
     "ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
-    "arduino","módulo","modulo","module","mq-","mq2","mq 2","flame","co2","humo","smoke","luz","photo","shield",
+    "arduino","módulo","modulo","module","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
+    # plagas
+    "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
+    # energía eléctrica / medidores de luz
+    "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
+    "kwh","kw/h","consumo","tarifa","electric meter","medidor de consumo","contador",
+    # otros no relacionados
     "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
-    # también evitar colados de agua cuando la intención es gas
-    "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra","water "
+    # y evitar colados de agua cuando buscamos gas
+    "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra"," water "
 ]
 
 def _concat_fields(it) -> str:
@@ -155,17 +163,19 @@ def _concat_fields(it) -> str:
 
 def _intent_from_query(q: str):
     ql=(q or "").lower()
-    if any(w in ql for w in _WATER_ALLOW_KEYWORDS): 
+    if any(w in ql for w in _WATER_ALLOW_KEYWORDS):
         if "gas" not in ql: return "water"
     if ("gas" in ql) or any(w in ql for w in ["tanque","estacionario","lp","propano","butano","medidor","nivel"]):
         return "gas"
     return None
 
-def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> int:
+def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple[int, bool]:
+    """Devuelve (score, has_family)."""
     s=0
+    has_family = any(fam in st for fam in allow_fams)
+    # solo dar peso por keywords; el 'positivo' se definirá exigiendo has_family
     if any(w in st for w in allow_keywords): s+=20
-    for fam in allow_fams:
-        if fam in st: s+=85
+    if has_family: s+=85
     # calificadores
     if extras.get("want_valve"):
         for key in extras.get("valve_fams", []):
@@ -188,10 +198,10 @@ def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> int:
     if extras.get("want_alarm"):
         for key in extras.get("alarm_words", []):
             if key in st: s+=25
-    # penalizaciones por palabras no deseadas
+    # penalizaciones suaves por palabras no deseadas
     for neg in extras.get("neg_words", []):
         if neg in st: s-=80
-    return s
+    return s, has_family
 
 def _rerank_for_water(query: str, items: list):
     ql=(query or "").lower()
@@ -212,20 +222,20 @@ def _rerank_for_water(query: str, items: list):
         st=_concat_fields(it)
         blocked=any(b in st for b in _WATER_BLOCK)
         base=max(0,30-idx)
-        score=_score_family(st, ql, _WATER_ALLOW_KEYWORDS, _WATER_ALLOW_FAMILIES, extras)
+        score, has_fam = _score_family(st, ql, _WATER_ALLOW_KEYWORDS, _WATER_ALLOW_FAMILIES, extras)
         total=score+base-(120 if blocked else 0)
         is_wv=("iot-waterv" in st) or ("iot waterv" in st)
-        rec=(total,score,blocked,is_wv,it); rescored.append(rec)
-        if score>=60 and not blocked: positives.append(rec)
+        rec=(total,score,blocked,has_fam,is_wv,it); rescored.append(rec)
+        if has_fam and score>=60 and not blocked: positives.append(rec)
     if positives:
         positives.sort(key=lambda x:x[0], reverse=True)
         if want_valve:
-            wv=[r for r in positives if r[3]]; others=[r for r in positives if not r[3]]
+            wv=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
             ordered=wv+others
         else: ordered=positives
-        return [it for (_t,_s,_b,_f,it) in ordered]
+        return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
     rescored.sort(key=lambda x:x[0], reverse=True)
-    return [it for (_t,_s,_b,_f,it) in rescored]
+    return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
 
 def _rerank_for_gas(query: str, items: list):
     ql=(query or "").lower()
@@ -240,26 +250,27 @@ def _rerank_for_gas(query: str, items: list):
             "wifi_fams":["iot-gassensor","iot gassensor","connect-gas","connect gas"],
             "display_fams":["easy-gas","easy gas"],
             "alarm_words":["alarma","alerta"],
-            "neg_words":["arduino","módulo","modulo","module","mq-","mq2","flame","photosensor","photo","shield","co2","humo","smoke","luz"]}
+            "neg_words":[]}  # usamos _GAS_BLOCK como castigo duro aparte
     rescored=[]; positives=[]
     for idx,it in enumerate(items):
         st=_concat_fields(it)
         blocked=any(b in st for b in _GAS_BLOCK)
         base=max(0,30-idx)
-        score=_score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
+        score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
-        rec=(total,score,blocked,is_valve,it); rescored.append(rec)
-        if score>=60 and not blocked: positives.append(rec)
+        rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
+        # **Positivo SOLO si pertenece a la familia de gas**
+        if has_fam and score>=60 and not blocked: positives.append(rec)
     if positives:
         positives.sort(key=lambda x:x[0], reverse=True)
         if want_valve:
-            vs=[r for r in positives if r[3]]; others=[r for r in positives if not r[3]]
+            vs=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
             ordered=vs+others
         else: ordered=positives
-        return [it for (_t,_s,_b,_f,it) in ordered]
+        return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
     rescored.sort(key=lambda x:x[0], reverse=True)
-    return [it for (_t,_s,_b,_f,it) in rescored]
+    return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
 
 def _apply_intent_rerank(query: str, items: list):
     intent=_intent_from_query(query)
