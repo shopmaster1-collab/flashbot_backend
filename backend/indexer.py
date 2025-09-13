@@ -337,9 +337,15 @@ class CatalogIndexer:
         """)
         conn.commit()
 
-        # FTS opcional
+        # FTS ampliado (ahora incluye handle, vendor, product_type)
         try:
-            cur.execute("CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')")
+            cur.execute("""
+                CREATE VIRTUAL TABLE products_fts
+                USING fts5(
+                    title, body, tags, handle, vendor, product_type,
+                    content='products', content_rowid='id'
+                )
+            """)
             self._fts_enabled = True
         except sqlite3.OperationalError:
             self._fts_enabled = False
@@ -467,7 +473,11 @@ class CatalogIndexer:
         conn.commit()
 
         if self._fts_enabled:
-            cur.execute("INSERT INTO products_fts (rowid, title, body, tags) SELECT id, title, body, tags FROM products")
+            # Poblar FTS con columnas ampliadas
+            cur.execute("""
+                INSERT INTO products_fts (rowid, title, body, tags, handle, vendor, product_type)
+                SELECT id, title, body, tags, handle, vendor, product_type FROM products
+            """)
             conn.commit()
 
         conn.close()
@@ -598,7 +608,7 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # FTS5 (OR + NEAR entre primeros 2 términos si existen)
+        # FTS5 (OR + NEAR entre primeros 2 términos si existen) — ahora el índice incluye handle/vendor/product_type
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
@@ -709,7 +719,7 @@ class CatalogIndexer:
                 s += 3 * hits(tgs, t)
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
-                s += 1 * hits(bdy, t)
+                s += 3 * hits(bdy, t)  # ← SUBIMOS el peso de BODY de 1 → 3
 
             # Combos (gran boost)
             st = strong_text(it)
