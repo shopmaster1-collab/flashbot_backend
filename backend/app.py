@@ -150,10 +150,26 @@ _GAS_BLOCK = [
 ]
 
 def _concat_fields(it) -> str:
-    v=it.get("variant",{})
-    parts=[it.get("title") or "", it.get("handle") or "", it.get("tags") or "",
-           it.get("vendor") or "", it.get("product_type") or "", v.get("sku") or ""]
-    if isinstance(it.get("skus"), (list,tuple)): parts.extend([x for x in it["skus"] if x])
+    """
+    IMPORTANTE: ahora también incluye 'body' (descripción) para que el re-rank
+    capture señales funcionales que suelen vivir en la descripción (Alexa, IP67, válvula, alarma, WiFi, etc.).
+    Se limita a los primeros ~1500 caracteres para evitar cadenas gigantes.
+    """
+    v = it.get("variant", {})
+    body = (it.get("body") or "").lower()
+    if len(body) > 1500:
+        body = body[:1500]
+    parts = [
+        it.get("title") or "",
+        it.get("handle") or "",
+        it.get("tags") or "",
+        it.get("vendor") or "",
+        it.get("product_type") or "",
+        v.get("sku") or "",
+        body,  # <- agregado
+    ]
+    if isinstance(it.get("skus"), (list, tuple)):
+        parts.extend([x for x in it["skus"] if x])
     return " ".join(parts).lower()
 
 def _intent_from_query(q: str):
@@ -230,7 +246,7 @@ def _rerank_for_water(query: str, items: list):
         else: ordered=positives
         return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
 
-    # Fallback suave: quedarnos con candidatos que contengan palabras de agua
+    # Fallback suave
     soft = []
     water_words = ["agua","tinaco","cisterna","nivel"]
     for idx,it in enumerate(items):
@@ -241,7 +257,6 @@ def _rerank_for_water(query: str, items: list):
         soft.sort(key=lambda x:x[0], reverse=True)
         return [it for (_score, it) in soft]
 
-    # Último recurso: reordenado general
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
 
@@ -269,10 +284,8 @@ def _rerank_for_gas(query: str, items: list):
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
         rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
-        # Positivo SOLO si pertenece a familia de gas
         if has_fam and score>=60 and not blocked: positives.append(rec)
 
-    # HARD FILTER si hay positivos
     if positives:
         positives.sort(key=lambda x:x[0], reverse=True)
         if want_valve:
@@ -281,7 +294,7 @@ def _rerank_for_gas(query: str, items: list):
         else: ordered=positives
         return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
 
-    # Fallback suave: quedarnos con candidatos que contengan "gas"
+    # Fallback suave: candidatos con "gas" (y no bloqueados)
     soft = []
     for idx,it in enumerate(items):
         st=_concat_fields(it)
@@ -291,7 +304,6 @@ def _rerank_for_gas(query: str, items: list):
         soft.sort(key=lambda x:x[0], reverse=True)
         return [it for (_score, it) in soft]
 
-    # Último recurso: reordenado general
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
 
