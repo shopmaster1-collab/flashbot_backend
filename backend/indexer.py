@@ -148,6 +148,52 @@ class ShopifyREST:
         return out
 
 
+# --------- listas blancas/negra por intención (para re-ranking robusto) ----------
+# Familias “oficiales” (handles, tags o nombres) para AGUA
+_WATER_ALLOW_FAMS = [
+    "iot-waterv", "iot-waterultra", "iot-waterp", "iot-water",
+    "easy-waterultra", "easy-water", "iot waterv", "iot waterultra", "iot waterp", "iot water",
+    "easy waterultra", "easy water"
+]
+_WATER_KEYWORDS = ["agua", "nivel", "tinaco", "cisterna"]
+_WATER_BLOCK = [
+    "bm-carsensor", "carsensor", "car", "auto", "vehiculo", "vehículo",
+    "ar-rain", "rain", "lluvia", "ar-gasc", "gasc", " co2", "humo", "smoke",
+    "ar-knock", "knock", "golpe"
+]
+
+# Familias “oficiales” para GAS
+_GAS_ALLOW_FAMS = [
+    "iot-gassensorv", "iot-gassensor", "connect-gas", "easy-gas",
+    "iot gassensorv", "iot gassensor", "connect gas", "easy gas"
+]
+_GAS_KEYWORDS = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano", "nivel", "medidor", "porcentaje", "volumen"]
+_GAS_BLOCK = [
+    # módulos/arduino
+    "ar-gasc", "ar-flame", "ar-photosensor", "photosensor", "megasensor", "ar-megasensor",
+    "arduino", "módulo", "modulo", "module", "mq-", "mq2", "flame", "co2", "humo", "smoke", "luz", "photo", "shield",
+    # plagas
+    "pest", "plaga", "mosquito", "insect", "insecto", "pest-killer", "pest killer",
+    # energía eléctrica
+    "easy-electric", "easy electric", "eléctrico", "electrico", "electricidad", "energia", "energía",
+    "kwh", "kw/h", "consumo", "tarifa", "electric meter", "medidor de consumo", "contador",
+    # no relacionados + evitar colados de agua
+    "ar-rain", "rain", "lluvia", "carsensor", "bm-carsensor", "auto", "vehiculo", "vehículo",
+    "iot-water", "iot-waterv", "iot-waterultra", "iot-waterp", "easy-water", "easy-waterultra", " water "
+]
+
+
+def _intent_from_query(q: str) -> Optional[str]:
+    qn = _norm(q)
+    if any(w in qn for w in _WATER_KEYWORDS) and "gas" not in qn:
+        return "water"
+    if ("gas" in qn) or any(w in qn for w in ["tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]):
+        return "gas"
+    if ("control" in qn or "remoto" in qn) and ("sony" in qn):
+        return "control_sony"
+    return None
+
+
 class CatalogIndexer:
     def __init__(self, shop_client, store_base_url: str):
         """
@@ -337,7 +383,7 @@ class CatalogIndexer:
         """)
         conn.commit()
 
-        # FTS opcional
+        # FTS opcional (incluye body)
         try:
             cur.execute("CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')")
             self._fts_enabled = True
@@ -503,6 +549,7 @@ class CatalogIndexer:
             return []
 
         q_norm = _norm(query)
+        intent = _intent_from_query(query)
 
         # Stopwords y sinónimos amplios
         STOP = {
@@ -552,6 +599,14 @@ class CatalogIndexer:
             "conector": ["terminal","plug","jack"],
         }
 
+        # atributos/sinónimos adicionales por intención
+        if "intemperie" in q_norm or "exterior" in q_norm:
+            # para gas/agua: IP67/impermeable/exterior
+            SYN.setdefault("ip67", ["impermeable","intemperie","exterior"])
+
+        if "valvula" in q_norm or "válvula" in q_norm:
+            SYN.setdefault("valvula", ["válvula","valvula"])
+
         # combos que definen intención (gran boost si ambos lados aparecen)
         COMBOS = [
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
@@ -580,6 +635,9 @@ class CatalogIndexer:
                 if s_n not in seen:
                     expanded.append(s_n); seen.add(s_n)
 
+        # boosts por marca (Sony) si la consulta lo trae
+        want_sony = ("sony" in q_norm)
+
         clean_terms = expanded[:12] if expanded else []
 
         # intención por combos
@@ -606,7 +664,7 @@ class CatalogIndexer:
             try:
                 rows = list(cur.execute(
                     "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_q, k * 10),
+                    (fts_q, k * 15),  # pedimos más para re-rank robusto
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
             except Exception:
@@ -620,7 +678,7 @@ class CatalogIndexer:
                 where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
                 params.extend([like, like, like, like])
             sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
-            params.append(k * 10)
+            params.append(k * 15)
             try:
                 like_rows = list(cur.execute(sql, tuple(params)))
                 ids.extend([int(r["id"]) for r in like_rows])
@@ -673,11 +731,51 @@ class CatalogIndexer:
                 "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
 
+        # --- Filtro contextual fuerte por intención (familias + blocklists) ---
+        def concat_all(it: Dict[str, Any]) -> str:
+            parts = [
+                it["title"], it["handle"], it["tags"],
+                it.get("vendor",""), it.get("product_type",""),
+                it.get("body","")
+            ]
+            parts.extend([sku or "" for sku in (it.get("skus") or [])])
+            return _norm(" ".join(parts))
+
+        if intent in ("gas", "water") and candidates:
+            pos: List[Dict[str, Any]] = []
+            for it in candidates:
+                st = concat_all(it)
+                if intent == "gas":
+                    blocked = any(b in st for b in _GAS_BLOCK)
+                    has_fam = any(f in st for f in _GAS_ALLOW_FAMS)
+                    if has_fam and not blocked:
+                        pos.append(it)
+                elif intent == "water":
+                    blocked = any(b in st for b in _WATER_BLOCK)
+                    has_fam = any(f in st for f in _WATER_ALLOW_FAMS)
+                    if has_fam and not blocked:
+                        pos.append(it)
+            if pos:
+                candidates = pos
+            else:
+                # Fallback suave: si no hubo familias, quedarnos con los que contengan la palabra clave del dominio
+                filt: List[Dict[str, Any]] = []
+                for it in candidates:
+                    st = concat_all(it)
+                    if intent == "gas":
+                        if (" gas" in " " + st) and not any(b in st for b in _GAS_BLOCK):
+                            filt.append(it)
+                    else:
+                        if any(w in st for w in _WATER_KEYWORDS) and not any(b in st for b in _WATER_BLOCK):
+                            filt.append(it)
+                if filt:
+                    candidates = filt
+
         # --- Filtro contextual ligero: si combo HDMi+Divisor, prioriza los que mencionan hdmi+1xN/divisor en campos fuertes ---
         def strong_text(it: Dict[str, Any]) -> str:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
-        if candidates and combo_hits:
+        if candidates and (combo_hits or intent == "control_sony"):
             subset: List[Dict[str, Any]] = []
             for it in candidates:
                 st = strong_text(it)
@@ -686,18 +784,27 @@ class CatalogIndexer:
                     if any(a in st for a in A) and any(b in st for b in B):
                         ok_any = True
                         break
+                # control Sony: preferir vendor/tags/body con sony
+                if intent == "control_sony":
+                    if ("sony" in st) or ("sony" in _norm(it.get("body",""))):
+                        ok_any = True
                 if ok_any:
                     subset.append(it)
             if subset:
                 candidates = subset
 
-        # ---- Re-ranking por relevancia con priorización de matriz exacta ----
+        # ---- Re-ranking por relevancia con priorización de matriz exacta y atributos de consulta ----
         def hits(text: str, term: str) -> int:
             t = _norm(text)
             return t.count(term)
 
         def _has_matrix(text_norm: str, mx: str) -> bool:
             return (mx in text_norm) or (mx.replace("x", "×") in text_norm)
+
+        want_valve = ("valvula" in q_norm or "válvula" in q_norm)
+        want_ip67 = ("ip67" in q_norm) or ("intemperie" in q_norm) or ("exterior" in q_norm)
+        want_wifi = ("wifi" in q_norm) or ("app" in q_norm)
+        want_bt = ("bluetooth" in q_norm)
 
         def score_item(it: Dict[str, Any]) -> int:
             ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
@@ -709,13 +816,27 @@ class CatalogIndexer:
                 s += 3 * hits(tgs, t)
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
-                s += 1 * hits(bdy, t)
+                s += 2 * hits(bdy, t)  # descripción ahora vale más
 
             # Combos (gran boost)
-            st = strong_text(it)
+            st = strong_text(it) + " " + _norm(bdy)
             for A, B, bonus in combo_hits:
                 if any(a in st for a in A) and any(b in st for b in B):
                     s += bonus
+
+            # Boosts por intención/atributos
+            if intent == "gas":
+                if any(f in st for f in _GAS_ALLOW_FAMS): s += 40
+                if want_valve and ("gassensorv" in st or "gas sensor v" in st or "válvula" in st or "valvula" in st): s += 50
+                if want_ip67 and any(x in st for x in ["ip67", "impermeable", "intemperie", "exterior"]): s += 25
+                if want_wifi and any(x in st for x in ["wifi", "app"]): s += 10
+            if intent == "water":
+                if any(f in st for f in _WATER_ALLOW_FAMS): s += 40
+                if want_valve and ("waterv" in st or "válvula" in st or "valvula" in st): s += 50
+                if want_ip67 and any(x in st for x in ["ip67", "impermeable", "intemperie", "exterior"]): s += 20
+                if want_wifi and any(x in st for x in ["wifi", "app"]): s += 10
+            if intent == "control_sony":
+                if "sony" in st: s += 55
 
             # Inicio de título con primer término
             if clean_terms:
