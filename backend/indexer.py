@@ -95,27 +95,25 @@ class ShopifyREST:
         return out
 
 # ----- familias / tokens -----
-_WATER_ALLOW_FAMS = ["iot-waterv","iot-waterultra","iot-waterp","iot-water","easy-waterultra","easy-water",
-                     "iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water"]
-_WATER_KEYWORDS  = ["agua","nivel","tinaco","cisterna"]
-_WATER_BLOCK     = ["bm-carsensor","carsensor","car","auto","vehiculo","vehículo","ar-rain","rain","lluvia",
-                    "ar-gasc","gasc"," co2","humo","smoke","ar-knock","knock","golpe"]
+WATER_ALLOW_FAMS = ["iot-waterv","iot-waterultra","iot-waterp","iot-water","easy-waterultra","easy-water"]
+WATER_KEYWORDS  = ["agua","nivel","tinaco","cisterna"]
+WATER_BLOCK     = ["bm-carsensor","carsensor","car","auto","vehiculo","vehículo","ar-rain","rain","lluvia",
+                   "ar-gasc","gasc"," co2","humo","smoke","ar-knock","knock","golpe","timbre","doorb","ring"]
 
-_GAS_ALLOW_FAMS  = ["iot-gassensorv","iot-gassensor","connect-gas","easy-gas",
-                    "iot gassensorv","iot gassensor","connect gas","easy gas"]
-_GAS_FUELS       = ["lp","propano","butano"]
-_GAS_BLOCK       = ["ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
-                    "arduino","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
-                    "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
-                    "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
-                    "kwh","kw/h","consumo","tarifa","electric meter","medidor de consumo","contador",
-                    "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
-                    "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra"," water "]
+GAS_ALLOW_FAMS  = ["iot-gassensorv","iot-gassensor","connect-gas","easy-gas"]
+GAS_FUELS       = ["lp","propano","butano"]
+GAS_BLOCK       = ["ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
+                   "arduino","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
+                   "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
+                   "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
+                   "kwh","consumo","tarifa","electric meter","medidor de consumo","contador",
+                   "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
+                   "waterultra","waterv","waterp","water","tinaco","cisterna","timbre","doorb","ring"]
 
 def _intent_from_query(q: str) -> Optional[str]:
     qn = _norm(q)
-    if "gas" in qn or any(w in qn for w in _GAS_FUELS): return "gas"
-    if any(w in qn for w in _WATER_KEYWORDS):          return "water"
+    if "gas" in qn or any(w in qn for w in GAS_FUELS): return "gas"
+    if any(w in qn for w in WATER_KEYWORDS):          return "water"
     if ("control" in qn or "remoto" in qn) and ("sony" in qn): return "control_sony"
     return None
 
@@ -334,125 +332,114 @@ class CatalogIndexer:
         rows=list(cur.execute("SELECT id, handle, title, vendor, product_type, image FROM products LIMIT ?", (int(limit),)))
         conn.close(); return rows
 
-    # ---------- búsqueda ----------
+    # ---------- búsqueda (3 etapas + filtros) ----------
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query: return []
         q_norm=_norm(query); intent=_intent_from_query(query)
 
-        STOP={"el","la","los","las","un","una","unos","unas","de","del","al","y","o","u","en","a","con","por","para",
-              "que","cual","cuales","donde","busco","busca","buscar","quiero","necesito","tienes","tienen","hay",
-              "producto","productos"}
-        SYN={
-            "tv":["televisor","pantalla"], "pantalla":["tv","televisor","monitor"],
-            "soporte":["base","bracket","montaje","mount","pared","techo","mural"],
-            "cable":["cordon","conector","conexion","conexión"], "hdmi":["uhd","4k","8k","microhdmi","mini hdmi","arc","earc"],
-            "rca":["av","audio video","a/v"], "vga":["dsub","d-sub"], "coaxial":["rg6","rg59","f"],
-            "divisor":["splitter","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
-            "splitter":["divisor","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
-            "switch":["conmutador","selector"], "antena":["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
-            "control":["remoto","remote"], "remoto":["control","remote"],
-            "camara":["cámara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"], "cámara":["camara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
-            "bocina":["parlante","altavoz","speaker"], "microfono":["micrófono","mic","micro"], "amplificador":["ampli","amp"],
-            "sensor":["detector","sonda"], "movimiento":["pir"],
-            "agua":["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
-            "pila":["bateria","batería","aa","aaa","18650","9v"], "cargador":["charger","fuente","eliminador","adaptador","power"],
-            "adaptador":["converter","convertidor"], "conector":["terminal","plug","jack"],
-        }
-        if "intemperie" in q_norm or "exterior" in q_norm: SYN.setdefault("ip67", ["impermeable","intemperie","exterior"])
-        if "valvula" in q_norm or "válvula" in q_norm:   SYN.setdefault("valvula", ["válvula","valvula"])
+        # --- helpers ---
+        def has_token(st: str, tok: str) -> bool:
+            return re.search(rf"(^|[^a-z0-9]){re.escape(tok)}([^a-z0-9]|$)", st) is not None
 
-        COMBOS=[({"divisor","splitter","duplicador","repartidor"},{"hdmi"},45),
-                ({"soporte","bracket","mount","base"},{"tv","pantalla","monitor"},35),
-                ({"antena"},{"tv","uhf","vhf","digital","hd"},25),
-                ({"sensor","detector","sonda"},{"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"},40)]
-
-        raw_terms=[t for t in re.findall(r"[\w]+", q_norm, re.UNICODE)]
-        base_terms=[t for t in raw_terms if len(t)>=2 and t not in STOP] or [t for t in raw_terms if len(t)>=2]
-        m_q=re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
-        if m_q: base_terms.append(re.sub(r"\s+","",m_q.group(0)).replace("×","x"))
-        q_matrix=f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None
-
-        seen=set(); expanded=[]
-        for t in base_terms:
-            if t not in seen: expanded.append(t); seen.add(t)
-            for s in SYN.get(t, []):
-                sn=_norm(s); 
-                if sn not in seen: expanded.append(sn); seen.add(sn)
-        clean_terms=expanded[:12] if expanded else []
-
-        def detect_combo(tokens):
-            tokset=set(tokens); hits=[]
-            for A,B,bonus in COMBOS:
-                if (tokset & A) and (tokset & B): hits.append((A,B,bonus))
-            return hits
-        combo_hits=detect_combo(clean_terms)
+        def concat_all(it):
+            parts=[it["title"],it["handle"],it["tags"],it.get("vendor",""),it.get("product_type",""),it.get("body","")]
+            parts.extend([sku or "" for sku in (it.get("skus") or [])])
+            return _norm(" ".join(parts))
 
         conn=self._conn_read(); cur=conn.cursor()
-        ids=[]
+        ids: List[int] = []
 
-        # --- FTS (AND por intención) ---
-        fts_q=None
-        if self._fts_enabled:
-            if intent=="gas":
-                domain_any=["gas","tanque","estacionario","estacionaria"]+_GAS_FUELS+_GAS_ALLOW_FAMS
-                attrs_any =["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","nivel","porcentaje","volumen"]
-                fts_q="("+ " OR ".join(domain_any)+") AND ("+ " OR ".join(attrs_any)+")"
-            elif intent=="water":
-                domain_any=["agua","tinaco","cisterna","nivel"]+_WATER_ALLOW_FAMS
-                attrs_any =["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","ultrasonico","ultrasónico","presion","presión","electrodos"]
-                fts_q="("+ " OR ".join(domain_any)+") AND ("+ " OR ".join(attrs_any)+")"
-            elif intent=="control_sony":
-                fts_q="(sony) AND (control OR remoto OR bravia OR rm)"
-            elif clean_terms:
-                or_clause=" OR ".join(clean_terms)
-                near_clause=f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms)>=2 else ""
-                fts_q=f"({or_clause}){near_clause}"
-            if fts_q:
+        # -------- Etapa A: family-first (preciso, rápido) --------
+        def family_ids(fams: List[str], limit: int) -> List[int]:
+            if not fams: return []
+            preds=[]; params=[]
+            tmpl="(handle LIKE ? OR tags LIKE ? OR title LIKE ?)"
+            for f in fams:
+                like=f"%{f}%"; preds.append(tmpl); params.extend([like,like,like])
+                # variantes con espacios por si los handles están normalizados
+                if "-" in f:
+                    alt=f.replace("-"," ")
+                    like2=f"%{alt}%"; preds.append(tmpl); params.extend([like2,like2,like2])
+            sql=f"SELECT id FROM products WHERE {' OR '.join(preds)} LIMIT ?"
+            params.append(limit)
+            try:
+                rows=list(cur.execute(sql, tuple(params)))
+                return [int(r["id"]) for r in rows]
+            except Exception:
+                return []
+
+        if intent=="gas":
+            ids.extend(family_ids(GAS_ALLOW_FAMS, k*10))
+        elif intent=="water":
+            ids.extend(family_ids(WATER_ALLOW_FAMS, k*10))
+
+        # -------- Etapa B: intención con AND (FTS o LIKE) --------
+        if len(ids) < k:
+            def fts_and(domain_terms: List[str], attr_terms: List[str], limit: int) -> List[int]:
+                if not self._fts_enabled: return []
+                q = "(" + " OR ".join(domain_terms) + ") AND (" + " OR ".join(attr_terms) + ")"
                 try:
-                    rows=list(cur.execute("SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?", (fts_q, k*20)))
-                    ids.extend([int(r["rowid"]) for r in rows])
+                    rows=list(cur.execute("SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?", (q, limit)))
+                    return [int(r["rowid"]) for r in rows]
                 except Exception:
-                    pass
+                    return []
 
-        # --- Fallback LIKE con AND ---
-        if len(ids) < max(8,k):
-            def _like_group(terms):
-                if not terms: return "", []
+            def like_and(domain_terms: List[str], attr_terms: List[str], limit: int) -> List[int]:
                 preds=[]; params=[]
-                tmpl="(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ? OR vendor LIKE ? OR product_type LIKE ?)"
-                for t in terms:
-                    like=f"%{t}%"; preds.append(tmpl); params.extend([like,like,like,like,like,like])
-                return "("+ " OR ".join(preds)+")", params
+                def group(terms):
+                    if not terms: return "", []
+                    g=[]; p=[]
+                    tmpl="(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ? OR vendor LIKE ? OR product_type LIKE ?)"
+                    for t in terms:
+                        like=f"%{t}%"; g.append(tmpl); p.extend([like,like,like,like,like,like])
+                    return "("+ " OR ".join(g)+")", p
+                dom_sql, dom_p = group(domain_terms)
+                att_sql, att_p = group(attr_terms)
+                if not dom_sql: return []
+                pred = dom_sql + (f" AND {att_sql}" if att_sql else "")
+                sql=f"SELECT id FROM products WHERE {pred} LIMIT ?"
+                params = dom_p + att_p + [limit]
+                try:
+                    rows=list(cur.execute(sql, tuple(params)))
+                    return [int(r["id"]) for r in rows]
+                except Exception:
+                    return []
 
             if intent=="gas":
-                domain_terms=["gas","tanque","estacionario","estacionaria"]+_GAS_FUELS+_GAS_ALLOW_FAMS
-                attr_terms  =["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","nivel","porcentaje","volumen"]
+                domain=["gas","tanque","estacionario","estacionaria"] + GAS_FUELS + GAS_ALLOW_FAMS
+                attrs =["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","nivel","porcentaje","volumen"]
+                ids.extend(fts_and(domain, attrs, k*10) or like_and(domain, attrs, k*10))
             elif intent=="water":
-                domain_terms=["agua","tinaco","cisterna","nivel"]+_WATER_ALLOW_FAMS
-                attr_terms  =["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","ultrasonico","ultrasónico","presion","presión","electrodos"]
+                domain=["agua","tinaco","cisterna","nivel"] + WATER_ALLOW_FAMS
+                attrs =["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","ultrasonico","ultrasónico","presion","presión","electrodos"]
+                ids.extend(fts_and(domain, attrs, k*10) or like_and(domain, attrs, k*10))
             elif intent=="control_sony":
-                domain_terms=["sony"]; attr_terms=["control","remoto","bravia","rm"]
-            else:
-                domain_terms=clean_terms; attr_terms=[]
+                domain=["sony"]; attrs=["control","remoto","bravia","rm"]
+                ids.extend(fts_and(domain, attrs, k*10) or like_and(domain, attrs, k*10))
 
-            where_parts=[]; params_all=[]
-            dom_sql,dom_params=_like_group(domain_terms)
-            if dom_sql: where_parts.append(dom_sql); params_all.extend(dom_params)
-            att_sql,att_params=_like_group(attr_terms)
-            if att_sql: where_parts.append(att_sql); params_all.extend(att_params)
-            if where_parts:
-                sql=f"SELECT id FROM products WHERE {' AND '.join(where_parts)} LIMIT ?"
-                params_all.append(k*30)
+        # -------- Etapa C: rescate controlado (OR) --------
+        if len(ids) < k:
+            # OR grande sobre title/tags/handle, pero luego filtramos con listas blanca/negra
+            terms = re.findall(r"[\w]+", q_norm, re.UNICODE)
+            preds=[]; params=[]
+            for t in terms:
+                like=f"%{t}%"
+                preds.append("(title LIKE ? OR tags LIKE ? OR handle LIKE ? OR body LIKE ?)")
+                params.extend([like,like,like,like])
+            if preds:
+                sql=f"SELECT id FROM products WHERE {' OR '.join(preds)} LIMIT ?"
+                params.append(k*20)
                 try:
-                    like_rows=list(cur.execute(sql, tuple(params_all)))
-                    ids.extend([int(r["id"]) for r in like_rows])
+                    rows=list(cur.execute(sql, tuple(params)))
+                    ids.extend([int(r["id"]) for r in rows])
                 except Exception:
                     pass
 
         # únicos
-        seen2=set(); uniq_ids=[]
+        seen=set(); uniq_ids=[]
         for i in ids:
-            if i not in seen2: seen2.add(i); uniq_ids.append(i)
+            if i not in seen:
+                seen.add(i); uniq_ids.append(i)
 
         # cargar filas/variantes
         candidates=[]
@@ -474,41 +461,32 @@ class CatalogIndexer:
                                "body":p.get("body") or "","tags":p.get("tags") or "","vendor":p.get("vendor") or "",
                                "product_type":p.get("product_type") or "","variant":best,"skus":[x.get("sku") for x in v_infos if x.get("sku")]})
 
-        # --- Filtro DURO por intención con límites de palabra ---
-        def concat_all(it):
-            parts=[it["title"],it["handle"],it["tags"],it.get("vendor",""),it.get("product_type",""),it.get("body","")]
-            parts.extend([sku or "" for sku in (it.get("skus") or [])])
-            return _norm(" ".join(parts))
+        # --- filtrado/blanqueo por intención (menos agresivo)
+        def keep_gas(st: str) -> bool:
+            if any(f in st for f in GAS_ALLOW_FAMS): return True
+            if has_token(st,"gas") or any(has_token(st,f) for f in GAS_FUELS): return True
+            return False
 
-        def has_token(st: str, tok: str) -> bool:
-            # límite de palabra (no coincide 'vegas', sí ' gas ' o inicio/fin)
-            return re.search(rf"(^|[^a-z0-9]){re.escape(tok)}([^a-z0-9]|$)", st) is not None
+        def keep_water(st: str) -> bool:
+            if any(f in st for f in WATER_ALLOW_FAMS): return True
+            if any(has_token(st,w) for w in WATER_KEYWORDS): return True
+            return False
 
         if intent in ("gas","water") and candidates:
             pos=[]
             for it in candidates:
-                st=concat_all(it)
-                if intent=="gas":
-                    blocked = any(b in st for b in _GAS_BLOCK)
-                    ok = (has_token(st,"gas") or any(has_token(st,f) for f in _GAS_ALLOW_FAMS) or any(has_token(st,f) for f in _GAS_FUELS))
-                    if ok and not blocked: pos.append(it)
-                else:
-                    blocked = any(b in st for b in _WATER_BLOCK)
-                    ok = (any(has_token(st,w) for w in _WATER_KEYWORDS) or any(has_token(st,f) for f in _WATER_ALLOW_FAMS))
-                    if ok and not blocked: pos.append(it)
-            candidates = pos  # si queda vacío, preferimos “sin resultados” antes que colados
+                st=_norm(concat_all(it))
+                blocked = any(b in st for b in (GAS_BLOCK if intent=="gas" else WATER_BLOCK))
+                ok = keep_gas(st) if intent=="gas" else keep_water(st)
+                if ok and not blocked:
+                    pos.append(it)
+            candidates = pos
 
-        # --- Subfiltros adicionales opcionales ---
+        # --- ranking (boost por familias/atributos) ---
         def strong_text(it): 
             return _norm(it["title"]+" "+it["handle"]+" "+it["tags"]+" "+it.get("product_type","")+" "+it.get("vendor",""))
-
-        if candidates and intent=="control_sony":
-            subset=[it for it in candidates if "sony" in (strong_text(it)+" "+_norm(it.get("body","")))]
-            if subset: candidates=subset
-
-        # --- Re-ranking final (igual que antes, con boosts por familia/atributos) ---
         def hits(text, term): return _norm(text).count(term)
-        def _has_matrix(text_norm, mx): return (mx in text_norm) or (mx.replace("x","×") in text_norm)
+
         want_valve=("valvula" in q_norm or "válvula" in q_norm)
         want_ip67=("ip67" in q_norm) or ("intemperie" in q_norm) or ("exterior" in q_norm)
         want_wifi=("wifi" in q_norm) or ("app" in q_norm)
@@ -517,39 +495,30 @@ class CatalogIndexer:
             ttl,hdl,tgs,bdy = it["title"],it["handle"],it["tags"],it["body"]
             vendor=it["vendor"]; ptype=it["product_type"]
             s=0
-            for t in clean_terms:
-                s+=7*hits(ttl,t); s+=5*hits(hdl,t); s+=3*hits(tgs,t); s+=2*hits(ptype,t); s+=1*hits(vendor,t); s+=2*hits(bdy,t)
+            for t in set(re.findall(r"[\w]+", q_norm)):
+                s+=7*hits(ttl,t)+5*hits(hdl,t)+3*hits(tgs,t)+2*hits(ptype,t)+2*hits(bdy,t)
             st=strong_text(it)+" "+_norm(bdy)
             if intent=="gas":
-                if any(f in st for f in _GAS_ALLOW_FAMS): s+=60
-                if has_token(st,"gas"): s+=25
-                if want_valve and any(x in st for x in ["gassensorv","válvula","valvula"]): s+=50
-                if want_ip67 and any(x in st for x in ["ip67","impermeable","intemperie","exterior"]): s+=25
-                if want_wifi and any(x in st for x in ["wifi","app"]): s+=12
-            if intent=="water":
-                if any(f in st for f in _WATER_ALLOW_FAMS): s+=60
-                if any(has_token(st,w) for w in _WATER_KEYWORDS): s+=25
-                if want_valve and any(x in st for x in ["waterv","válvula","valvula"]): s+=40
+                if any(f in st for f in GAS_ALLOW_FAMS): s+=60
+                if " gas " in (" "+st+" "): s+=20
+                if want_valve and any(x in st for x in ["gassensorv","válvula","valvula"]): s+=40
                 if want_ip67 and any(x in st for x in ["ip67","impermeable","intemperie","exterior"]): s+=20
                 if want_wifi and any(x in st for x in ["wifi","app"]): s+=10
-            if clean_terms and _norm(ttl).startswith(clean_terms[0]): s+=6
-            sku_set={_norm(sk) for sk in (it["skus"] or [])}
-            if set(clean_terms) & sku_set: s+=25
+            if intent=="water":
+                if any(f in st for f in WATER_ALLOW_FAMS): s+=60
+                if any(w in st for w in WATER_KEYWORDS): s+=20
+                if want_valve and any(x in st for x in ["waterv","válvula","valvula"]): s+=35
+                if want_ip67 and any(x in st for x in ["ip67","impermeable","intemperie","exterior"]): s+=15
+                if want_wifi and any(x in st for x in ["wifi","app"]): s+=8
             stock=sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock>0: s+=min(stock,20)
-            if q_matrix:
-                st_full=_norm(it["title"]+" "+it["handle"]+" "+it["tags"])
-                if _has_matrix(st_full,q_matrix): s+=60
-                else:
-                    other=re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
-                    for a,b in other:
-                        if f"{a}x{b}"!=q_matrix: s-=12; break
             return s
 
         candidates.sort(key=score_item, reverse=True)
 
+        # salida
         results=[]
-        for it in candidates[:max(k,12)]:
+        for it in candidates[:k]:
             v=it["variant"]
             product_url=f"{self.store_base_url}/products/{it['handle']}" if it["handle"] else self.store_base_url
             buy_url=f"{self.store_base_url}/cart/{v['variant_id']}:1"
@@ -557,4 +526,4 @@ class CatalogIndexer:
                             "tags":it["tags"],"vendor":it["vendor"],"product_type":it["product_type"],
                             "product_url":product_url,"buy_url":buy_url,"variant":v})
         conn.close()
-        return results[:k]
+        return results
