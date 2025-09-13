@@ -138,19 +138,14 @@ _GAS_ALLOW_FAMILIES = [
 ]
 _GAS_ALLOW_KEYWORDS = ["gas","tanque","estacionario","estacionaria","lp","propano","butano","nivel","medidor","porcentaje","volumen"]
 
-# **Blocklist ampliado** para GAS (evita EASY-ELECTRIC y PEST-KILLER, etc.)
+# Blocklist GAS (evita EASY-ELECTRIC, PEST-KILLER y módulos)
 _GAS_BLOCK = [
-    # módulos/lab/arduino
     "ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
     "arduino","módulo","modulo","module","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
-    # plagas
     "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
-    # energía eléctrica / medidores de luz
     "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
     "kwh","kw/h","consumo","tarifa","electric meter","medidor de consumo","contador",
-    # otros no relacionados
     "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
-    # y evitar colados de agua cuando buscamos gas
     "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra"," water "
 ]
 
@@ -173,10 +168,8 @@ def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple
     """Devuelve (score, has_family)."""
     s=0
     has_family = any(fam in st for fam in allow_fams)
-    # solo dar peso por keywords; el 'positivo' se definirá exigiendo has_family
     if any(w in st for w in allow_keywords): s+=20
     if has_family: s+=85
-    # calificadores
     if extras.get("want_valve"):
         for key in extras.get("valve_fams", []):
             if key in st: s+=extras.get("valve_bonus", 95)
@@ -198,11 +191,11 @@ def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple
     if extras.get("want_alarm"):
         for key in extras.get("alarm_words", []):
             if key in st: s+=25
-    # penalizaciones suaves por palabras no deseadas
     for neg in extras.get("neg_words", []):
         if neg in st: s-=80
     return s, has_family
 
+# --------- Rerank/filtrado Agua ----------
 def _rerank_for_water(query: str, items: list):
     ql=(query or "").lower()
     if _intent_from_query(query)!="water" or not items: return items
@@ -227,6 +220,8 @@ def _rerank_for_water(query: str, items: list):
         is_wv=("iot-waterv" in st) or ("iot waterv" in st)
         rec=(total,score,blocked,has_fam,is_wv,it); rescored.append(rec)
         if has_fam and score>=60 and not blocked: positives.append(rec)
+
+    # HARD FILTER si hay positivos
     if positives:
         positives.sort(key=lambda x:x[0], reverse=True)
         if want_valve:
@@ -234,9 +229,23 @@ def _rerank_for_water(query: str, items: list):
             ordered=wv+others
         else: ordered=positives
         return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
+
+    # Fallback suave: quedarnos con candidatos que contengan palabras de agua
+    soft = []
+    water_words = ["agua","tinaco","cisterna","nivel"]
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        if any(w in st for w in water_words) and not any(b in st for b in _WATER_BLOCK):
+            soft.append((max(0,30-idx), it))
+    if soft:
+        soft.sort(key=lambda x:x[0], reverse=True)
+        return [it for (_score, it) in soft]
+
+    # Último recurso: reordenado general
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
 
+# --------- Rerank/filtrado Gas ----------
 def _rerank_for_gas(query: str, items: list):
     ql=(query or "").lower()
     if _intent_from_query(query)!="gas" or not items: return items
@@ -250,7 +259,7 @@ def _rerank_for_gas(query: str, items: list):
             "wifi_fams":["iot-gassensor","iot gassensor","connect-gas","connect gas"],
             "display_fams":["easy-gas","easy gas"],
             "alarm_words":["alarma","alerta"],
-            "neg_words":[]}  # usamos _GAS_BLOCK como castigo duro aparte
+            "neg_words":[]}
     rescored=[]; positives=[]
     for idx,it in enumerate(items):
         st=_concat_fields(it)
@@ -260,8 +269,10 @@ def _rerank_for_gas(query: str, items: list):
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
         rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
-        # **Positivo SOLO si pertenece a la familia de gas**
+        # Positivo SOLO si pertenece a familia de gas
         if has_fam and score>=60 and not blocked: positives.append(rec)
+
+    # HARD FILTER si hay positivos
     if positives:
         positives.sort(key=lambda x:x[0], reverse=True)
         if want_valve:
@@ -269,6 +280,18 @@ def _rerank_for_gas(query: str, items: list):
             ordered=vs+others
         else: ordered=positives
         return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
+
+    # Fallback suave: quedarnos con candidatos que contengan "gas"
+    soft = []
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        if ("gas" in st) and not any(b in st for b in _GAS_BLOCK):
+            soft.append((max(0,30-idx), it))
+    if soft:
+        soft.sort(key=lambda x:x[0], reverse=True)
+        return [it for (_score, it) in soft]
+
+    # Último recurso: reordenado general
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
 
@@ -286,8 +309,8 @@ def chat():
     if not query:
         return jsonify({"answer":"¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.","products":[]})
 
-    # Pedimos más para rerank robusto, luego recortamos
-    items=indexer.search(query, k=max(k,50))
+    # Pedimos más candidatos para rerank robusto, luego recortamos
+    items=indexer.search(query, k=max(k,90))
     items=_apply_intent_rerank(query, items)
     items=items[:k] if k and isinstance(items,list) else items
 
@@ -371,7 +394,7 @@ def admin_diag():
 def admin_preview():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
-    raw=indexer.search(q, k=max(k,50)); reranked=_apply_intent_rerank(q, raw)
+    raw=indexer.search(q, k=max(k,90)); reranked=_apply_intent_rerank(q, raw)
     return jsonify({"q":q, "raw_titles":[i.get("title") for i in raw[:k]],
                     "reranked_titles":[i.get("title") for i in reranked[:k]]})
 
