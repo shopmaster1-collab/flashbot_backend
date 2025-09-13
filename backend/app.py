@@ -10,7 +10,7 @@ from .shopify_client import ShopifyClient
 from .indexer import CatalogIndexer
 from .utils import money
 
-# Deepseek es opcional
+# Deepseek opcional
 try:
     from .deepseek_client import DeepseekClient
 except Exception:
@@ -31,7 +31,7 @@ CORS(
     }},
 )
 
-# ---- Servicios (sin kwargs: ShopifyClient lee envs internamente)
+# ---- Servicios (ShopifyClient lee envs internamente)
 shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 
@@ -98,26 +98,20 @@ def _detect_patterns(q: str) -> dict:
     if cats:
         pat["cats"] = cats
 
-    for w in ["agua", "fuga", "inundacion", "inundación", "nivel", "boya", "cisterna", "tinaco"]:
-        if w in ql:
-            pat["water"] = True
-            break
-    for w in ["valvula", "válvula"]:
-        if w in ql:
-            pat["valve"] = True
-            break
-    for w in ["ultra", "ultrason", "ultrasónico", "ultrasonico"]:
-        if w in ql:
-            pat["ultra"] = True
-            break
-    for w in ["presion", "presión"]:
-        if w in ql:
-            pat["pressure"] = True
-            break
-    if "bluetooth" in ql:
-        pat["bt"] = True
-    if ("wifi" in ql) or ("app" in ql):
-        pat["wifi"] = True
+    # Intenciones
+    if any(w in ql for w in ["agua", "fuga", "inundacion", "inundación", "nivel", "boya", "cisterna", "tinaco"]):
+        pat["water"] = True
+    if any(w in ql for w in ["gas", "estacionario", "propano", "butano", "lp"]):
+        pat["gas"] = True
+
+    # Calificadores
+    if any(w in ql for w in ["valvula", "válvula"]): pat["valve"] = True
+    if any(w in ql for w in ["ultra", "ultrason", "ultrasónico", "ultrasonico"]): pat["ultra"] = True
+    if any(w in ql for w in ["presion", "presión"]): pat["pressure"] = True
+    if "bluetooth" in ql: pat["bt"] = True
+    if ("wifi" in ql) or ("app" in ql): pat["wifi"] = True
+    if any(w in ql for w in ["pantalla", "display"]): pat["display"] = True
+    if "alarma" in ql: pat["alarm"] = True
     return pat
 
 
@@ -125,11 +119,14 @@ def _format_answer(query: str, items: list) -> str:
     pat = _detect_patterns(query)
     bits = []
     if pat.get("water"): bits.append("monitoreo de nivel de agua en tinacos/cisternas")
+    if pat.get("gas"): bits.append("medición/monitoreo de gas en tanque estacionario")
     if pat.get("valve"): bits.append("con válvula electrónica")
     if pat.get("ultra"): bits.append("sensor ultrasónico")
     if pat.get("pressure"): bits.append("sensor de presión")
     if pat.get("bt"): bits.append("con Bluetooth")
     if pat.get("wifi"): bits.append("con WiFi/App")
+    if pat.get("display"): bits.append("con pantalla/display")
+    if pat.get("alarm"): bits.append("con alarma de nivel bajo")
     if pat.get("matrix"): bits.append(f"matriz {pat['matrix']}")
     if pat.get("inches"): bits.append(f"tamaños {', '.join(pat['inches'])}”")
     if pat.get("cats"): bits.append("categorías: " + ", ".join(pat["cats"]))
@@ -171,25 +168,39 @@ def _plain_items(items):
     return out
 
 
-# ---------- Relevancia agua/tinaco: allowlist + blocklist + hard filter ----------
-_ALLOW_FAMILIES = [
+# ---------- Señales por intención ----------
+
+# Agua / nivel
+_WATER_ALLOW_FAMILIES = [
     "iot-waterv", "iot-waterultra", "iot-waterp", "iot-water",
     "easy-waterultra", "easy-water",
-    # tolerancias sin guión/espacio
+    # tolerancias
     "iot waterv", "iot waterultra", "iot waterp", "iot water",
     "easy waterultra", "easy water",
 ]
-_ALLOW_KEYWORDS = ["tinaco", "cisterna", "nivel", "agua"]
-
-_BLOCK_NO_WATER = [
-    # automotriz y varios
+_WATER_ALLOW_KEYWORDS = ["tinaco", "cisterna", "nivel", "agua"]
+_WATER_BLOCK = [
     "bm-carsensor", "carsensor", "car", "auto", "vehiculo", "vehículo",
-    # lluvia
     "ar-rain", "rain", "lluvia",
-    # gas
-    "ar-gasc", "gasc", "gas",
-    # golpe
+    "ar-gasc", "gasc", "gas ", " gas-", " gas|",  # castigo gas SOLO en intención agua
     "ar-knock", "knock", "golpe",
+    "co2", "humo", "smoke",
+]
+
+# Gas / tanque estacionario
+_GAS_ALLOW_FAMILIES = [
+    "iot-gassensorv", "iot-gassensor", "easy-gas", "connect-gas",
+    # tolerancias
+    "iot gassensorv", "iot gassensor", "easy gas", "connect gas",
+]
+_GAS_ALLOW_KEYWORDS = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]
+_GAS_BLOCK = [
+    # evitar colados de agua u otros
+    "water", "waterv", "waterultra", "waterp", "easy-water", "easy water",
+    "ar-rain", "rain", "lluvia",
+    "ar-knock", "knock", "golpe",
+    "co2", "humo", "smoke",
+    "carsensor", "bm-carsensor", "auto", "vehiculo", "vehículo",
 ]
 
 def _concat_fields(it) -> str:
@@ -207,76 +218,154 @@ def _concat_fields(it) -> str:
     return " ".join(parts).lower()
 
 
-def _score_water(st: str, ql: str) -> int:
+def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> int:
     s = 0
-    if any(w in st for w in _ALLOW_KEYWORDS): s += 20
-    for fam in _ALLOW_FAMILIES:
+    if any(w in st for w in allow_keywords): s += 20
+    for fam in allow_fams:
         if fam in st: s += 80
-    if "valvula" in ql or "válvula" in ql:
-        if "iot-waterv" in st or "iot waterv" in st: s += 90  # refuerzo fuerte para válvula
-    if "ultra" in ql or "ultrason" in ql or "ultrasónico" in ql or "ultrasonico" in ql:
-        if "waterultra" in st: s += 60
-        if "easy-waterultra" in st or "easy waterultra" in st: s += 40
-    if "presion" in ql or "presión" in ql:
-        if "iot-waterp" in st or "iot waterp" in st: s += 60
-    if "bluetooth" in ql:
-        if "easy-water" in st or "easy water" in st: s += 40
-    if "wifi" in ql or "app" in ql:
-        if "iot-water" in st or "iot water" in st: s += 40
-        if "iot-waterv" in st or "iot waterv" in st: s += 20
-        if "iot-waterultra" in st or "iot waterultra" in st: s += 40
+    # extras (diccionario de reglas por intención)
+    # water/gas comparten calificados pero con diferentes pesos
+    if extras.get("want_valve"):
+        for key in extras.get("valve_fams", []):
+            if key in st: s += extras.get("valve_bonus", 60)
+    if extras.get("want_ultra"):
+        for key in extras.get("ultra_fams", []):
+            if key in st: s += extras.get("ultra_bonus", 60)
+    if extras.get("want_pressure"):
+        for key in extras.get("pressure_fams", []):
+            if key in st: s += extras.get("pressure_bonus", 60)
+    if extras.get("want_bt"):
+        for key in extras.get("bt_fams", []):
+            if key in st: s += extras.get("bt_bonus", 40)
+    if extras.get("want_wifi"):
+        for key in extras.get("wifi_fams", []):
+            if key in st: s += extras.get("wifi_bonus", 40)
+    if extras.get("want_display"):
+        for key in extras.get("display_fams", []):
+            if key in st: s += extras.get("display_bonus", 35)
+    if extras.get("want_alarm"):
+        for key in extras.get("alarm_words", []):
+            if key in st: s += extras.get("alarm_bonus", 25)
     return s
 
 
-def _has_block(st: str) -> bool:
-    return any(b in st for b in _BLOCK_NO_WATER)
+def _intent_from_query(query: str) -> str | None:
+    ql = (query or "").lower()
+    if any(w in ql for w in _WATER_ALLOW_KEYWORDS + ["cisterna", "tinaco"]):
+        # si menciona gas explícito, gana gas
+        if "gas" not in ql:
+            return "water"
+    if "gas" in ql or any(w in ql for w in ["tanque", "estacionario", "lp", "propano", "butano"]):
+        return "gas"
+    return None
 
 
 def _rerank_for_water(query: str, items: list):
-    """Reordena y filtra resultados para intenciones de agua/tinaco/cisterna."""
     ql = (query or "").lower()
-    water_intent = any(w in ql for w in ["agua","nivel","tinaco","cisterna","bomba","válvula","valvula"])
+    water_intent = _intent_from_query(query) == "water"
     if not water_intent or not items:
         return items
 
     want_valve = ("valvula" in ql) or ("válvula" in ql)
+    extras = {
+        "want_valve": want_valve,
+        "want_ultra": any(w in ql for w in ["ultra", "ultrason", "ultrasónico", "ultrasonico"]),
+        "want_pressure": any(w in ql for w in ["presion", "presión"]),
+        "want_bt": "bluetooth" in ql,
+        "want_wifi": ("wifi" in ql) or ("app" in ql),
+        "valve_fams": ["iot-waterv", "iot waterv"],
+        "ultra_fams": ["waterultra", "easy-waterultra", "easy waterultra"],
+        "pressure_fams": ["iot-waterp", "iot waterp"],
+        "bt_fams": ["easy-water", "easy water", "easy-waterultra", "easy waterultra"],
+        "wifi_fams": ["iot-water", "iot water", "iot-waterv", "iot waterv", "iot-waterultra", "iot waterultra"],
+        "valve_bonus": 90, "ultra_bonus": 60, "pressure_bonus": 60, "bt_bonus": 40, "wifi_bonus": 40,
+    }
 
-    rescored = []
-    positives = []
-    negatives = []
+    rescored, positives = [], []
     for idx, it in enumerate(items):
         st = _concat_fields(it)
-        score = _score_water(st, ql)
-        blocked = _has_block(st)
-
-        base = max(0, 30 - idx)  # mantener algo de inercia del orden original
+        blocked = any(b in st for b in _WATER_BLOCK)
+        base = max(0, 30 - idx)
+        score = _score_family(st, ql, _WATER_ALLOW_KEYWORDS, _WATER_ALLOW_FAMILIES, extras)
         total = score + base - (120 if blocked else 0)
-
-        rec = (total, score, blocked, "iot-waterv" in st or "iot waterv" in st, it)
+        is_wv = ("iot-waterv" in st) or ("iot waterv" in st)
+        rec = (total, score, blocked, is_wv, it)
         rescored.append(rec)
-
         if score >= 60 and not blocked:
             positives.append(rec)
-        elif blocked:
-            negatives.append(rec)
 
     if positives:
-        # Orden natural por score total
         positives.sort(key=lambda x: x[0], reverse=True)
-
         if want_valve:
-            # Prioridad dura: primero todos los IOT-WATERV (true en flag), luego el resto
-            waterv = [it for it in positives if it[3]]
-            others = [it for it in positives if not it[3]]
-            ordered = waterv + others
+            wv = [r for r in positives if r[3]]  # is_wv
+            others = [r for r in positives if not r[3]]
+            ordered = wv + others
         else:
             ordered = positives
+        return [it for (_t, _s, _b, _flag, it) in ordered]
 
-        return [it for (_t, _s, _b, _is_wv, it) in ordered]
-
-    # Si no hay positivos, devolvemos todo reordenado, castigando bloqueados
     rescored.sort(key=lambda x: x[0], reverse=True)
-    return [it for (_t, _s, _b, _is_wv, it) in rescored]
+    return [it for (_t, _s, _b, _flag, it) in rescored]
+
+
+def _rerank_for_gas(query: str, items: list):
+    ql = (query or "").lower()
+    gas_intent = _intent_from_query(query) == "gas"
+    if not gas_intent or not items:
+        return items
+
+    want_valve = ("valvula" in ql) or ("válvula" in ql)
+    extras = {
+        "want_valve": want_valve,
+        "want_ultra": False,  # no aplica espíritu ultra en gas
+        "want_pressure": False,
+        "want_bt": "bluetooth" in ql,
+        "want_wifi": ("wifi" in ql) or ("app" in ql),
+        "want_display": any(w in ql for w in ["pantalla", "display"]),
+        "want_alarm": "alarma" in ql,
+        "valve_fams": ["iot-gassensorv", "iot gassensorv"],
+        "bt_fams": ["easy-gas", "easy gas"],
+        "wifi_fams": ["iot-gassensor", "iot gassensor", "connect-gas", "connect gas"],
+        "display_fams": ["easy-gas", "easy gas"],
+        "alarm_words": ["alarma", "alerta"],
+        "valve_bonus": 95, "bt_bonus": 45, "wifi_bonus": 45, "display_bonus": 40, "alarm_bonus": 25,
+    }
+
+    rescored, positives = [], []
+    for idx, it in enumerate(items):
+        st = _concat_fields(it)
+        blocked = any(b in st for b in _GAS_BLOCK)
+        base = max(0, 30 - idx)
+        score = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
+        total = score + base - (120 if blocked else 0)
+        is_valve = ("iot-gassensorv" in st) or ("iot gassensorv" in st)
+        rec = (total, score, blocked, is_valve, it)
+        rescored.append(rec)
+        if score >= 60 and not blocked:
+            positives.append(rec)
+
+    if positives:
+        positives.sort(key=lambda x: x[0], reverse=True)
+        if want_valve:
+            vs = [r for r in positives if r[3]]
+            others = [r for r in positives if not r[3]]
+            ordered = vs + others
+        else:
+            ordered = positives
+        return [it for (_t, _s, _b, _flag, it) in ordered]
+
+    rescored.sort(key=lambda x: x[0], reverse=True)
+    return [it for (_t, _s, _b, _flag, it) in rescored]
+
+
+def _apply_intent_rerank(query: str, items: list):
+    """Selecciona y aplica el rerank según intención detectada."""
+    intent = _intent_from_query(query)
+    if intent == "water":
+        return _rerank_for_water(query, items)
+    if intent == "gas":
+        return _rerank_for_gas(query, items)
+    return items
 
 
 @app.post("/api/chat")
@@ -291,10 +380,10 @@ def chat():
     # Buscar en el índice (pedimos un poco más para rerank robusto)
     items = indexer.search(query, k=max(k, 20))
 
-    # Rerank/filtrado si hay intención de agua/tinaco
-    items = _rerank_for_water(query, items)
+    # Re-rank según intención (agua/gas)
+    items = _apply_intent_rerank(query, items)
 
-    # Recortar a k tras re-rank/filtrado
+    # Recortar a k
     items = items[:k] if k and isinstance(items, list) else items
 
     if not items:
@@ -408,7 +497,7 @@ def admin_diag():
     return jsonify(info)
 
 
-# --- Vista de re-rank para depuración
+# --- Vista de re-rank (diagnóstico)
 @app.get("/api/admin/preview")
 def admin_preview():
     if not _admin_ok(request):
@@ -416,7 +505,7 @@ def admin_preview():
     q = (request.args.get("q") or "").strip()
     k = int(request.args.get("k") or 12)
     raw = indexer.search(q, k=max(k, 30))
-    reranked = _rerank_for_water(q, raw)
+    reranked = _apply_intent_rerank(q, raw)
     return jsonify({
         "q": q,
         "raw_titles": [i.get("title") for i in raw[:k]],
