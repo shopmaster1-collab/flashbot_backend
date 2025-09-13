@@ -149,7 +149,6 @@ class ShopifyREST:
 
 
 # --------- listas blancas/negra por intención (para re-ranking robusto) ----------
-# Familias “oficiales” (handles, tags o nombres) para AGUA
 _WATER_ALLOW_FAMS = [
     "iot-waterv", "iot-waterultra", "iot-waterp", "iot-water",
     "easy-waterultra", "easy-water", "iot waterv", "iot waterultra", "iot waterp", "iot water",
@@ -162,22 +161,17 @@ _WATER_BLOCK = [
     "ar-knock", "knock", "golpe"
 ]
 
-# Familias “oficiales” para GAS
 _GAS_ALLOW_FAMS = [
     "iot-gassensorv", "iot-gassensor", "connect-gas", "easy-gas",
     "iot gassensorv", "iot gassensor", "connect gas", "easy gas"
 ]
 _GAS_KEYWORDS = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano", "nivel", "medidor", "porcentaje", "volumen"]
 _GAS_BLOCK = [
-    # módulos/arduino
     "ar-gasc", "ar-flame", "ar-photosensor", "photosensor", "megasensor", "ar-megasensor",
-    "arduino", "módulo", "modulo", "module", "mq-", "mq2", "flame", "co2", "humo", "smoke", "luz", "photo", "shield",
-    # plagas
+    "arduino", "mq-", "mq2", "flame", "co2", "humo", "smoke", "luz", "photo", "shield",
     "pest", "plaga", "mosquito", "insect", "insecto", "pest-killer", "pest killer",
-    # energía eléctrica
     "easy-electric", "easy electric", "eléctrico", "electrico", "electricidad", "energia", "energía",
     "kwh", "kw/h", "consumo", "tarifa", "electric meter", "medidor de consumo", "contador",
-    # no relacionados + evitar colados de agua
     "ar-rain", "rain", "lluvia", "carsensor", "bm-carsensor", "auto", "vehiculo", "vehículo",
     "iot-water", "iot-waterv", "iot-waterultra", "iot-waterp", "easy-water", "easy-waterultra", " water "
 ]
@@ -196,27 +190,18 @@ def _intent_from_query(q: str) -> Optional[str]:
 
 class CatalogIndexer:
     def __init__(self, shop_client, store_base_url: str):
-        """
-        shop_client: instancia de ShopifyClient (puede ser None).
-        Si FORCE_REST=1 o faltan métodos en el cliente, se usa ShopifyREST.
-        """
         self.client = shop_client
         self.store_base_url = (store_base_url or "").rstrip("/") or "https://master.com.mx"
-
-        # ÚNICA REGLA
         self.rules = {"REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1"}
-
         self.db_path = DB_PATH
         self._fts_enabled = False
-
         self._stats: Dict[str, int] = {"products": 0, "variants": 0, "inventory_levels": 0}
         self._discards_sample: List[Dict[str, Any]] = []
         self._discards_count: Dict[str, int] = {}
-
         self._location_map: Dict[int, str] = {}
         self._inventory_map: Dict[int, List[Dict]] = {}
 
-        # REST fallback (si hay credenciales)
+        # REST fallback
         self._rest_fallback: Optional[ShopifyREST] = None
         try:
             self._rest_fallback = ShopifyREST()
@@ -300,21 +285,17 @@ class CatalogIndexer:
 
     # ---------- fetch productos ----------
     def _fetch_all_active(self, limit: int = 250) -> List[Dict[str, Any]]:
-        """Devuelve productos ACTIVOS. Usa REST paginado sin status en el request y filtra en Python."""
         force_rest = os.getenv("FORCE_REST", "0") == "1"
 
-        # Preferimos REST con paginación robusta
         if force_rest and self._rest_fallback:
             all_items = self._rest_fallback.list_products_all(limit=limit)
             return [p for p in all_items if (p.get("status") == "active")]
 
-        # Intento con cliente inyectado (si tiene paginación propia)
         try:
             if hasattr(self.client, "list_products"):
                 acc: List[Dict[str, Any]] = []
                 page = None
                 while True:
-                    # sin status en el request; filtramos después
                     resp = self.client.list_products(limit=limit, page_info=page)
                     if isinstance(resp, dict):
                         items = (resp.get("products") or resp.get("items") or []) or []
@@ -331,7 +312,6 @@ class CatalogIndexer:
         except Exception:
             pass
 
-        # Fallback final a REST
         if self._rest_fallback:
             all_items = self._rest_fallback.list_products_all(limit=limit)
             return [p for p in all_items if (p.get("status") == "active")]
@@ -339,8 +319,6 @@ class CatalogIndexer:
 
     # ---------- build ----------
     def build(self) -> None:
-        """Crea esquema primero y luego llena datos (robusto)."""
-        # reset archivo
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)
@@ -350,7 +328,6 @@ class CatalogIndexer:
         conn = self._conn_rw()
         cur = conn.cursor()
 
-        # esquema
         cur.executescript("""
             PRAGMA journal_mode=WAL;
 
@@ -383,14 +360,12 @@ class CatalogIndexer:
         """)
         conn.commit()
 
-        # FTS opcional (incluye body)
         try:
             cur.execute("CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')")
             self._fts_enabled = True
         except sqlite3.OperationalError:
             self._fts_enabled = False
 
-        # fetch Shopify
         try:
             locations = self._rest_fallback.list_locations() if self._rest_fallback else (self.client.list_locations() if self.client else [])
         except Exception:
@@ -405,7 +380,6 @@ class CatalogIndexer:
 
         print(f"[INDEX] fetched: locations={len(locations)} products={len(products)}", flush=True)
 
-        # inventory
         all_inv_ids: List[int] = []
         for p in products:
             for v in p.get("variants") or []:
@@ -439,7 +413,6 @@ class CatalogIndexer:
             except Exception:
                 continue
 
-        # volcado
         ins_p = "INSERT INTO products (id, handle, title, body, tags, vendor, product_type, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         ins_v = "INSERT INTO variants (id, product_id, sku, price, compare_at_price, inventory_item_id) VALUES (?, ?, ?, ?, ?, ?)"
         ins_inv = "INSERT INTO inventory (variant_id, location_id, location_name, available) VALUES (?, ?, ?, ?)"
@@ -551,7 +524,7 @@ class CatalogIndexer:
         q_norm = _norm(query)
         intent = _intent_from_query(query)
 
-        # Stopwords y sinónimos amplios
+        # Stopwords y sinónimos (recortamos ruido de 'módulo')
         STOP = {
             "el","la","los","las","un","una","unos","unas",
             "de","del","al","y","o","u","en","a","con","por","para",
@@ -560,54 +533,40 @@ class CatalogIndexer:
             "producto","productos"
         }
         SYN = {
-            # vídeo / pantallas / soportes
             "tv": ["televisor","pantalla"],
             "pantalla": ["tv","televisor","monitor"],
             "soporte": ["base","bracket","montaje","mount","pared","techo","mural"],
-            # cables / conectividad
-            "cable": ["cordon","cordon","conector","conexion","conexión"],
-            "hdmi": ["hdmi","uhd","4k","8k","microhdmi","mini hdmi","arc","earc"],
+            "cable": ["cordon","conector","conexion","conexión"],
+            "hdmi": ["uhd","4k","8k","microhdmi","mini hdmi","arc","earc"],
             "rca": ["av","audio video","a/v"],
             "vga": ["dsub","d-sub"],
             "coaxial": ["rg6","rg59","f"],
-            # divisores y switches
             "divisor": ["splitter","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
             "splitter": ["divisor","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
             "switch": ["conmutador","selector"],
-            # antenas
             "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
-            # controles
             "control": ["remoto","remote"],
             "remoto": ["control","remote"],
-            # cámaras / seguridad
             "camara": ["cámara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
             "cámara": ["camara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
-            # audio
             "bocina": ["parlante","altavoz","speaker"],
             "microfono": ["micrófono","mic","micro"],
             "amplificador": ["ampli","amp"],
-            # sensores comunes
-            "sensor": ["detector","sonda","modulo","módulo"],
+            # << QUITAMOS 'modulo/módulo' para no traer arduino >>
+            "sensor": ["detector","sonda"],
             "movimiento": ["pir"],
-            # agua / nivel
             "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
-            # energía y básicos
             "pila": ["bateria","batería","aa","aaa","18650","9v"],
             "cargador": ["charger","fuente","eliminador","adaptador","power"],
-            # adaptadores / convertidores
             "adaptador": ["converter","convertidor"],
             "conector": ["terminal","plug","jack"],
         }
 
-        # atributos/sinónimos adicionales por intención
         if "intemperie" in q_norm or "exterior" in q_norm:
-            # para gas/agua: IP67/impermeable/exterior
             SYN.setdefault("ip67", ["impermeable","intemperie","exterior"])
-
         if "valvula" in q_norm or "válvula" in q_norm:
             SYN.setdefault("valvula", ["válvula","valvula"])
 
-        # combos que definen intención (gran boost si ambos lados aparecen)
         COMBOS = [
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
@@ -615,15 +574,13 @@ class CatalogIndexer:
             ({"sensor","detector","sonda"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
         ]
 
-        # extraer tokens y expandir sinónimos
         raw_terms = [t for t in re.findall(r"[\w]+", q_norm, re.UNICODE)]
         base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
 
-        # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
         m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
         if m_q:
             base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("×", "x"))
-        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None  # matriz pedida en la consulta
+        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None
 
         seen = set()
         expanded: List[str] = []
@@ -635,12 +592,9 @@ class CatalogIndexer:
                 if s_n not in seen:
                     expanded.append(s_n); seen.add(s_n)
 
-        # boosts por marca (Sony) si la consulta lo trae
         want_sony = ("sony" in q_norm)
-
         clean_terms = expanded[:12] if expanded else []
 
-        # intención por combos
         def detect_combo(tokens: List[str]) -> List[Tuple[set, set, int]]:
             tokset = set(tokens)
             hits = []
@@ -656,24 +610,51 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # FTS5 (OR + NEAR entre primeros 2 términos si existen)
+        # ---------- FTS anclado por intención ----------
+        fts_q = None
         if self._fts_enabled and clean_terms:
-            or_clause = " OR ".join(clean_terms)
-            near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
-            fts_q = f"({or_clause}){near_clause}"
+            # Núcleos por intención
+            if intent == "gas":
+                domain_any = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]
+                attrs_any = ["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","nivel","porcentaje","volumen"]
+                fts_q = "(" + " OR ".join(domain_any) + ") AND (" + " OR ".join(attrs_any) + ")"
+            elif intent == "water":
+                domain_any = ["agua","tinaco","cisterna","nivel"]
+                attrs_any = ["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","ultrasonico","ultrasónico","presion","presión","electrodos"]
+                fts_q = "(" + " OR ".join(domain_any) + ") AND (" + " OR ".join(attrs_any) + ")"
+            elif intent == "control_sony":
+                fts_q = "(sony) AND (control OR remoto OR bravia OR rm)"
+            else:
+                # genérico: OR + NEAR de los 2 primeros
+                or_clause = " OR ".join(clean_terms)
+                near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
+                fts_q = f"({or_clause}){near_clause}"
+
             try:
                 rows = list(cur.execute(
                     "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_q, k * 15),  # pedimos más para re-rank robusto
+                    (fts_q, k * 15),
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
             except Exception:
                 pass
 
-        # Fallback LIKE (OR) incluyendo handle
+        # Fallback LIKE
         if len(ids) < k and clean_terms:
             where_parts, params = [], []
-            for t in clean_terms:
+            # En LIKE, si hay intención GAS/AGUA, también la anclamos
+            like_terms = clean_terms[:]
+            if intent == "gas":
+                like_terms.extend(["gas","tanque","estacionario","lp","propano","butano"])
+            if intent == "water":
+                like_terms.extend(["agua","tinaco","cisterna","nivel"])
+            uniq_like = []
+            seen_lt = set()
+            for t in like_terms:
+                if t not in seen_lt:
+                    seen_lt.add(t)
+                    uniq_like.append(t)
+            for t in uniq_like:
                 like = f"%{t}%"
                 where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
                 params.extend([like, like, like, like])
@@ -714,7 +695,6 @@ class CatalogIndexer:
                 })
             if not v_infos:
                 continue
-            # elegir variante con más stock
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
@@ -731,7 +711,7 @@ class CatalogIndexer:
                 "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
 
-        # --- Filtro contextual fuerte por intención (familias + blocklists) ---
+        # --- Filtro contextual por intención (familias + blocklists) ---
         def concat_all(it: Dict[str, Any]) -> str:
             parts = [
                 it["title"], it["handle"], it["tags"],
@@ -758,7 +738,7 @@ class CatalogIndexer:
             if pos:
                 candidates = pos
             else:
-                # Fallback suave: si no hubo familias, quedarnos con los que contengan la palabra clave del dominio
+                # Fallback suave
                 filt: List[Dict[str, Any]] = []
                 for it in candidates:
                     st = concat_all(it)
@@ -771,29 +751,20 @@ class CatalogIndexer:
                 if filt:
                     candidates = filt
 
-        # --- Filtro contextual ligero: si combo HDMi+Divisor, prioriza los que mencionan hdmi+1xN/divisor en campos fuertes ---
+        # --- Filtrado opcional para "control Sony"
         def strong_text(it: Dict[str, Any]) -> str:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
-        if candidates and (combo_hits or intent == "control_sony"):
-            subset: List[Dict[str, Any]] = []
+        if candidates and (intent == "control_sony"):
+            subset = []
             for it in candidates:
-                st = strong_text(it)
-                ok_any = False
-                for A, B, _ in combo_hits:
-                    if any(a in st for a in A) and any(b in st for b in B):
-                        ok_any = True
-                        break
-                # control Sony: preferir vendor/tags/body con sony
-                if intent == "control_sony":
-                    if ("sony" in st) or ("sony" in _norm(it.get("body",""))):
-                        ok_any = True
-                if ok_any:
+                st = strong_text(it) + " " + _norm(it.get("body",""))
+                if "sony" in st:
                     subset.append(it)
             if subset:
                 candidates = subset
 
-        # ---- Re-ranking por relevancia con priorización de matriz exacta y atributos de consulta ----
+        # ---- Re-ranking con atributos ----
         def hits(text: str, term: str) -> int:
             t = _norm(text)
             return t.count(term)
@@ -816,18 +787,13 @@ class CatalogIndexer:
                 s += 3 * hits(tgs, t)
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
-                s += 2 * hits(bdy, t)  # descripción ahora vale más
+                s += 2 * hits(bdy, t)
 
-            # Combos (gran boost)
             st = strong_text(it) + " " + _norm(bdy)
-            for A, B, bonus in combo_hits:
-                if any(a in st for a in A) and any(b in st for b in B):
-                    s += bonus
 
-            # Boosts por intención/atributos
             if intent == "gas":
                 if any(f in st for f in _GAS_ALLOW_FAMS): s += 40
-                if want_valve and ("gassensorv" in st or "gas sensor v" in st or "válvula" in st or "valvula" in st): s += 50
+                if want_valve and ("gassensorv" in st or "válvula" in st or "valvula" in st): s += 50
                 if want_ip67 and any(x in st for x in ["ip67", "impermeable", "intemperie", "exterior"]): s += 25
                 if want_wifi and any(x in st for x in ["wifi", "app"]): s += 10
             if intent == "water":
@@ -838,41 +804,36 @@ class CatalogIndexer:
             if intent == "control_sony":
                 if "sony" in st: s += 55
 
-            # Inicio de título con primer término
             if clean_terms:
                 first = clean_terms[0]
                 if _norm(ttl).startswith(first):
                     s += 6
 
-            # Boost por SKU si aparece exacto en la consulta
             q_tokens = set(clean_terms)
             sku_set = {_norm(sk) for sk in (it["skus"] or [])}
             if q_tokens & sku_set:
                 s += 25
 
-            # Boost por stock (cap)
             stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock > 0:
                 s += min(stock, 20)
 
-            # --- Priorizar matriz exacta solicitada y penalizar matrices diferentes ---
             if q_matrix:
                 st_full = _norm(it["title"] + " " + it["handle"] + " " + it["tags"])
                 if _has_matrix(st_full, q_matrix):
-                    s += 60  # fuerte boost si coincide la matriz pedida (p. ej., 1x4)
+                    s += 60
                 else:
                     other = re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
                     for a, b in other:
                         mx = f"{a}x{b}"
                         if mx != q_matrix:
-                            s -= 12  # leve penalización si menciona otra matriz
+                            s -= 12
                             break
 
             return s
 
         candidates.sort(key=score_item, reverse=True)
 
-        # Armar resultado final con URLs
         results: List[Dict[str, Any]] = []
         for it in candidates[:max(k, 12)]:
             v = it["variant"]
