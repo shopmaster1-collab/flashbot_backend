@@ -190,18 +190,27 @@ def _intent_from_query(q: str) -> Optional[str]:
 
 class CatalogIndexer:
     def __init__(self, shop_client, store_base_url: str):
+        """
+        shop_client: instancia de ShopifyClient (puede ser None).
+        Si FORCE_REST=1 o faltan métodos en el cliente, se usa ShopifyREST.
+        """
         self.client = shop_client
         self.store_base_url = (store_base_url or "").rstrip("/") or "https://master.com.mx"
+
+        # ÚNICA REGLA
         self.rules = {"REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1"}
+
         self.db_path = DB_PATH
         self._fts_enabled = False
+
         self._stats: Dict[str, int] = {"products": 0, "variants": 0, "inventory_levels": 0}
         self._discards_sample: List[Dict[str, Any]] = []
         self._discards_count: Dict[str, int] = {}
+
         self._location_map: Dict[int, str] = {}
         self._inventory_map: Dict[int, List[Dict]] = {}
 
-        # REST fallback
+        # REST fallback (si hay credenciales)
         self._rest_fallback: Optional[ShopifyREST] = None
         try:
             self._rest_fallback = ShopifyREST()
@@ -285,17 +294,21 @@ class CatalogIndexer:
 
     # ---------- fetch productos ----------
     def _fetch_all_active(self, limit: int = 250) -> List[Dict[str, Any]]:
+        """Devuelve productos ACTIVOS. Usa REST paginado sin status en el request y filtra en Python."""
         force_rest = os.getenv("FORCE_REST", "0") == "1"
 
+        # Preferimos REST con paginación robusta
         if force_rest and self._rest_fallback:
             all_items = self._rest_fallback.list_products_all(limit=limit)
             return [p for p in all_items if (p.get("status") == "active")]
 
+        # Intento con cliente inyectado (si tiene paginación propia)
         try:
             if hasattr(self.client, "list_products"):
                 acc: List[Dict[str, Any]] = []
                 page = None
                 while True:
+                    # sin status en el request; filtramos después
                     resp = self.client.list_products(limit=limit, page_info=page)
                     if isinstance(resp, dict):
                         items = (resp.get("products") or resp.get("items") or []) or []
@@ -312,6 +325,7 @@ class CatalogIndexer:
         except Exception:
             pass
 
+        # Fallback final a REST
         if self._rest_fallback:
             all_items = self._rest_fallback.list_products_all(limit=limit)
             return [p for p in all_items if (p.get("status") == "active")]
@@ -319,6 +333,8 @@ class CatalogIndexer:
 
     # ---------- build ----------
     def build(self) -> None:
+        """Crea esquema primero y luego llena datos (robusto)."""
+        # reset archivo
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)
@@ -328,6 +344,7 @@ class CatalogIndexer:
         conn = self._conn_rw()
         cur = conn.cursor()
 
+        # esquema
         cur.executescript("""
             PRAGMA journal_mode=WAL;
 
@@ -360,12 +377,20 @@ class CatalogIndexer:
         """)
         conn.commit()
 
+        # FTS (extiende campos + tokenizer unicode)
         try:
-            cur.execute("CREATE VIRTUAL TABLE products_fts USING fts5(title, body, tags, content='products', content_rowid='id')")
+            cur.execute("""
+                CREATE VIRTUAL TABLE products_fts USING fts5(
+                    title, body, tags, handle, vendor, product_type,
+                    content='products', content_rowid='id',
+                    tokenize='unicode61 remove_diacritics 2 tokenchars "-_/"'
+                )
+            """)
             self._fts_enabled = True
         except sqlite3.OperationalError:
             self._fts_enabled = False
 
+        # fetch Shopify
         try:
             locations = self._rest_fallback.list_locations() if self._rest_fallback else (self.client.list_locations() if self.client else [])
         except Exception:
@@ -380,6 +405,7 @@ class CatalogIndexer:
 
         print(f"[INDEX] fetched: locations={len(locations)} products={len(products)}", flush=True)
 
+        # inventory
         all_inv_ids: List[int] = []
         for p in products:
             for v in p.get("variants") or []:
@@ -413,6 +439,7 @@ class CatalogIndexer:
             except Exception:
                 continue
 
+        # volcado
         ins_p = "INSERT INTO products (id, handle, title, body, tags, vendor, product_type, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         ins_v = "INSERT INTO variants (id, product_id, sku, price, compare_at_price, inventory_item_id) VALUES (?, ?, ?, ?, ?, ?)"
         ins_inv = "INSERT INTO inventory (variant_id, location_id, location_name, available) VALUES (?, ?, ?, ?)"
@@ -486,7 +513,10 @@ class CatalogIndexer:
         conn.commit()
 
         if self._fts_enabled:
-            cur.execute("INSERT INTO products_fts (rowid, title, body, tags) SELECT id, title, body, tags FROM products")
+            cur.execute("""
+                INSERT INTO products_fts (rowid, title, body, tags, handle, vendor, product_type)
+                SELECT id, title, body, tags, handle, vendor, product_type FROM products
+            """)
             conn.commit()
 
         conn.close()
@@ -524,7 +554,7 @@ class CatalogIndexer:
         q_norm = _norm(query)
         intent = _intent_from_query(query)
 
-        # Stopwords y sinónimos (recortamos ruido de 'módulo')
+        # Stopwords y sinónimos (sin 'módulo' para no traer Arduino)
         STOP = {
             "el","la","los","las","un","una","unos","unas",
             "de","del","al","y","o","u","en","a","con","por","para",
@@ -552,7 +582,6 @@ class CatalogIndexer:
             "bocina": ["parlante","altavoz","speaker"],
             "microfono": ["micrófono","mic","micro"],
             "amplificador": ["ampli","amp"],
-            # << QUITAMOS 'modulo/módulo' para no traer arduino >>
             "sensor": ["detector","sonda"],
             "movimiento": ["pir"],
             "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
@@ -561,7 +590,6 @@ class CatalogIndexer:
             "adaptador": ["converter","convertidor"],
             "conector": ["terminal","plug","jack"],
         }
-
         if "intemperie" in q_norm or "exterior" in q_norm:
             SYN.setdefault("ip67", ["impermeable","intemperie","exterior"])
         if "valvula" in q_norm or "válvula" in q_norm:
@@ -610,61 +638,80 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # ---------- FTS anclado por intención ----------
+        # ---------- FTS anclado por intención (AND real) ----------
         fts_q = None
-        if self._fts_enabled and clean_terms:
-            # Núcleos por intención
+        if self._fts_enabled:
             if intent == "gas":
-                domain_any = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]
+                domain_any = ["gas","tanque","estacionario","estacionaria","lp","propano","butano"] + _GAS_ALLOW_FAMS
                 attrs_any = ["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","nivel","porcentaje","volumen"]
                 fts_q = "(" + " OR ".join(domain_any) + ") AND (" + " OR ".join(attrs_any) + ")"
             elif intent == "water":
-                domain_any = ["agua","tinaco","cisterna","nivel"]
+                domain_any = ["agua","tinaco","cisterna","nivel"] + _WATER_ALLOW_FAMS
                 attrs_any = ["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","ultrasonico","ultrasónico","presion","presión","electrodos"]
                 fts_q = "(" + " OR ".join(domain_any) + ") AND (" + " OR ".join(attrs_any) + ")"
             elif intent == "control_sony":
                 fts_q = "(sony) AND (control OR remoto OR bravia OR rm)"
-            else:
-                # genérico: OR + NEAR de los 2 primeros
+            elif clean_terms:
                 or_clause = " OR ".join(clean_terms)
                 near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
                 fts_q = f"({or_clause}){near_clause}"
 
-            try:
-                rows = list(cur.execute(
-                    "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_q, k * 15),
-                ))
-                ids.extend([int(r["rowid"]) for r in rows])
-            except Exception:
-                pass
+            if fts_q:
+                try:
+                    rows = list(cur.execute(
+                        "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
+                        (fts_q, k * 20),
+                    ))
+                    ids.extend([int(r["rowid"]) for r in rows])
+                except Exception:
+                    pass
 
-        # Fallback LIKE
-        if len(ids) < k and clean_terms:
-            where_parts, params = [], []
-            # En LIKE, si hay intención GAS/AGUA, también la anclamos
-            like_terms = clean_terms[:]
+        # ---------- Fallback LIKE con AND (dominio) AND (atributos) ----------
+        if len(ids) < max(8, k):
+            def _like_group(terms: List[str]) -> Tuple[str, List[str]]:
+                if not terms:
+                    return "", []
+                preds = []
+                params: List[str] = []
+                tmpl = "(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ? OR vendor LIKE ? OR product_type LIKE ?)"
+                for t in terms:
+                    like = f"%{t}%"
+                    preds.append(tmpl)
+                    params.extend([like, like, like, like, like, like])
+                return "(" + " OR ".join(preds) + ")", params
+
             if intent == "gas":
-                like_terms.extend(["gas","tanque","estacionario","lp","propano","butano"])
-            if intent == "water":
-                like_terms.extend(["agua","tinaco","cisterna","nivel"])
-            uniq_like = []
-            seen_lt = set()
-            for t in like_terms:
-                if t not in seen_lt:
-                    seen_lt.add(t)
-                    uniq_like.append(t)
-            for t in uniq_like:
-                like = f"%{t}%"
-                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
-                params.extend([like, like, like, like])
-            sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
-            params.append(k * 15)
-            try:
-                like_rows = list(cur.execute(sql, tuple(params)))
-                ids.extend([int(r["id"]) for r in like_rows])
-            except Exception:
-                pass
+                domain_terms = ["gas","tanque","estacionario","estacionaria","lp","propano","butano"] + _GAS_ALLOW_FAMS
+                attr_terms   = ["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","nivel","porcentaje","volumen"]
+            elif intent == "water":
+                domain_terms = ["agua","tinaco","cisterna","nivel"] + _WATER_ALLOW_FAMS
+                attr_terms   = ["sensor","medidor","valvula","válvula","ip67","impermeable","intemperie","exterior","wifi","app","ultrasonico","ultrasónico","presion","presión","electrodos"]
+            elif intent == "control_sony":
+                domain_terms = ["sony"]
+                attr_terms   = ["control","remoto","bravia","rm"]
+            else:
+                # genérico: usa los clean_terms como dominio y atributos juntos (OR grande)
+                domain_terms = clean_terms
+                attr_terms   = []
+
+            where_parts: List[str] = []
+            params_all: List[str] = []
+
+            dom_sql, dom_params = _like_group(domain_terms)
+            if dom_sql:
+                where_parts.append(dom_sql); params_all.extend(dom_params)
+            att_sql, att_params = _like_group(attr_terms)
+            if att_sql:
+                where_parts.append(att_sql); params_all.extend(att_params)
+
+            if where_parts:
+                sql = f"SELECT id FROM products WHERE {' AND '.join(where_parts)} LIMIT ?"
+                params_all.append(k * 30)
+                try:
+                    like_rows = list(cur.execute(sql, tuple(params_all)))
+                    ids.extend([int(r["id"]) for r in like_rows])
+                except Exception:
+                    pass
 
         # únicos
         uniq_ids: List[int] = []
@@ -728,28 +775,16 @@ class CatalogIndexer:
                 if intent == "gas":
                     blocked = any(b in st for b in _GAS_BLOCK)
                     has_fam = any(f in st for f in _GAS_ALLOW_FAMS)
-                    if has_fam and not blocked:
+                    if ((" gas" in " " + st) or has_fam) and not blocked:
                         pos.append(it)
                 elif intent == "water":
                     blocked = any(b in st for b in _WATER_BLOCK)
+                    has_kw = any(w in st for w in _WATER_KEYWORDS)
                     has_fam = any(f in st for f in _WATER_ALLOW_FAMS)
-                    if has_fam and not blocked:
+                    if (has_kw or has_fam) and not blocked:
                         pos.append(it)
             if pos:
                 candidates = pos
-            else:
-                # Fallback suave
-                filt: List[Dict[str, Any]] = []
-                for it in candidates:
-                    st = concat_all(it)
-                    if intent == "gas":
-                        if (" gas" in " " + st) and not any(b in st for b in _GAS_BLOCK):
-                            filt.append(it)
-                    else:
-                        if any(w in st for w in _WATER_KEYWORDS) and not any(b in st for b in _WATER_BLOCK):
-                            filt.append(it)
-                if filt:
-                    candidates = filt
 
         # --- Filtrado opcional para "control Sony"
         def strong_text(it: Dict[str, Any]) -> str:
@@ -781,6 +816,7 @@ class CatalogIndexer:
             ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
             vendor = it["vendor"]; ptype = it["product_type"]
             s = 0
+            # Los términos de consulta aportan, pero la intención y familias pesan más
             for t in clean_terms:
                 s += 7 * hits(ttl, t)
                 s += 5 * hits(hdl, t)
@@ -792,13 +828,15 @@ class CatalogIndexer:
             st = strong_text(it) + " " + _norm(bdy)
 
             if intent == "gas":
-                if any(f in st for f in _GAS_ALLOW_FAMS): s += 40
+                if any(f in st for f in _GAS_ALLOW_FAMS): s += 60
+                if " gas" in " " + st: s += 25
                 if want_valve and ("gassensorv" in st or "válvula" in st or "valvula" in st): s += 50
                 if want_ip67 and any(x in st for x in ["ip67", "impermeable", "intemperie", "exterior"]): s += 25
-                if want_wifi and any(x in st for x in ["wifi", "app"]): s += 10
+                if want_wifi and any(x in st for x in ["wifi", "app"]): s += 12
             if intent == "water":
-                if any(f in st for f in _WATER_ALLOW_FAMS): s += 40
-                if want_valve and ("waterv" in st or "válvula" in st or "valvula" in st): s += 50
+                if any(f in st for f in _WATER_ALLOW_FAMS): s += 60
+                if any(w in st for w in _WATER_KEYWORDS): s += 25
+                if want_valve and ("waterv" in st or "válvula" in st or "valvula" in st): s += 40
                 if want_ip67 and any(x in st for x in ["ip67", "impermeable", "intemperie", "exterior"]): s += 20
                 if want_wifi and any(x in st for x in ["wifi", "app"]): s += 10
             if intent == "control_sony":
@@ -834,6 +872,7 @@ class CatalogIndexer:
 
         candidates.sort(key=score_item, reverse=True)
 
+        # Armar resultado final con URLs
         results: List[Dict[str, Any]] = []
         for it in candidates[:max(k, 12)]:
             v = it["variant"]
