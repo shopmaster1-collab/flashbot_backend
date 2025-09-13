@@ -202,7 +202,6 @@ def _concat_fields(it) -> str:
         it.get("product_type") or "",
         v.get("sku") or "",
     ]
-    # algunos indexers cargan skus adicionales
     if isinstance(it.get("skus"), (list, tuple)):
         parts.extend([x for x in it["skus"] if x])
     return " ".join(parts).lower()
@@ -210,14 +209,11 @@ def _concat_fields(it) -> str:
 
 def _score_water(st: str, ql: str) -> int:
     s = 0
-    # señales base
     if any(w in st for w in _ALLOW_KEYWORDS): s += 20
-    # familias priorizadas
     for fam in _ALLOW_FAMILIES:
         if fam in st: s += 80
-    # calificadores por consulta
     if "valvula" in ql or "válvula" in ql:
-        if "iot-waterv" in st or "iot waterv" in st: s += 60
+        if "iot-waterv" in st or "iot waterv" in st: s += 90  # refuerzo fuerte para válvula
     if "ultra" in ql or "ultrason" in ql or "ultrasónico" in ql or "ultrasonico" in ql:
         if "waterultra" in st: s += 60
         if "easy-waterultra" in st or "easy waterultra" in st: s += 40
@@ -243,6 +239,8 @@ def _rerank_for_water(query: str, items: list):
     if not water_intent or not items:
         return items
 
+    want_valve = ("valvula" in ql) or ("válvula" in ql)
+
     rescored = []
     positives = []
     negatives = []
@@ -251,11 +249,10 @@ def _rerank_for_water(query: str, items: list):
         score = _score_water(st, ql)
         blocked = _has_block(st)
 
-        # Mantener algo de inercia del orden original
-        base = max(0, 30 - idx)
+        base = max(0, 30 - idx)  # mantener algo de inercia del orden original
         total = score + base - (120 if blocked else 0)
 
-        rec = (total, score, blocked, it)
+        rec = (total, score, blocked, "iot-waterv" in st or "iot waterv" in st, it)
         rescored.append(rec)
 
         if score >= 60 and not blocked:
@@ -263,15 +260,23 @@ def _rerank_for_water(query: str, items: list):
         elif blocked:
             negatives.append(rec)
 
-    # Si hay positivos, hacemos HARD FILTER a positivos (top-k)
     if positives:
+        # Orden natural por score total
         positives.sort(key=lambda x: x[0], reverse=True)
-        ordered = [it for (_t, _s, _b, it) in positives]
-        return ordered
+
+        if want_valve:
+            # Prioridad dura: primero todos los IOT-WATERV (true en flag), luego el resto
+            waterv = [it for it in positives if it[3]]
+            others = [it for it in positives if not it[3]]
+            ordered = waterv + others
+        else:
+            ordered = positives
+
+        return [it for (_t, _s, _b, _is_wv, it) in ordered]
 
     # Si no hay positivos, devolvemos todo reordenado, castigando bloqueados
     rescored.sort(key=lambda x: x[0], reverse=True)
-    return [it for (_t, _s, _b, it) in rescored]
+    return [it for (_t, _s, _b, _is_wv, it) in rescored]
 
 
 @app.post("/api/chat")
@@ -283,8 +288,8 @@ def chat():
     if not query:
         return jsonify({"answer": "¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.", "products": []})
 
-    # Buscar en el índice
-    items = indexer.search(query, k=max(k, 20))  # pedimos un poco más para rerank robusto
+    # Buscar en el índice (pedimos un poco más para rerank robusto)
+    items = indexer.search(query, k=max(k, 20))
 
     # Rerank/filtrado si hay intención de agua/tinaco
     items = _rerank_for_water(query, items)
@@ -403,7 +408,7 @@ def admin_diag():
     return jsonify(info)
 
 
-# --- Vista de re-rank para depuración (opcional)
+# --- Vista de re-rank para depuración
 @app.get("/api/admin/preview")
 def admin_preview():
     if not _admin_ok(request):
