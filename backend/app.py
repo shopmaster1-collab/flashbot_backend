@@ -4,11 +4,11 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
+# 👉 Importamos SOLO CatalogIndexer (ya no hay ShopifyClient en indexer.py)
 from .indexer import CatalogIndexer
 from .utils import money
-from .indexer import ShopifyClient  # usamos el mismo cliente minimal
 
-# Deepseek opcional
+# Deepseek opcional (si lo usas)
 try:
     from .deepseek_client import DeepseekClient
 except Exception:
@@ -24,18 +24,25 @@ CORS(app, resources={r"/*": {"origins": _allowed,
                              "methods": ["GET", "POST", "OPTIONS"]}})
 
 # ---- Servicios
-shop = ShopifyClient()
-indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
+# 👉 Pasamos None. Con FORCE_REST=1, el indexer usará su REST interno (ShopifyREST).
+indexer = CatalogIndexer(
+    shop_client=None,
+    store_base_url=os.getenv("STORE_BASE_URL", "https://master.com.mx")
+)
 
 CHAT_WRITER = (os.getenv("CHAT_WRITER") or "none").strip().lower()
 deeps = None
 if CHAT_WRITER == "deepseek" and DeepseekClient:
-    try: deeps = DeepseekClient()
-    except Exception: deeps = None
+    try:
+        deeps = DeepseekClient()
+    except Exception:
+        deeps = None
 
-# build inicial (mantiene conteos)
-try: indexer.build()
-except Exception as e: print(f"[WARN] Index build failed at startup: {e}", flush=True)
+# build inicial (no altera conteos/inventarios)
+try:
+    indexer.build()
+except Exception as e:
+    print(f"[WARN] Index build failed at startup: {e}", flush=True)
 
 def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
@@ -56,9 +63,10 @@ def home():
             "</p>")
 
 @app.get("/health")
-def health(): return {"ok": True}
+def health():
+    return {"ok": True}
 
-# ---- Redacción ligera
+# ---- Detección ligera de intención (misma que ya venías usando)
 _PAT_ONE_BY_N = re.compile(r"\b(\d+)\s*[x×]\s*(\d+)\b", re.IGNORECASE)
 def _detect_patterns(q: str) -> dict:
     ql = (q or "").lower(); pat = {}
@@ -97,7 +105,8 @@ def _cards_from_items(items):
             "title": it["title"], "image": it["image"],
             "price": money(v.get("price")) if v.get("price") is not None else None,
             "compare_at_price": money(v.get("compare_at_price")) if v.get("compare_at_price") else None,
-            "buy_url": it["buy_url"], "product_url": it["product_url"],
+            "buy_url": f"{it['buy_url']}" if 'buy_url' in it else None,
+            "product_url": it["product_url"],
             "inventory": v.get("inventory"),
         })
     return cards
@@ -108,167 +117,10 @@ def _plain_items(items):
         v=it["variant"]
         out.append({"title": it.get("title"), "sku": v.get("sku"),
                     "price": money(v.get("price")) if v.get("price") is not None else None,
-                    "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
+                    "product_url": it.get("product_url"), "buy_url": f"{it.get('buy_url')}"})
     return out
 
-# ---------- Rerank (resta igual, pero ahora ve 'body') ----------
-_WATER_ALLOW_FAMILIES = [
-    "iot-waterv","iot-waterultra","iot-waterp","iot-water",
-    "easy-waterultra","easy-water","iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water",
-]
-_WATER_ALLOW_KEYWORDS = ["tinaco","cisterna","nivel","agua"]
-_WATER_BLOCK = ["bm-carsensor","carsensor","car","auto","vehiculo","vehículo",
-                "ar-rain","rain","lluvia","ar-gasc","gasc"," gas","co2","humo","smoke",
-                "ar-knock","knock","golpe"]
-
-_GAS_ALLOW_FAMILIES = [
-    "iot-gassensorv","iot-gassensor","connect-gas","easy-gas",
-    "iot gassensorv","iot gassensor","connect gas","easy gas",
-]
-_GAS_ALLOW_KEYWORDS = ["gas","tanque","estacionario","estacionaria","lp","propano","butano","nivel","medidor","porcentaje","volumen"]
-_GAS_BLOCK = [
-    "ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
-    "arduino","módulo","modulo","module","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
-    "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
-    "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
-    "kwh","kw/h","consumo","tarifa","electric meter","medidor de consumo","contador",
-    "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
-    "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra"," water "
-]
-
-def _concat_fields(it) -> str:
-    v = it.get("variant", {})
-    parts = [
-        it.get("title") or "",
-        it.get("handle") or "",
-        it.get("tags") or "",
-        it.get("vendor") or "",
-        it.get("product_type") or "",
-        it.get("body") or "",
-        v.get("sku") or "",
-    ]
-    return " ".join(parts).lower()
-
-def _intent_from_query(q: str):
-    ql=(q or "").lower()
-    if any(w in ql for w in _WATER_ALLOW_KEYWORDS):
-        if "gas" not in ql: return "water"
-    if ("gas" in ql) or any(w in ql for w in ["tanque","estacionario","lp","propano","butano","medidor","nivel"]):
-        return "gas"
-    return None
-
-def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple[int, bool]:
-    s=0
-    has_family = any(fam in st for fam in allow_fams)
-    if any(w in st for w in allow_keywords): s+=20
-    if has_family: s+=85
-    if extras.get("want_valve"):
-        for key in extras.get("valve_fams", []):
-            if key in st: s+=extras.get("valve_bonus", 95)
-    if extras.get("want_bt"):
-        for key in extras.get("bt_fams", []):
-            if key in st: s+=45
-    if extras.get("want_wifi"):
-        for key in extras.get("wifi_fams", []):
-            if key in st: s+=45
-    if extras.get("want_display"):
-        for key in extras.get("display_fams", []):
-            if key in st: s+=40
-    if extras.get("want_alarm"):
-        for key in extras.get("alarm_words", []):
-            if key in st: s+=25
-    for neg in extras.get("neg_words", []):
-        if neg in st: s-=80
-    return s, has_family
-
-def _rerank_for_water(query: str, items: list):
-    ql=(query or "").lower()
-    if _intent_from_query(query)!="water" or not items: return items
-    want_valve=("valvula" in ql) or ("válvula" in ql)
-    extras={"want_valve": want_valve,
-            "want_bt": "bluetooth" in ql,
-            "want_wifi": ("wifi" in ql) or ("app" in ql),
-            "valve_fams":["iot-waterv","iot waterv"],
-            "bt_fams":["easy-water","easy water","easy-waterultra","easy waterultra"],
-            "wifi_fams":["iot-water","iot water","iot-waterv","iot waterv","iot-waterultra","iot waterultra"]}
-    rescored=[]; positives=[]
-    for idx,it in enumerate(items):
-        st=_concat_fields(it)
-        blocked=any(b in st for b in _WATER_BLOCK)
-        base=max(0,30-idx)
-        score, has_fam = _score_family(st, ql, _WATER_ALLOW_KEYWORDS, _WATER_ALLOW_FAMILIES, extras)
-        total=score+base-(120 if blocked else 0)
-        is_wv=("iot-waterv" in st) or ("iot waterv" in st)
-        rec=(total,score,blocked,has_fam,is_wv,it); rescored.append(rec)
-        if has_fam and score>=60 and not blocked: positives.append(rec)
-    if positives:
-        positives.sort(key=lambda x:x[0], reverse=True)
-        if want_valve:
-            wv=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
-            ordered=wv+others
-        else: ordered=positives
-        return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
-    # Fallback suave por palabras
-    soft=[]; water_words=["agua","tinaco","cisterna","nivel"]
-    for idx,it in enumerate(items):
-        st=_concat_fields(it)
-        if any(w in st for w in water_words) and not any(b in st for b in _WATER_BLOCK):
-            soft.append((max(0,30-idx), it))
-    if soft:
-        soft.sort(key=lambda x:x[0], reverse=True)
-        return [it for (_s,it) in soft]
-    rescored.sort(key=lambda x:x[0], reverse=True)
-    return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
-
-def _rerank_for_gas(query: str, items: list):
-    ql=(query or "").lower()
-    if _intent_from_query(query)!="gas" or not items: return items
-    want_valve=("valvula" in ql) or ("válvula" in ql)
-    extras={"want_valve": want_valve, "want_bt": "bluetooth" in ql,
-            "want_wifi": ("wifi" in ql) or ("app" in ql),
-            "want_display": any(w in ql for w in ["pantalla","display"]),
-            "want_alarm": "alarma" in ql,
-            "valve_fams":["iot-gassensorv","iot gassensorv"],
-            "bt_fams":["easy-gas","easy gas"],
-            "wifi_fams":["iot-gassensor","iot gassensor","connect-gas","connect gas"],
-            "display_fams":["easy-gas","easy gas"],
-            "alarm_words":["alarma","alerta"],
-            "neg_words":[]}
-    rescored=[]; positives=[]
-    for idx,it in enumerate(items):
-        st=_concat_fields(it)
-        blocked=any(b in st for b in _GAS_BLOCK)
-        base=max(0,30-idx)
-        score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
-        total=score+base-(140 if blocked else 0)
-        is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
-        rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
-        if has_fam and score>=60 and not blocked: positives.append(rec)
-    if positives:
-        positives.sort(key=lambda x:x[0], reverse=True)
-        if want_valve:
-            vs=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
-            ordered=vs+others
-        else: ordered=positives
-        return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
-    # Fallback suave por palabra 'gas' en cualquier campo (incluyendo 'body')
-    soft=[]
-    for idx,it in enumerate(items):
-        st=_concat_fields(it)
-        if (" gas" in " "+st) and not any(b in st for b in _GAS_BLOCK):
-            soft.append((max(0,30-idx), it))
-    if soft:
-        soft.sort(key=lambda x:x[0], reverse=True)
-        return [it for (_s,it) in soft]
-    rescored.sort(key=lambda x:x[0], reverse=True)
-    return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
-
-def _apply_intent_rerank(query: str, items: list):
-    intent=_intent_from_query(query)
-    if intent=="water": return _rerank_for_water(query, items)
-    if intent=="gas":   return _rerank_for_gas(query, items)
-    return items
-
+# ---------- Chat ----------
 @app.post("/api/chat")
 def chat():
     data=request.get_json(force=True) or {}
@@ -277,10 +129,9 @@ def chat():
     if not query:
         return jsonify({"answer":"¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.","products":[]})
 
-    # Pedimos más candidatos; el índice ahora incluye descripción
-    items=indexer.search(query, k=max(k,90))
-    items=_apply_intent_rerank(query, items)
-    items=items[:k] if k and isinstance(items,list) else items
+    # Pedimos más candidatos; indexer ya re-rankea por intención y usa descripción
+    items=indexer.search(query, k=max(k, 90))
+    items=items[:k] if k and isinstance(items, list) else items
 
     if not items:
         return jsonify({"answer":"No encontré resultados directos. Puedes precisar marca, tipo o uso (p. ej. ‘sensor de gas con válvula para tanque’, ‘control Sony Bravia’).","products":[]})
@@ -289,7 +140,7 @@ def chat():
     answer=_format_answer(query, items)
     return jsonify({"answer":answer, "products":cards})
 
-# --- Admin
+# --- Admin helpers ---
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True); indexer.build()
@@ -323,8 +174,8 @@ def admin_products():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     page=int(request.args.get("page") or 1)
     size=max(1,min(100,int(request.args.get("size") or 20)))
-    filt=(request.args.get("f") or "").strip().lower()
-    data=indexer.sample_products(page=page, size=size, q=filt); return jsonify(data)
+    data={"ok":True,"page":page,"size":size,"items":indexer.sample_products(limit=size)}
+    return jsonify(data)
 
 @app.get("/api/admin/diag")
 def admin_diag():
@@ -345,9 +196,8 @@ def admin_diag():
 def admin_preview():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
-    raw=indexer.search(q, k=max(k,90)); reranked=_apply_intent_rerank(q, raw)
-    return jsonify({"q":q, "raw_titles":[i.get("title") for i in raw[:k]],
-                    "reranked_titles":[i.get("title") for i in reranked[:k]]})
+    raw=indexer.search(q, k=max(k,90))
+    return jsonify({"q":q, "raw_titles":[i.get("title") for i in raw[:k]]})
 
 # Estáticos del widget
 BASE_DIR=os.path.dirname(os.path.abspath(__file__))
