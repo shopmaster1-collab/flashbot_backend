@@ -20,7 +20,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# CORS
+# ---- CORS
 _allowed = [o.strip() for o in (os.getenv("ALLOWED_ORIGINS") or "*").split(",") if o.strip()]
 CORS(
     app,
@@ -31,7 +31,7 @@ CORS(
     }},
 )
 
-# --- Servicios (sin kwargs: ShopifyClient lee envs internamente) ---
+# ---- Servicios (sin kwargs: ShopifyClient lee envs internamente)
 shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 
@@ -43,7 +43,7 @@ if CHAT_WRITER == "deepseek" and DeepseekClient is not None:
     except Exception:
         deeps = None
 
-# Construye índice al iniciar (no tumbar la app si falla)
+# Construcción de índice al iniciar (no tumbar si falla)
 try:
     indexer.build()
 except Exception as e:
@@ -66,7 +66,8 @@ def home():
         '<code>GET /api/admin/search?q=...</code>, '
         '<code>GET /api/admin/discards</code>, '
         '<code>GET /api/admin/products</code>, '
-        '<code>GET /api/admin/diag</code>'
+        '<code>GET /api/admin/diag</code>, '
+        '<code>GET /api/admin/preview?q=...</code>'
         "</p>"
     )
 
@@ -76,7 +77,7 @@ def health():
     return {"ok": True}
 
 
-# --------- utils de patrón/explicación ----------
+# --------- util de patrones para la redacción ----------
 _PAT_ONE_BY_N = re.compile(r"\b(\d+)\s*[x×]\s*(\d+)\b", re.IGNORECASE)
 
 def _detect_patterns(q: str) -> dict:
@@ -88,7 +89,7 @@ def _detect_patterns(q: str) -> dict:
 
     inch = re.findall(r"\b(1[9]|[2-9]\d|100)\b", ql)
     if inch:
-        pat["inches"] = list(set(inch))
+        pat["inches"] = sorted(set(inch))
 
     cats = []
     for key in ["hdmi", "rca", "coaxial", "antena", "soporte", "control", "cctv", "vga", "usb"]:
@@ -101,26 +102,42 @@ def _detect_patterns(q: str) -> dict:
         if w in ql:
             pat["water"] = True
             break
+    for w in ["valvula", "válvula"]:
+        if w in ql:
+            pat["valve"] = True
+            break
+    for w in ["ultra", "ultrason", "ultrasónico", "ultrasonico"]:
+        if w in ql:
+            pat["ultra"] = True
+            break
+    for w in ["presion", "presión"]:
+        if w in ql:
+            pat["pressure"] = True
+            break
+    if "bluetooth" in ql:
+        pat["bt"] = True
+    if ("wifi" in ql) or ("app" in ql):
+        pat["wifi"] = True
     return pat
 
 
 def _format_answer(query: str, items: list) -> str:
     pat = _detect_patterns(query)
-    intro_bits = []
-    if pat.get("water"):
-        intro_bits.append("monitoreo de nivel de agua en tinacos/cisternas")
-    if pat.get("matrix"):
-        intro_bits.append(f"patrón {pat['matrix']}")
-    if pat.get("inches"):
-        intro_bits.append(f"tamaño {', '.join(sorted(pat['inches']))}”")
-    if pat.get("cats"):
-        intro_bits.append("categorías: " + ", ".join(pat["cats"]))
+    bits = []
+    if pat.get("water"): bits.append("monitoreo de nivel de agua en tinacos/cisternas")
+    if pat.get("valve"): bits.append("con válvula electrónica")
+    if pat.get("ultra"): bits.append("sensor ultrasónico")
+    if pat.get("pressure"): bits.append("sensor de presión")
+    if pat.get("bt"): bits.append("con Bluetooth")
+    if pat.get("wifi"): bits.append("con WiFi/App")
+    if pat.get("matrix"): bits.append(f"matriz {pat['matrix']}")
+    if pat.get("inches"): bits.append(f"tamaños {', '.join(pat['inches'])}”")
+    if pat.get("cats"): bits.append("categorías: " + ", ".join(pat["cats"]))
 
     lines = []
-    if intro_bits:
-        lines.append("Consideré: " + "; ".join(intro_bits) + ".")
+    if bits: lines.append("Consideré: " + "; ".join(bits) + ".")
     lines.append("Estas son las opciones más relevantes que encontré.")
-    lines.append("¿Quieres acotar por precio, marca, disponibilidad o tipo?")
+    lines.append("¿Quieres acotar por marca, precio, disponibilidad o tipo?")
     return "\n".join(lines)
 
 
@@ -131,8 +148,8 @@ def _cards_from_items(items):
         cards.append({
             "title": it["title"],
             "image": it["image"],
-            "price": money(v["price"]) if v.get("price") is not None else None,
-            "compare_at_price": money(v["compare_at_price"]) if v.get("compare_at_price") else None,
+            "price": money(v.get("price")) if v.get("price") is not None else None,
+            "compare_at_price": money(v.get("compare_at_price")) if v.get("compare_at_price") else None,
             "buy_url": it["buy_url"],
             "product_url": it["product_url"],
             "inventory": v.get("inventory"),
@@ -145,76 +162,116 @@ def _plain_items(items):
     for it in items:
         v = it["variant"]
         out.append({
-            "title": it["title"],
+            "title": it.get("title"),
             "sku": v.get("sku"),
-            "price": money(v["price"]) if v.get("price") is not None else None,
-            "product_url": it["product_url"],
-            "buy_url": it["buy_url"],
+            "price": money(v.get("price")) if v.get("price") is not None else None,
+            "product_url": it.get("product_url"),
+            "buy_url": it.get("buy_url"),
         })
     return out
 
 
-# ---------- Re-ranker específico para intención de agua/tinaco ----------
+# ---------- Relevancia agua/tinaco: allowlist + blocklist + hard filter ----------
+_ALLOW_FAMILIES = [
+    "iot-waterv", "iot-waterultra", "iot-waterp", "iot-water",
+    "easy-waterultra", "easy-water",
+    # tolerancias sin guión/espacio
+    "iot waterv", "iot waterultra", "iot waterp", "iot water",
+    "easy waterultra", "easy water",
+]
+_ALLOW_KEYWORDS = ["tinaco", "cisterna", "nivel", "agua"]
+
+_BLOCK_NO_WATER = [
+    # automotriz y varios
+    "bm-carsensor", "carsensor", "car", "auto", "vehiculo", "vehículo",
+    # lluvia
+    "ar-rain", "rain", "lluvia",
+    # gas
+    "ar-gasc", "gasc", "gas",
+    # golpe
+    "ar-knock", "knock", "golpe",
+]
+
+def _concat_fields(it) -> str:
+    v = it.get("variant", {})
+    parts = [
+        it.get("title") or "",
+        it.get("handle") or "",
+        it.get("tags") or "",
+        it.get("vendor") or "",
+        it.get("product_type") or "",
+        v.get("sku") or "",
+    ]
+    # algunos indexers cargan skus adicionales
+    if isinstance(it.get("skus"), (list, tuple)):
+        parts.extend([x for x in it["skus"] if x])
+    return " ".join(parts).lower()
+
+
+def _score_water(st: str, ql: str) -> int:
+    s = 0
+    # señales base
+    if any(w in st for w in _ALLOW_KEYWORDS): s += 20
+    # familias priorizadas
+    for fam in _ALLOW_FAMILIES:
+        if fam in st: s += 80
+    # calificadores por consulta
+    if "valvula" in ql or "válvula" in ql:
+        if "iot-waterv" in st or "iot waterv" in st: s += 60
+    if "ultra" in ql or "ultrason" in ql or "ultrasónico" in ql or "ultrasonico" in ql:
+        if "waterultra" in st: s += 60
+        if "easy-waterultra" in st or "easy waterultra" in st: s += 40
+    if "presion" in ql or "presión" in ql:
+        if "iot-waterp" in st or "iot waterp" in st: s += 60
+    if "bluetooth" in ql:
+        if "easy-water" in st or "easy water" in st: s += 40
+    if "wifi" in ql or "app" in ql:
+        if "iot-water" in st or "iot water" in st: s += 40
+        if "iot-waterv" in st or "iot waterv" in st: s += 20
+        if "iot-waterultra" in st or "iot waterultra" in st: s += 40
+    return s
+
+
+def _has_block(st: str) -> bool:
+    return any(b in st for b in _BLOCK_NO_WATER)
+
+
 def _rerank_for_water(query: str, items: list):
+    """Reordena y filtra resultados para intenciones de agua/tinaco/cisterna."""
     ql = (query or "").lower()
     water_intent = any(w in ql for w in ["agua","nivel","tinaco","cisterna","bomba","válvula","valvula"])
     if not water_intent or not items:
         return items
 
-    pref_map = {
-        "iot-waterv": 0,
-        "iot-waterultra": 0,
-        "iot-waterp": 0,
-        "iot-water": 0,
-        "easy-waterultra": 0,
-        "easy-water": 0,
-    }
-    if ("valvula" in ql) or ("válvula" in ql):
-        pref_map["iot-waterv"] += 40
-    if ("ultra" in ql) or ("ultrason" in ql) or ("ultrasónico" in ql) or ("ultrasonico" in ql):
-        pref_map["iot-waterultra"] += 40
-        pref_map["easy-waterultra"] += 20
-    if ("presion" in ql) or ("presión" in ql):
-        pref_map["iot-waterp"] += 40
-    if ("bluetooth" in ql):
-        pref_map["easy-water"] += 30
-        pref_map["easy-waterultra"] += 30
-    if ("wifi" in ql) or ("app" in ql):
-        pref_map["iot-water"] += 20
-        pref_map["iot-waterultra"] += 20
-        pref_map["iot-waterv"] += 10
-
-    def strong_text(it):
-        v = it.get("variant", {})
-        skus = " ".join([s for s in (v.get("sku"),) if s]) + " " + " ".join(it.get("skus") or [])
-        return " ".join([
-            (it.get("title") or ""),
-            (it.get("handle") or ""),
-            (it.get("tags") or ""),
-            (it.get("vendor") or ""),
-            (it.get("product_type") or ""),
-            skus
-        ]).lower()
-
-    def fam_score(st: str) -> int:
-        s = 0
-        if any(w in st for w in ["tinaco","cisterna","nivel","agua"]):
-            s += 20
-        for key, bonus in pref_map.items():
-            if key in st:
-                s += 60 + bonus
-        if "iot water" in st: s += 25
-        if "easy water" in st: s += 25
-        return s
-
     rescored = []
+    positives = []
+    negatives = []
     for idx, it in enumerate(items):
-        st = strong_text(it)
-        base = max(0, 30 - idx)  # mantener orden original si no hay señales
-        rescored.append((fam_score(st) + base, it))
+        st = _concat_fields(it)
+        score = _score_water(st, ql)
+        blocked = _has_block(st)
 
+        # Mantener algo de inercia del orden original
+        base = max(0, 30 - idx)
+        total = score + base - (120 if blocked else 0)
+
+        rec = (total, score, blocked, it)
+        rescored.append(rec)
+
+        if score >= 60 and not blocked:
+            positives.append(rec)
+        elif blocked:
+            negatives.append(rec)
+
+    # Si hay positivos, hacemos HARD FILTER a positivos (top-k)
+    if positives:
+        positives.sort(key=lambda x: x[0], reverse=True)
+        ordered = [it for (_t, _s, _b, it) in positives]
+        return ordered
+
+    # Si no hay positivos, devolvemos todo reordenado, castigando bloqueados
     rescored.sort(key=lambda x: x[0], reverse=True)
-    return [it for _, it in rescored]
+    return [it for (_t, _s, _b, it) in rescored]
 
 
 @app.post("/api/chat")
@@ -227,10 +284,13 @@ def chat():
         return jsonify({"answer": "¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.", "products": []})
 
     # Buscar en el índice
-    items = indexer.search(query, k=k)
+    items = indexer.search(query, k=max(k, 20))  # pedimos un poco más para rerank robusto
 
-    # Rerank si hay intención de agua/tinaco
+    # Rerank/filtrado si hay intención de agua/tinaco
     items = _rerank_for_water(query, items)
+
+    # Recortar a k tras re-rank/filtrado
+    items = items[:k] if k and isinstance(items, list) else items
 
     if not items:
         return jsonify({
@@ -260,7 +320,7 @@ def chat():
     return jsonify({"answer": answer, "products": cards})
 
 
-# --- Reindex en background ---
+# --- Reindex en background (sin cambios)
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True)
@@ -294,11 +354,7 @@ def admin_search():
     q = (request.args.get("q") or "").strip()
     k = int(request.args.get("k") or 12)
     items = indexer.search(q, k=k)
-    return jsonify({
-        "q": q,
-        "k": k,
-        "items": _plain_items(items),
-    })
+    return jsonify({"q": q, "k": k, "items": _plain_items(items)})
 
 
 @app.get("/api/admin/discards")
@@ -310,14 +366,11 @@ def admin_discards():
 
 @app.get("/api/admin/products")
 def admin_products():
-    """Pequeño viewer para muestrear productos crudos y depurar coincidencias."""
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-
     page = int(request.args.get("page") or 1)
     size = max(1, min(100, int(request.args.get("size") or 20)))
     filt = (request.args.get("f") or "").strip().lower()
-
     data = indexer.sample_products(page=page, size=size, q=filt)
     return jsonify(data)
 
@@ -326,10 +379,8 @@ def admin_products():
 def admin_diag():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-
     sqlite_path = os.getenv("SQLITE_PATH")
     db_dir = os.path.dirname(sqlite_path) if sqlite_path else None
-
     info = {
         "api_version": os.getenv("SHOPIFY_API_VERSION", "2024-10"),
         "shop": os.getenv("SHOPIFY_STORE_DOMAIN", os.getenv("SHOPIFY_SHOP", "")),
@@ -341,7 +392,6 @@ def admin_diag():
         "require_active": os.getenv("REQUIRE_ACTIVE", "1"),
         "token_present": bool(os.getenv("SHOPIFY_ACCESS_TOKEN") or os.getenv("SHOPIFY_TOKEN")),
     }
-
     probe = {"ok": True, "db_error": None}
     try:
         stats = indexer.stats()
@@ -349,12 +399,27 @@ def admin_diag():
     except Exception as e:
         probe["ok"] = False
         probe["db_error"] = str(e)
-
     info["probe"] = probe
     return jsonify(info)
 
 
-# --- Rutas de estáticos del widget ---
+# --- Vista de re-rank para depuración (opcional)
+@app.get("/api/admin/preview")
+def admin_preview():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    q = (request.args.get("q") or "").strip()
+    k = int(request.args.get("k") or 12)
+    raw = indexer.search(q, k=max(k, 30))
+    reranked = _rerank_for_water(q, raw)
+    return jsonify({
+        "q": q,
+        "raw_titles": [i.get("title") for i in raw[:k]],
+        "reranked_titles": [i.get("title") for i in reranked[:k]],
+    })
+
+
+# --- Estáticos del widget
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "..", "widget")
 
