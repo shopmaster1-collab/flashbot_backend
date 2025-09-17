@@ -30,12 +30,16 @@ indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.m
 CHAT_WRITER = (os.getenv("CHAT_WRITER") or "none").strip().lower()
 deeps = None
 if CHAT_WRITER == "deepseek" and DeepseekClient:
-    try: deeps = DeepseekClient()
-    except Exception: deeps = None
+    try:
+        deeps = DeepseekClient()
+    except Exception:
+        deeps = None
 
 # Construcción inicial del índice (no caer si falla)
-try: indexer.build()
-except Exception as e: print(f"[WARN] Index build failed at startup: {e}", flush=True)
+try:
+    indexer.build()
+except Exception as e:
+    print(f"[WARN] Index build failed at startup: {e}", flush=True)
 
 def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
@@ -56,7 +60,8 @@ def home():
             "</p>")
 
 @app.get("/health")
-def health(): return {"ok": True}
+def health():
+    return {"ok": True}
 
 # --------- util de patrones para la redacción ----------
 _PAT_ONE_BY_N = re.compile(r"\b(\d+)\s*[x×]\s*(\d+)\b", re.IGNORECASE)
@@ -138,7 +143,7 @@ _GAS_ALLOW_FAMILIES = [
 ]
 _GAS_ALLOW_KEYWORDS = ["gas","tanque","estacionario","estacionaria","lp","propano","butano","nivel","medidor","porcentaje","volumen"]
 
-# Blocklist GAS (evita EASY-ELECTRIC, PEST-KILLER y módulos)
+# Blocklist GAS (evita EASY-ELECTRIC, PEST-KILLER y módulos) + familias de agua
 _GAS_BLOCK = [
     "ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
     "arduino","módulo","modulo","module","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
@@ -151,9 +156,7 @@ _GAS_BLOCK = [
 
 def _concat_fields(it) -> str:
     """
-    IMPORTANTE: ahora también incluye 'body' (descripción) para que el re-rank
-    capture señales funcionales que suelen vivir en la descripción (Alexa, IP67, válvula, alarma, WiFi, etc.).
-    Se limita a los primeros ~1500 caracteres para evitar cadenas gigantes.
+    IMPORTANTE: incluye 'body' (descripción) para capturar señales como Alexa, IP67, válvula, alarma, WiFi, etc.
     """
     v = it.get("variant", {})
     body = (it.get("body") or "").lower()
@@ -166,7 +169,7 @@ def _concat_fields(it) -> str:
         it.get("vendor") or "",
         it.get("product_type") or "",
         v.get("sku") or "",
-        body,  # <- agregado
+        body,
     ]
     if isinstance(it.get("skus"), (list, tuple)):
         parts.extend([x for x in it["skus"] if x])
@@ -243,10 +246,11 @@ def _rerank_for_water(query: str, items: list):
         if want_valve:
             wv=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
             ordered=wv+others
-        else: ordered=positives
+        else:
+            ordered=positives
         return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
 
-    # Fallback suave
+    # Fallback suave: quedarnos con candidatos que contengan palabras de agua
     soft = []
     water_words = ["agua","tinaco","cisterna","nivel"]
     for idx,it in enumerate(items):
@@ -257,6 +261,7 @@ def _rerank_for_water(query: str, items: list):
         soft.sort(key=lambda x:x[0], reverse=True)
         return [it for (_score, it) in soft]
 
+    # Último recurso: reordenado general
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
 
@@ -284,17 +289,20 @@ def _rerank_for_gas(query: str, items: list):
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
         rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
+        # Positivo SOLO si pertenece a familia de gas
         if has_fam and score>=60 and not blocked: positives.append(rec)
 
+    # HARD FILTER si hay positivos -> solo familias de gas
     if positives:
         positives.sort(key=lambda x:x[0], reverse=True)
         if want_valve:
             vs=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
             ordered=vs+others
-        else: ordered=positives
+        else:
+            ordered=positives
         return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
 
-    # Fallback suave: candidatos con "gas" (y no bloqueados)
+    # Fallback suave: quedarnos con candidatos que contengan "gas" (y no bloqueados)
     soft = []
     for idx,it in enumerate(items):
         st=_concat_fields(it)
@@ -304,6 +312,7 @@ def _rerank_for_gas(query: str, items: list):
         soft.sort(key=lambda x:x[0], reverse=True)
         return [it for (_score, it) in soft]
 
+    # Último recurso: reordenado general
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
 
@@ -313,6 +322,34 @@ def _apply_intent_rerank(query: str, items: list):
     if intent=="gas":   return _rerank_for_gas(query, items)
     return items
 
+# --------- PUERTA FINAL (HARD GATE) CONTRA MEZCLAS ---------
+def _enforce_intent_gate(query: str, items: list):
+    """Filtra de forma estricta resultados de la otra categoría si la intención está clara."""
+    intent=_intent_from_query(query)
+    if not intent or not items:
+        return items
+
+    filtered=[]
+    for it in items:
+        st=_concat_fields(it)
+        if intent=="gas":
+            # excluye cualquier cosa que parezca agua
+            if any(fam in st for fam in _WATER_ALLOW_FAMILIES): 
+                continue
+            if any(w in st for w in _WATER_ALLOW_KEYWORDS):
+                continue
+        elif intent=="water":
+            # excluye cualquier cosa que parezca gas
+            if any(fam in st for fam in _GAS_ALLOW_FAMILIES):
+                continue
+            if "gas" in st or any(w in st for w in ["lp","propano","butano","estacionario","estacionaria"]):
+                continue
+        filtered.append(it)
+
+    # Si al filtrar nos quedamos sin nada, devolvemos los originales (mejor “algo” que “nada”)
+    return filtered or items
+
+# ----------------- Endpoints -----------------
 @app.post("/api/chat")
 def chat():
     data=request.get_json(force=True) or {}
@@ -324,6 +361,7 @@ def chat():
     # Pedimos más candidatos para rerank robusto, luego recortamos
     items=indexer.search(query, k=max(k,90))
     items=_apply_intent_rerank(query, items)
+    items=_enforce_intent_gate(query, items)  # <- NUEVO: puerta final anti-mezcla
     items=items[:k] if k and isinstance(items,list) else items
 
     if not items:
@@ -362,61 +400,42 @@ def admin_stats():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.stats()
 
-@app.get("/api/admin/search")
-def admin_search():
-    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
-    items=indexer.search(q, k=k); return jsonify({"q":q,"k":k,"items":_plain_items(items)})
-
-@app.get("/api/admin/discards")
-def admin_discards():
-    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    return jsonify(indexer.discards())
-
-@app.get("/api/admin/products")
-def admin_products():
-    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    page=int(request.args.get("page") or 1)
-    size=max(1,min(100,int(request.args.get("size") or 20)))
-    filt=(request.args.get("f") or "").strip().lower()
-    data=indexer.sample_products(page=page, size=size, q=filt); return jsonify(data)
-
 @app.get("/api/admin/diag")
 def admin_diag():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    sqlite_path=os.getenv("SQLITE_PATH"); db_dir=os.path.dirname(sqlite_path) if sqlite_path else None
-    info={"api_version":os.getenv("SHOPIFY_API_VERSION","2024-10"),
-          "shop":os.getenv("SHOPIFY_STORE_DOMAIN",os.getenv("SHOPIFY_SHOP","")),
-          "sqlite_path":sqlite_path or "(default)",
-          "db_dir_exists":bool(db_dir and os.path.isdir(db_dir)),
-          "db_dir_writable":bool(db_dir and os.path.isdir(db_dir) and os.access(db_dir, os.W_OK)),
-          "db_file_exists":bool(sqlite_path and os.path.isfile(sqlite_path)),
-          "force_rest":os.getenv("FORCE_REST","0")=="1",
-          "require_active":os.getenv("REQUIRE_ACTIVE","1"),
-          "token_present":bool(os.getenv("SHOPIFY_ACCESS_TOKEN") or os.getenv("SHOPIFY_TOKEN"))}
-    probe={"ok":True,"db_error":None}
-    try:
-        stats=indexer.stats(); probe["sample_count"]=stats.get("products",0)
-    except Exception as e:
-        probe["ok"]=False; probe["db_error"]=str(e)
-    info["probe"]=probe; return jsonify(info)
+    return {
+        "ok": True,
+        "env": {
+            "STORE_BASE_URL": os.getenv("STORE_BASE_URL"),
+            "FORCE_REST": os.getenv("FORCE_REST"),
+            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE"),
+            "CHAT_WRITER": CHAT_WRITER,
+        }
+    }
 
-# Vista de re-rank (diagnóstico)
 @app.get("/api/admin/preview")
 def admin_preview():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
-    raw=indexer.search(q, k=max(k,90)); reranked=_apply_intent_rerank(q, raw)
-    return jsonify({"q":q, "raw_titles":[i.get("title") for i in raw[:k]],
-                    "reranked_titles":[i.get("title") for i in reranked[:k]]})
+    items=indexer.search(q, k=max(k,90))
+    items=_apply_intent_rerank(q, items)
+    items=_enforce_intent_gate(q, items)
+    items=items[:k]
+    return {"q": q, "k": k, "items": _plain_items(items)}
 
-# Estáticos del widget
-BASE_DIR=os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR=os.path.join(BASE_DIR,"..","widget")
-@app.get("/static/<path:fname>")
-def static_files(fname): return send_from_directory(STATIC_DIR, fname)
-@app.get("/widget/<path:fname>")
-def widget_files(fname): return send_from_directory(STATIC_DIR, fname)
+@app.get("/api/admin/search")
+def admin_search():
+    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
+    items=indexer.search(q, k=max(k,90))
+    return {"q": q, "k": k, "items": _plain_items(items)}
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+@app.get("/api/admin/products")
+def admin_products():
+    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    return {"items": indexer.sample_products(20)}
+
+@app.get("/api/admin/discards")
+def admin_discards():
+    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
+    return indexer.discard_stats()
