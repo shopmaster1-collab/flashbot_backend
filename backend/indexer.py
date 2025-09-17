@@ -11,6 +11,8 @@ Variables de entorno relevantes:
 - SHOPIFY_API_VERSION        (default 2024-10)
 - SQLITE_PATH                (p.ej. /data/catalog.db)
 - FORCE_REST=1               (opcional; fuerza camino REST paginado)
+- TAXONOMY_CSV_PATH          (opcional; ruta a CSV con columnas:
+                              categoria_principal, subcategoria, url, palabras_clave_sinonimos)
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import csv
 import time
 import sqlite3
 import unicodedata
@@ -177,6 +180,38 @@ class CatalogIndexer:
         except Exception:
             self._rest_fallback = None
 
+        # -------- Taxonomía (opcional, no rompe nada si no existe) --------
+        self._taxonomy_rows: List[Dict[str, str]] = []
+        self._taxonomy_terms: List[str] = []
+        self._taxonomy_map: List[Dict[str, Any]] = []
+        self._load_taxonomy()
+
+        # --------- Señales / familias (gas/agua) existentes ---------
+        self._WATER_ALLOW_FAMILIES = [
+            "iot-waterv","iot-waterultra","iot-waterp","iot-water",
+            "easy-waterultra","easy-water","iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water",
+        ]
+        self._WATER_ALLOW_KEYWORDS = ["tinaco","cisterna","nivel","agua"]
+        self._WATER_BLOCK = ["bm-carsensor","carsensor","car","auto","vehiculo","vehículo",
+                            "ar-rain","rain","lluvia","ar-gasc","gasc"," gas","co2","humo","smoke",
+                            "ar-knock","knock","golpe"]
+
+        self._GAS_ALLOW_FAMILIES = [
+            "iot-gassensorv","iot-gassensor","connect-gas","easy-gas",
+            "iot gassensorv","iot gassensor","connect gas","easy gas",
+        ]
+        self._GAS_ALLOW_KEYWORDS = ["gas","tanque","estacionario","estacionaria","lp","propano","butano","nivel","medidor","porcentaje","volumen"]
+
+        self._GAS_BLOCK = [
+            "ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
+            "arduino","módulo","modulo","module","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
+            "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
+            "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
+            "kwh","kw/h","consumo","tarifa","electric meter","medidor de consumo","contador",
+            "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
+            "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra"," water "
+        ]
+
     # ---------- conexiones ----------
     def _conn_rw(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -251,6 +286,79 @@ class CatalogIndexer:
                 ],
             })
         return out
+
+    # ---------- Taxonomía ----------
+    def _load_taxonomy(self) -> None:
+        """
+        Carga CSV de taxonomía si existe. Seguro/no intrusivo:
+        - Si no hay archivo, no afecta el comportamiento.
+        - Deriva un set de términos y un mapa por fila para expansión/boost.
+        """
+        # heurísticas de ruta
+        paths = []
+        env_path = (os.getenv("TAXONOMY_CSV_PATH") or "").strip()
+        if env_path:
+            paths.append(env_path)
+        # ubicaciones comunes en contenedores/Render y notebook
+        paths += [
+            "/mnt/data/taxonomia_master_com_mx.csv",
+            "/data/taxonomia_master_com_mx.csv",
+            os.path.join(DATA_DIR, "taxonomy.csv"),
+        ]
+
+        path = next((p for p in paths if p and os.path.exists(p)), None)
+        if not path:
+            self._taxonomy_rows = []
+            self._taxonomy_terms = []
+            self._taxonomy_map = []
+            return
+
+        rows: List[Dict[str, str]] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    rows.append({
+                        "categoria": (r.get("categoria_principal") or "").strip(),
+                        "subcategoria": (r.get("subcategoria") or "").strip(),
+                        "url": (r.get("url") or "").strip(),
+                        "syn": (r.get("palabras_clave_sinonimos") or "").strip(),
+                    })
+        except Exception:
+            rows = []
+
+        self._taxonomy_rows = rows
+        terms: List[str] = []
+        mapped: List[Dict[str, Any]] = []
+        for r in rows:
+            cat = _norm(r["categoria"])
+            sub = _norm(r["subcategoria"])
+            syn = [t.strip() for t in re.split(r"[,\|;/]", r["syn"]) if t.strip()]
+            syn_norm = [_norm(t) for t in syn if _norm(t)]
+            # tokens base que representan categoría/tipo
+            base_tokens = [t for t in [cat, sub] if t]
+            terms.extend([t for t in base_tokens + syn_norm if t])
+            mapped.append({
+                "cat": cat,
+                "sub": sub,
+                "url": r["url"],
+                "syn": syn_norm,
+                "all": list({t for t in (base_tokens + syn_norm) if t}),
+            })
+        # dedup
+        seen=set(); uniq=[]
+        for t in terms:
+            if t not in seen:
+                seen.add(t); uniq.append(t)
+        self._taxonomy_terms = uniq
+        self._taxonomy_map = mapped
+
+    def taxonomy_meta(self) -> Dict[str, Any]:
+        return {
+            "rows": len(self._taxonomy_rows),
+            "terms": self._taxonomy_terms[:200],  # limitar preview
+            "examples": self._taxonomy_map[:5],
+        }
 
     # ---------- fetch productos ----------
     def _fetch_all_active(self, limit: int = 250) -> List[Dict[str, Any]]:
@@ -337,7 +445,7 @@ class CatalogIndexer:
         """)
         conn.commit()
 
-        # FTS ampliado (incluye handle, vendor, product_type) — permite "leer" más señales
+        # FTS ampliado (incluye handle, vendor, product_type)
         try:
             cur.execute("""
                 CREATE VIRTUAL TABLE products_fts
@@ -511,6 +619,17 @@ class CatalogIndexer:
         conn.close()
         return rows
 
+    # ---------- intención (gas/agua) ----------
+    def _intent_from_query(self, q: str):
+        ql = (q or "").lower()
+        gas_hard = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]
+        if any(w in ql for w in gas_hard):
+            return "gas"
+        water_hard = ["agua", "tinaco", "cisterna", "inundacion", "inundación", "boya", "flotador"]
+        if any(w in ql for w in water_hard):
+            return "water"
+        return None
+
     # ---------- búsqueda ecommerce-aware ----------
     def search(self, query: str, k: int = 6) -> List[Dict[str, Any]]:
         if not query:
@@ -542,7 +661,7 @@ class CatalogIndexer:
             "splitter": ["divisor","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
             "switch": ["conmutador","selector"],
             # antenas
-            "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
+            "antena": ["tv","uhf","vhf","aerea","aérea","digital","hd"],
             # controles
             "control": ["remoto","remote"],
             "remoto": ["control","remote"],
@@ -559,8 +678,7 @@ class CatalogIndexer:
             # agua / nivel
             "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
 
-            # ---------------- GAS (nuevo bloque de sinónimos específicos) ----------------
-            # Mejora búsquedas tipo: "sensor de gas para tanque estacionario con válvula, Alexa, IP67"
+            # ---------------- GAS (sinónimos específicos) ----------------
             "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen"],
             "tanque": ["estacionario","estacionaria","gas","lp"],
             "estacionario": ["tanque","gas","lp"],
@@ -572,7 +690,7 @@ class CatalogIndexer:
             "display": ["pantalla"],
             "monoxido": ["monóxido","co","co-"],
             "monóxido": ["monoxido","co","co-"],
-            # -------------------------------------------------------------------------------
+            # ----------------------------------------------------------------
             # energía y básicos
             "pila": ["bateria","batería","aa","aaa","18650","9v"],
             "cargador": ["charger","fuente","eliminador","adaptador","power"],
@@ -581,14 +699,40 @@ class CatalogIndexer:
             "conector": ["terminal","plug","jack"],
         }
 
-        # combos que definen intención (gran boost si ambos lados aparecen)
+        # ---- Inyección de sinónimos desde taxonomía (opcional) ----
+        # Si la query toca términos de una fila, agregamos ese set local de sinónimos.
+        def taxonomy_expand(tokens: List[str]) -> Tuple[List[str], List[str]]:
+            if not self._taxonomy_map:
+                return tokens, []
+            tokset = set(tokens)
+            extra: List[str] = []
+            matched_labels: List[str] = []
+            for row in self._taxonomy_map:
+                all_terms = set(row["all"])
+                if tokset & all_terms:
+                    # si coincide cualquier término, agregamos el resto
+                    for t in row["all"]:
+                        if t not in tokset:
+                            extra.append(t)
+                    lbl = row["sub"] or row["cat"]
+                    if lbl:
+                        matched_labels.append(lbl)
+            if not extra:
+                return tokens, matched_labels
+            # dedup
+            seen=set(tokens); out=list(tokens)
+            for e in extra:
+                if e not in seen:
+                    out.append(e); seen.add(e)
+            return out, matched_labels
+
+        # combos que definen intención
         COMBOS = [
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
             ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
             ({"sensor","detector","sonda"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
-
-            # ---------- NUEVO: combo para intención "sensor/medidor de gas (tanque estacionario/LP)" ----------
+            # gas
             ({"sensor","detector","medidor"}, {"gas","tanque","estacionario","estacionaria","lp"}, 45),
         ]
 
@@ -596,11 +740,11 @@ class CatalogIndexer:
         raw_terms = [t for t in re.findall(r"[\w]+", q_norm, re.UNICODE)]
         base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
 
-        # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
+        # detectar patrones 1xN (1x4, etc.)
         m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
         if m_q:
             base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("×", "x"))
-        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None  # matriz pedida en la consulta
+        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None
 
         seen = set()
         expanded: List[str] = []
@@ -611,6 +755,9 @@ class CatalogIndexer:
                 s_n = _norm(s)
                 if s_n not in seen:
                     expanded.append(s_n); seen.add(s_n)
+
+        # expansión por taxonomía
+        expanded, matched_tax_labels = taxonomy_expand(expanded)
 
         clean_terms = expanded[:12] if expanded else []
 
@@ -630,7 +777,7 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # FTS5 (OR + NEAR entre primeros 2 términos si existen) — índice incluye handle/vendor/product_type
+        # FTS5
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
@@ -649,176 +796,4 @@ class CatalogIndexer:
             where_parts, params = [], []
             for t in clean_terms:
                 like = f"%{t}%"
-                where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
-                params.extend([like, like, like, like])
-            sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
-            params.append(k * 10)
-            try:
-                like_rows = list(cur.execute(sql, tuple(params)))
-                ids.extend([int(r["id"]) for r in like_rows])
-            except Exception:
-                pass
-
-        # únicos
-        uniq_ids: List[int] = []
-        seen2 = set()
-        for i in ids:
-            if i not in seen2:
-                seen2.add(i)
-                uniq_ids.append(i)
-
-        # candidatos (cargar filas y variantes)
-        candidates: List[Dict[str, Any]] = []
-        for pid in uniq_ids:
-            p = cur.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
-            if not p:
-                continue
-            vars_ = list(cur.execute("SELECT * FROM variants WHERE product_id=?", (pid,)))
-            if not vars_:
-                continue
-            v_infos: List[Dict[str, Any]] = []
-            for v in vars_:
-                inv = list(cur.execute("SELECT location_name, available FROM inventory WHERE variant_id=?", (v["id"],)))
-                v_infos.append({
-                    "variant_id": v["id"],
-                    "sku": (v.get("sku") or None),
-                    "price": v["price"],
-                    "compare_at_price": v.get("compare_at_price"),
-                    "inventory": [{"name": x["location_name"], "available": int(x["available"])} for x in inv],
-                })
-            if not v_infos:
-                continue
-            # elegir variante con más stock
-            v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
-            best = v_infos[0]
-
-            candidates.append({
-                "id": p["id"],
-                "title": p["title"] or "",
-                "handle": p.get("handle") or "",
-                "image": p.get("image"),
-                "body": p.get("body") or "",
-                "tags": p.get("tags") or "",
-                "vendor": p.get("vendor") or "",
-                "product_type": p.get("product_type") or "",
-                "variant": best,
-                "skus": [x.get("sku") for x in v_infos if x.get("sku")],
-            })
-
-        # --- Filtro contextual ligero por combos (HDMI/Divisor, etc.) ---
-        def strong_text(it: Dict[str, Any]) -> str:
-            return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
-
-        if candidates and combo_hits:
-            subset: List[Dict[str, Any]] = []
-            for it in candidates:
-                st = strong_text(it)
-                ok_any = False
-                for A, B, _ in combo_hits:
-                    if any(a in st for a in A) and any(b in st for b in B):
-                        ok_any = True
-                        break
-                if ok_any:
-                    subset.append(it)
-            if subset:
-                candidates = subset
-
-        # ---- Re-ranking por relevancia con priorización de matriz exacta ----
-        def hits(text: str, term: str) -> int:
-            t = _norm(text)
-            return t.count(term)
-
-        def _has_matrix(text_norm: str, mx: str) -> bool:
-            return (mx in text_norm) or (mx.replace("x", "×") in text_norm)
-
-        def score_item(it: Dict[str, Any]) -> int:
-            ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
-            vendor = it["vendor"]; ptype = it["product_type"]
-            s = 0
-            for t in clean_terms:
-                s += 7 * hits(ttl, t)
-                s += 5 * hits(hdl, t)
-                s += 3 * hits(tgs, t)
-                s += 2 * hits(ptype, t)
-                s += 1 * hits(vendor, t)
-                s += 3 * hits(bdy, t)  # BODY pesa más para captar Alexa/IP67/válvula/alarma/WiFi
-
-            # Combos (gran boost)
-            st = strong_text(it)
-            for A, B, bonus in combo_hits:
-                if any(a in st for a in A) and any(b in st for b in B):
-                    s += bonus
-
-            # Inicio de título con primer término
-            if clean_terms:
-                first = clean_terms[0]
-                if _norm(ttl).startswith(first):
-                    s += 6
-
-            # Boost por SKU si aparece exacto en la consulta
-            q_tokens = set(clean_terms)
-            sku_set = {_norm(sk) for sk in (it["skus"] or [])}
-            if q_tokens & sku_set:
-                s += 25
-
-            # Boost por stock (cap)
-            stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
-            if stock > 0:
-                s += min(stock, 20)
-
-            # --- Priorizar matriz exacta solicitada y penalizar matrices diferentes ---
-            if q_matrix:
-                st_full = _norm(it["title"] + " " + it["handle"] + " " + it["tags"])
-                if _has_matrix(st_full, q_matrix):
-                    s += 60  # fuerte boost si coincide la matriz pedida (p. ej., 1x4)
-                else:
-                    other = re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
-                    for a, b in other:
-                        mx = f"{a}x{b}"
-                        if mx != q_matrix:
-                            s -= 12  # leve penalización si menciona otra matriz
-                            break
-
-            return s
-
-        candidates.sort(key=score_item, reverse=True)
-
-        # Armar resultado final con URLs
-        results: List[Dict[str, Any]] = []
-        for it in candidates[:max(k, 12)]:
-            v = it["variant"]
-            product_url = f"{self.store_base_url}/products/{it['handle']}" if it["handle"] else self.store_base_url
-            buy_url = f"{self.store_base_url}/cart/{v['variant_id']}:1"
-            results.append({
-                "id": it["id"],
-                "title": it["title"],
-                "handle": it["handle"],
-                "image": it["image"],
-                "body": it["body"],
-                "tags": it["tags"],
-                "vendor": it["vendor"],
-                "product_type": it["product_type"],
-                "product_url": product_url,
-                "buy_url": buy_url,
-                "variant": v,
-            })
-
-        conn.close()
-        return results[:k]
-
-    # ---------- util para LLM ----------
-    def mini_catalog_json(self, items: List[Dict[str, Any]]) -> str:
-        out = []
-        for it in items:
-            v = it["variant"]
-            out.append({
-                "title": it["title"],
-                "price": v["price"],
-                "sku": v.get("sku"),
-                "compare_at_price": v.get("compare_at_price"),
-                "product_url": it["product_url"],
-                "buy_url": it["buy_url"],
-                "stock_total": sum(x["available"] for x in v["inventory"]) if v["inventory"] else 0,
-                "image": it["image"],
-            })
-        return json.dumps(out, ensure_ascii=False)
+                where
