@@ -337,7 +337,7 @@ class CatalogIndexer:
         """)
         conn.commit()
 
-        # FTS ampliado (ahora incluye handle, vendor, product_type)
+        # FTS ampliado (incluye handle, vendor, product_type) — permite "leer" más señales
         try:
             cur.execute("""
                 CREATE VIRTUAL TABLE products_fts
@@ -497,6 +497,10 @@ class CatalogIndexer:
         by_reason = [{"reason": k, "count": v} for k, v in sorted(self._discards_count.items(), key=lambda x: -x[1])]
         return {"ok": True, "by_reason": by_reason, "sample": self._discards_sample}
 
+    # [Compat] algunos endpoints llaman indexer.discards()
+    def discards(self) -> Dict[str, Any]:
+        return self.discard_stats()
+
     def sample_products(self, limit: int = 10) -> List[Dict[str, Any]]:
         conn = self._conn_read()
         cur = conn.cursor()
@@ -554,6 +558,21 @@ class CatalogIndexer:
             "movimiento": ["pir"],
             # agua / nivel
             "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
+
+            # ---------------- GAS (nuevo bloque de sinónimos específicos) ----------------
+            # Mejora búsquedas tipo: "sensor de gas para tanque estacionario con válvula, Alexa, IP67"
+            "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen"],
+            "tanque": ["estacionario","estacionaria","gas","lp"],
+            "estacionario": ["tanque","gas","lp"],
+            "estacionaria": ["tanque","gas","lp"],
+            "valvula": ["válvula","electrovalvula","electroválvula"],
+            "válvula": ["valvula","electrovalvula","electroválvula"],
+            "alexa": ["voz","amazon alexa","asistente"],
+            "pantalla": ["display"],
+            "display": ["pantalla"],
+            "monoxido": ["monóxido","co","co-"],
+            "monóxido": ["monoxido","co","co-"],
+            # -------------------------------------------------------------------------------
             # energía y básicos
             "pila": ["bateria","batería","aa","aaa","18650","9v"],
             "cargador": ["charger","fuente","eliminador","adaptador","power"],
@@ -568,6 +587,9 @@ class CatalogIndexer:
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
             ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
             ({"sensor","detector","sonda"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
+
+            # ---------- NUEVO: combo para intención "sensor/medidor de gas (tanque estacionario/LP)" ----------
+            ({"sensor","detector","medidor"}, {"gas","tanque","estacionario","estacionaria","lp"}, 45),
         ]
 
         # extraer tokens y expandir sinónimos
@@ -608,7 +630,7 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # FTS5 (OR + NEAR entre primeros 2 términos si existen) — ahora el índice incluye handle/vendor/product_type
+        # FTS5 (OR + NEAR entre primeros 2 términos si existen) — índice incluye handle/vendor/product_type
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
@@ -683,7 +705,7 @@ class CatalogIndexer:
                 "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
 
-        # --- Filtro contextual ligero: si combo HDMi+Divisor, prioriza los que mencionan hdmi+1xN/divisor en campos fuertes ---
+        # --- Filtro contextual ligero por combos (HDMI/Divisor, etc.) ---
         def strong_text(it: Dict[str, Any]) -> str:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
@@ -719,7 +741,7 @@ class CatalogIndexer:
                 s += 3 * hits(tgs, t)
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
-                s += 3 * hits(bdy, t)  # ← SUBIMOS el peso de BODY de 1 → 3
+                s += 3 * hits(bdy, t)  # BODY pesa más para captar Alexa/IP67/válvula/alarma/WiFi
 
             # Combos (gran boost)
             st = strong_text(it)
