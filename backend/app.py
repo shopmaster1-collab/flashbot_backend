@@ -334,7 +334,7 @@ def _enforce_intent_gate(query: str, items: list):
         st=_concat_fields(it)
         if intent=="gas":
             # excluye cualquier cosa que parezca agua
-            if any(fam in st for fam in _WATER_ALLOW_FAMILIES): 
+            if any(fam in st for fam in _WATER_ALLOW_FAMILIES):
                 continue
             if any(w in st for w in _WATER_ALLOW_KEYWORDS):
                 continue
@@ -361,7 +361,7 @@ def chat():
     # Pedimos más candidatos para rerank robusto, luego recortamos
     items=indexer.search(query, k=max(k,90))
     items=_apply_intent_rerank(query, items)
-    items=_enforce_intent_gate(query, items)  # <- NUEVO: puerta final anti-mezcla
+    items=_enforce_intent_gate(query, items)  # <- PUERTA FINAL
     items=items[:k] if k and isinstance(items,list) else items
 
     if not items:
@@ -382,7 +382,7 @@ def chat():
         answer=base_answer
     return jsonify({"answer":answer, "products":cards})
 
-# --- Reindex background (sin cambios)
+# --- Reindex background
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True); indexer.build()
