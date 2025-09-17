@@ -250,7 +250,7 @@ def _rerank_for_water(query: str, items: list):
             ordered=positives
         return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
 
-    # Fallback suave: quedarnos con candidatos que contengan palabras de agua
+    # Fallback suave
     soft = []
     water_words = ["agua","tinaco","cisterna","nivel"]
     for idx,it in enumerate(items):
@@ -261,7 +261,7 @@ def _rerank_for_water(query: str, items: list):
         soft.sort(key=lambda x:x[0], reverse=True)
         return [it for (_score, it) in soft]
 
-    # Último recurso: reordenado general
+    # Último recurso
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
 
@@ -289,7 +289,6 @@ def _rerank_for_gas(query: str, items: list):
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
         rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
-        # Positivo SOLO si pertenece a familia de gas
         if has_fam and score>=60 and not blocked: positives.append(rec)
 
     # HARD FILTER si hay positivos -> solo familias de gas
@@ -302,7 +301,7 @@ def _rerank_for_gas(query: str, items: list):
             ordered=positives
         return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
 
-    # Fallback suave: quedarnos con candidatos que contengan "gas" (y no bloqueados)
+    # Fallback suave
     soft = []
     for idx,it in enumerate(items):
         st=_concat_fields(it)
@@ -312,7 +311,7 @@ def _rerank_for_gas(query: str, items: list):
         soft.sort(key=lambda x:x[0], reverse=True)
         return [it for (_score, it) in soft]
 
-    # Último recurso: reordenado general
+    # Último recurso
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
 
@@ -333,20 +332,17 @@ def _enforce_intent_gate(query: str, items: list):
     for it in items:
         st=_concat_fields(it)
         if intent=="gas":
-            # excluye cualquier cosa que parezca agua
-            if any(fam in st for fam in _WATER_ALLOW_FAMILIES):
+            if any(fam in st for fam in _WATER_ALLOW_FAMILIES): 
                 continue
             if any(w in st for w in _WATER_ALLOW_KEYWORDS):
                 continue
         elif intent=="water":
-            # excluye cualquier cosa que parezca gas
             if any(fam in st for fam in _GAS_ALLOW_FAMILIES):
                 continue
             if "gas" in st or any(w in st for w in ["lp","propano","butano","estacionario","estacionaria"]):
                 continue
         filtered.append(it)
 
-    # Si al filtrar nos quedamos sin nada, devolvemos los originales (mejor “algo” que “nada”)
     return filtered or items
 
 # ----------------- Endpoints -----------------
@@ -358,10 +354,9 @@ def chat():
     if not query:
         return jsonify({"answer":"¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.","products":[]})
 
-    # Pedimos más candidatos para rerank robusto, luego recortamos
     items=indexer.search(query, k=max(k,90))
     items=_apply_intent_rerank(query, items)
-    items=_enforce_intent_gate(query, items)  # <- PUERTA FINAL
+    items=_enforce_intent_gate(query, items)
     items=items[:k] if k and isinstance(items,list) else items
 
     if not items:
@@ -439,3 +434,10 @@ def admin_products():
 def admin_discards():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.discard_stats()
+
+# --------- MAIN: arrancar el servidor en Render ---------
+if __name__ == "__main__":
+    # Render expone PORT; por defecto usamos 10000 para locales.
+    port = int(os.getenv("PORT", "10000"))
+    # host=0.0.0.0 para aceptar tráfico externo en Render
+    app.run(host="0.0.0.0", port=port)
