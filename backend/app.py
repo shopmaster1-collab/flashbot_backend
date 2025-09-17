@@ -74,7 +74,7 @@ def _detect_patterns(q: str) -> dict:
     cats = [k for k in ["hdmi","rca","coaxial","antena","soporte","control","cctv","vga","usb"] if k in ql]
     if cats: pat["cats"] = cats
     if any(w in ql for w in ["agua","nivel","cisterna","tinaco","boya","inundacion","inundación"]): pat["water"]=True
-    if ("gas" in ql) or any(w in ql for w in ["tanque","estacionario","estacionaria","lp","propano","butano","medidor","nivel"]): pat["gas"]=True
+    if ("gas" in ql) or any(w in ql for w in ["tanque","estacionario","estacionaria","lp","propano","butano"]): pat["gas"]=True
     if any(w in ql for w in ["valvula","válvula"]): pat["valve"]=True
     if any(w in ql for w in ["ultra","ultrason","ultrasónico","ultrasonico"]): pat["ultra"]=True
     if any(w in ql for w in ["presion","presión"]): pat["pressure"]=True
@@ -175,12 +175,24 @@ def _concat_fields(it) -> str:
         parts.extend([x for x in it["skus"] if x])
     return " ".join(parts).lower()
 
+# ---------- INTENCIÓN (estricta y no ambigua) ----------
 def _intent_from_query(q: str):
-    ql=(q or "").lower()
-    if any(w in ql for w in _WATER_ALLOW_KEYWORDS):
-        if "gas" not in ql: return "water"
-    if ("gas" in ql) or any(w in ql for w in ["tanque","estacionario","lp","propano","butano","medidor","nivel"]):
+    """
+    Regla clara:
+    - Si menciona 'gas' o señales inequívocas de gas (tanque, estacionario/a, lp, propano, butano) => 'gas'
+    - Si NO menciona 'gas' y sí menciona agua/tinaco/cisterna/inundación/boya/flotador => 'water'
+    - 'nivel' o 'medidor' NO determinan la intención por sí solos (son ambiguos).
+    """
+    ql = (q or "").lower()
+
+    gas_hard = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]
+    if any(w in ql for w in gas_hard):
         return "gas"
+
+    water_hard = ["agua", "tinaco", "cisterna", "inundacion", "inundación", "boya", "flotador"]
+    if any(w in ql for w in water_hard):
+        return "water"
+
     return None
 
 def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple[int, bool]:
@@ -289,6 +301,7 @@ def _rerank_for_gas(query: str, items: list):
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
         rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
+        # Positivo SOLO si pertenece a familia de gas
         if has_fam and score>=60 and not blocked: positives.append(rec)
 
     # HARD FILTER si hay positivos -> solo familias de gas
@@ -332,7 +345,7 @@ def _enforce_intent_gate(query: str, items: list):
     for it in items:
         st=_concat_fields(it)
         if intent=="gas":
-            if any(fam in st for fam in _WATER_ALLOW_FAMILIES): 
+            if any(fam in st for fam in _WATER_ALLOW_FAMILIES):
                 continue
             if any(w in st for w in _WATER_ALLOW_KEYWORDS):
                 continue
@@ -354,6 +367,7 @@ def chat():
     if not query:
         return jsonify({"answer":"¿Qué producto buscas? Puedo ayudarte con soportes, antenas, controles, cables, sensores y más.","products":[]})
 
+    # Pedimos más candidatos para rerank robusto, luego recortamos
     items=indexer.search(query, k=max(k,90))
     items=_apply_intent_rerank(query, items)
     items=_enforce_intent_gate(query, items)
