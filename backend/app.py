@@ -433,9 +433,9 @@ def _rerank_for_gas(query: str, items: list):
         base=max(0,30-idx)
         score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
         
-        # BOOST MASIVO para productos que contengan "gas"
-        if "gas" in st:
-            score += 300  # Boost masivo para cualquier cosa con "gas"
+        # BOOST MASIVO para productos que contengan "gas" pero NO "agua"
+        if "gas" in st and not any(water_word in st for water_word in ["agua", "tinaco", "cisterna", "water"]):
+            score += 300  # Boost masivo solo para productos genuinos de gas
         
         # Boost adicional para handles específicos encontrados
         gas_handles = [
@@ -533,24 +533,45 @@ def _apply_intent_rerank(query: str, items: list):
     if intent=="gas":   return _rerank_for_gas(query, items)
     return items
 
-# --------- PUERTA FINAL ELIMINADA para gas ----------
+# --------- PUERTA FINAL MEJORADA (QUIRÚRGICA) ----------
 def _enforce_intent_gate(query: str, items: list):
-    """DESHABILITADO para gas - no filtrar nada si es búsqueda de gas."""
+    """Filtra productos de categorías incorrectas con precisión quirúrgica."""
     intent=_intent_from_query(query)
-    if intent == "gas":
-        # Para gas, NO filtrar nada - devolver todos los items
-        return items
-    
     if not intent or not items:
         return items
 
     filtered=[]
     for it in items:
         st=_concat_fields(it)
-        if intent=="water":
-            # Solo filtrar productos evidentemente de gas para water
-            if any(w in st for w in ["propano","butano","lp gas","tanque estacionario gas"]):
+        title = (it.get("title") or "").lower()
+        handle = (it.get("handle") or "").lower()
+        
+        if intent=="gas":
+            # FILTRAR productos evidentemente de AGUA cuando se busca GAS
+            water_indicators = [
+                "tinaco", "cisterna", "inundacion", "inundación", "flotador", "boya",
+                "nivel de agua", "agua para", "water para", "tinacos y cisternas",
+                "iot-waterv", "iot-waterp", "iot-water", "easy-water", "connect-water"
+            ]
+            
+            # Si es claramente un producto de agua, filtrar
+            if any(indicator in st for indicator in water_indicators):
+                # Excepción: si también menciona gas explícitamente, mantener
+                if not any(gas_word in st for gas_word in ["gas", "propano", "butano", "lp", "estacionario"]):
+                    continue
+            
+        elif intent=="water":
+            # FILTRAR productos evidentemente de GAS cuando se busca AGUA
+            gas_indicators = [
+                "gas", "propano", "butano", "lp", "estacionario", "estacionaria",
+                "gassensor", "gas-sensor", "tanque estacionario",
+                "iot-gassensor", "easy-gas", "connect-gas"
+            ]
+            
+            # Si es claramente un producto de gas, filtrar
+            if any(indicator in st for indicator in gas_indicators):
                 continue
+        
         filtered.append(it)
 
     return filtered or items
