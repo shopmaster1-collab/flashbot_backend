@@ -544,10 +544,8 @@ class CatalogIndexer:
             # antenas
             "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
             # controles
-            "control": ["remoto","remote","universal"],
-            "remoto": ["control","remote","universal"],
-            "decodificador": ["decoder","set top box","stb","sky","izzi","totalplay","megacable","cablecom"],
-            "universal": ["multi","8 en 1","8en1","8-in-1","8in1"],
+            "control": ["remoto","remote"],
+            "remoto": ["control","remote"],
             # cámaras / seguridad
             "camara": ["cámara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
             "cámara": ["camara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
@@ -556,23 +554,26 @@ class CatalogIndexer:
             "microfono": ["micrófono","mic","micro"],
             "amplificador": ["ampli","amp"],
             # sensores comunes
-            "sensor": ["detector","sonda","modulo","módulo"],
+            "sensor": ["detector","sonda","modulo","módulo","medidor"],
+            "detector": ["sensor","sonda","medidor"],
+            "medidor": ["sensor","detector","monitor","monitore"],
             "movimiento": ["pir"],
             # agua / nivel
             "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
 
-            # GAS (sinónimos específicos)
-            "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen"],
-            "tanque": ["estacionario","estacionaria","gas","lp"],
-            "estacionario": ["tanque","gas","lp"],
-            "estacionaria": ["tanque","gas","lp"],
-            "valvula": ["válvula","electrovalvula","electroválvula"],
-            "válvula": ["valvula","electrovalvula","electroválvula"],
-            "alexa": ["voz","amazon alexa","asistente"],
-            "pantalla": ["display"],
-            "display": ["pantalla"],
+            # ---------------- GAS (mejorado) ----------------
+            "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen","gassensor","gas-sensor"],
+            "tanque": ["estacionario","estacionaria","gas","lp","deposito","depósito"],
+            "estacionario": ["tanque","gas","lp","fijo"],
+            "estacionaria": ["tanque","gas","lp","fija"],
+            "valvula": ["válvula","electrovalvula","electrovÃ¡lvula","valve"],
+            "válvula": ["valvula","electrovalvula","electrovÃ¡lvula","valve"],
+            "alexa": ["voz","amazon alexa","asistente","voice"],
+            "pantalla": ["display","lcd","led"],
+            "display": ["pantalla","lcd","screen"],
             "monoxido": ["monóxido","co","co-"],
             "monóxido": ["monoxido","co","co-"],
+            # -------------------------------------------------------------------------------
             # energía y básicos
             "pila": ["bateria","batería","aa","aaa","18650","9v"],
             "cargador": ["charger","fuente","eliminador","adaptador","power"],
@@ -586,10 +587,12 @@ class CatalogIndexer:
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
             ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
-            ({"sensor","detector","sonda"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
-            ({"sensor","detector","medidor"}, {"gas","tanque","estacionario","estacionaria","lp"}, 45),
-            # NUEVO: controles para decodificador/TV
-            ({"control","remoto","universal"}, {"decodificador","tv","pantalla","sky","izzi","totalplay","megacable"}, 45),
+            ({"sensor","detector","sonda","medidor"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
+
+            # ---------- COMBOS DE GAS (expandidos y mejorados) ----------
+            ({"sensor","detector","medidor","monitor"}, {"gas","tanque","estacionario","estacionaria","lp","propano","butano","gassensor"}, 50),
+            ({"iot","inteligente","wifi","smart"}, {"gas","gassensor","gas-sensor"}, 45),
+            ({"easy","connect","simple"}, {"gas","gassensor"}, 40),
         ]
 
         # extraer tokens y expandir sinónimos
@@ -597,10 +600,10 @@ class CatalogIndexer:
         base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
 
         # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
-        m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
+        m_q = re.search(r"\b(\d+)\s*[xÃ—]\s*(\d+)\b", q_norm)
         if m_q:
-            base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("×", "x"))
-        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None
+            base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("Ã—", "x"))
+        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None  # matriz pedida en la consulta
 
         seen = set()
         expanded: List[str] = []
@@ -612,7 +615,7 @@ class CatalogIndexer:
                 if s_n not in seen:
                     expanded.append(s_n); seen.add(s_n)
 
-        clean_terms = expanded[:12] if expanded else []
+        clean_terms = expanded[:15] if expanded else []  # Aumentado para más cobertura
 
         # intención por combos
         def detect_combo(tokens: List[str]) -> List[Tuple[set, set, int]]:
@@ -630,7 +633,7 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # FTS5
+        # FTS5 (OR + NEAR entre primeros 2 términos si existen) — índice incluye handle/vendor/product_type
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
@@ -638,7 +641,7 @@ class CatalogIndexer:
             try:
                 rows = list(cur.execute(
                     "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
-                    (fts_q, k * 10),
+                    (fts_q, k * 15),  # Aumentado para más cobertura
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
             except Exception:
@@ -652,7 +655,7 @@ class CatalogIndexer:
                 where_parts.append("(title LIKE ? OR body LIKE ? OR tags LIKE ? OR handle LIKE ?)")
                 params.extend([like, like, like, like])
             sql = f"SELECT id FROM products WHERE {' OR '.join(where_parts)} LIMIT ?"
-            params.append(k * 10)
+            params.append(k * 15)  # Aumentado para más cobertura
             try:
                 like_rows = list(cur.execute(sql, tuple(params)))
                 ids.extend([int(r["id"]) for r in like_rows])
@@ -688,6 +691,7 @@ class CatalogIndexer:
                 })
             if not v_infos:
                 continue
+            # elegir variante con más stock
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
@@ -704,7 +708,7 @@ class CatalogIndexer:
                 "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
 
-        # --- Filtro contextual ligero por combos ---
+        # --- Filtro contextual ligero por combos (HDMI/Divisor, etc.) ---
         def strong_text(it: Dict[str, Any]) -> str:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
@@ -722,16 +726,13 @@ class CatalogIndexer:
             if subset:
                 candidates = subset
 
-        # ---- Re-ranking por relevancia con priorización de matriz exacta + control ----
-        CONTROL_NEG = {"pila","bateria","batería","soporte","bracket","cable","hdmi","rca","coaxial","vga","antena","splitter","divisor","switch"}
-        CONTROL_POS = {"control","remoto","universal","rm","rm-","decodificador","decoder","stb","sky","izzi","totalplay","megacable"}
-
+        # ---- Re-ranking por relevancia con priorización de matriz exacta ----
         def hits(text: str, term: str) -> int:
             t = _norm(text)
             return t.count(term)
 
         def _has_matrix(text_norm: str, mx: str) -> bool:
-            return (mx in text_norm) or (mx.replace("x", "×") in text_norm)
+            return (mx in text_norm) or (mx.replace("x", "Ã—") in text_norm)
 
         def score_item(it: Dict[str, Any]) -> int:
             ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
@@ -743,46 +744,43 @@ class CatalogIndexer:
                 s += 3 * hits(tgs, t)
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
-                s += 3 * hits(bdy, t)
+                s += 3 * hits(bdy, t)  # BODY pesa más para captar Alexa/IP67/válvula/alarma/WiFi
 
+            # Combos (gran boost)
             st = strong_text(it)
             for A, B, bonus in combo_hits:
                 if any(a in st for a in A) and any(b in st for b in B):
                     s += bonus
 
+            # Inicio de título con primer término
             if clean_terms:
                 first = clean_terms[0]
                 if _norm(ttl).startswith(first):
                     s += 6
 
+            # Boost por SKU si aparece exacto en la consulta
             q_tokens = set(clean_terms)
             sku_set = {_norm(sk) for sk in (it["skus"] or [])}
             if q_tokens & sku_set:
                 s += 25
 
+            # Boost por stock (cap)
             stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock > 0:
                 s += min(stock, 20)
 
+            # --- Priorizar matriz exacta solicitada y penalizar matrices diferentes ---
             if q_matrix:
                 st_full = _norm(it["title"] + " " + it["handle"] + " " + it["tags"])
                 if _has_matrix(st_full, q_matrix):
-                    s += 60
+                    s += 60  # fuerte boost si coincide la matriz pedida (p. ej., 1x4)
                 else:
-                    other = re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
+                    other = re.findall(r"\b(\d+)\s*[xÃ—]\s*(\d+)\b", st_full)
                     for a, b in other:
                         mx = f"{a}x{b}"
                         if mx != q_matrix:
-                            s -= 12
+                            s -= 12  # leve penalización si menciona otra matriz
                             break
-
-            # Boost/penalización si la búsqueda huele a "control"
-            q_is_control = any(w in q_norm for w in ["control","remoto","decodificador","universal","sky","izzi","totalplay","megacable"])
-            if q_is_control:
-                pos = sum(1 for w in CONTROL_POS if w in st)
-                neg = sum(1 for w in CONTROL_NEG if w in st)
-                s += pos * 12
-                s -= neg * 10
 
             return s
 
