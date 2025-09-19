@@ -544,8 +544,10 @@ class CatalogIndexer:
             # antenas
             "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
             # controles
-            "control": ["remoto","remote"],
-            "remoto": ["control","remote"],
+            "control": ["remoto","remote","universal"],
+            "remoto": ["control","remote","universal"],
+            "decodificador": ["decoder","set top box","stb","sky","izzi","totalplay","megacable","cablecom"],
+            "universal": ["multi","8 en 1","8en1","8-in-1","8in1"],
             # cámaras / seguridad
             "camara": ["cámara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
             "cámara": ["camara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
@@ -559,8 +561,7 @@ class CatalogIndexer:
             # agua / nivel
             "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
 
-            # ---------------- GAS (nuevo bloque de sinónimos específicos) ----------------
-            # Mejora búsquedas tipo: "sensor de gas para tanque estacionario con válvula, Alexa, IP67"
+            # GAS (sinónimos específicos)
             "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen"],
             "tanque": ["estacionario","estacionaria","gas","lp"],
             "estacionario": ["tanque","gas","lp"],
@@ -572,7 +573,6 @@ class CatalogIndexer:
             "display": ["pantalla"],
             "monoxido": ["monóxido","co","co-"],
             "monóxido": ["monoxido","co","co-"],
-            # -------------------------------------------------------------------------------
             # energía y básicos
             "pila": ["bateria","batería","aa","aaa","18650","9v"],
             "cargador": ["charger","fuente","eliminador","adaptador","power"],
@@ -587,9 +587,9 @@ class CatalogIndexer:
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
             ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
             ({"sensor","detector","sonda"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
-
-            # ---------- NUEVO: combo para intención "sensor/medidor de gas (tanque estacionario/LP)" ----------
             ({"sensor","detector","medidor"}, {"gas","tanque","estacionario","estacionaria","lp"}, 45),
+            # NUEVO: controles para decodificador/TV
+            ({"control","remoto","universal"}, {"decodificador","tv","pantalla","sky","izzi","totalplay","megacable"}, 45),
         ]
 
         # extraer tokens y expandir sinónimos
@@ -600,7 +600,7 @@ class CatalogIndexer:
         m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
         if m_q:
             base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("×", "x"))
-        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None  # matriz pedida en la consulta
+        q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None
 
         seen = set()
         expanded: List[str] = []
@@ -630,7 +630,7 @@ class CatalogIndexer:
 
         ids: List[int] = []
 
-        # FTS5 (OR + NEAR entre primeros 2 términos si existen) — índice incluye handle/vendor/product_type
+        # FTS5
         if self._fts_enabled and clean_terms:
             or_clause = " OR ".join(clean_terms)
             near_clause = f" OR ({clean_terms[0]} NEAR/6 {clean_terms[1]})" if len(clean_terms) >= 2 else ""
@@ -688,7 +688,6 @@ class CatalogIndexer:
                 })
             if not v_infos:
                 continue
-            # elegir variante con más stock
             v_infos.sort(key=lambda vv: sum(ii["available"] for ii in vv["inventory"]) if vv["inventory"] else 0, reverse=True)
             best = v_infos[0]
 
@@ -705,7 +704,7 @@ class CatalogIndexer:
                 "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
 
-        # --- Filtro contextual ligero por combos (HDMI/Divisor, etc.) ---
+        # --- Filtro contextual ligero por combos ---
         def strong_text(it: Dict[str, Any]) -> str:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
@@ -723,7 +722,10 @@ class CatalogIndexer:
             if subset:
                 candidates = subset
 
-        # ---- Re-ranking por relevancia con priorización de matriz exacta ----
+        # ---- Re-ranking por relevancia con priorización de matriz exacta + control ----
+        CONTROL_NEG = {"pila","bateria","batería","soporte","bracket","cable","hdmi","rca","coaxial","vga","antena","splitter","divisor","switch"}
+        CONTROL_POS = {"control","remoto","universal","rm","rm-","decodificador","decoder","stb","sky","izzi","totalplay","megacable"}
+
         def hits(text: str, term: str) -> int:
             t = _norm(text)
             return t.count(term)
@@ -741,43 +743,46 @@ class CatalogIndexer:
                 s += 3 * hits(tgs, t)
                 s += 2 * hits(ptype, t)
                 s += 1 * hits(vendor, t)
-                s += 3 * hits(bdy, t)  # BODY pesa más para captar Alexa/IP67/válvula/alarma/WiFi
+                s += 3 * hits(bdy, t)
 
-            # Combos (gran boost)
             st = strong_text(it)
             for A, B, bonus in combo_hits:
                 if any(a in st for a in A) and any(b in st for b in B):
                     s += bonus
 
-            # Inicio de título con primer término
             if clean_terms:
                 first = clean_terms[0]
                 if _norm(ttl).startswith(first):
                     s += 6
 
-            # Boost por SKU si aparece exacto en la consulta
             q_tokens = set(clean_terms)
             sku_set = {_norm(sk) for sk in (it["skus"] or [])}
             if q_tokens & sku_set:
                 s += 25
 
-            # Boost por stock (cap)
             stock = sum(x["available"] for x in it["variant"]["inventory"]) if it["variant"]["inventory"] else 0
             if stock > 0:
                 s += min(stock, 20)
 
-            # --- Priorizar matriz exacta solicitada y penalizar matrices diferentes ---
             if q_matrix:
                 st_full = _norm(it["title"] + " " + it["handle"] + " " + it["tags"])
                 if _has_matrix(st_full, q_matrix):
-                    s += 60  # fuerte boost si coincide la matriz pedida (p. ej., 1x4)
+                    s += 60
                 else:
                     other = re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
                     for a, b in other:
                         mx = f"{a}x{b}"
                         if mx != q_matrix:
-                            s -= 12  # leve penalización si menciona otra matriz
+                            s -= 12
                             break
+
+            # Boost/penalización si la búsqueda huele a "control"
+            q_is_control = any(w in q_norm for w in ["control","remoto","decodificador","universal","sky","izzi","totalplay","megacable"])
+            if q_is_control:
+                pos = sum(1 for w in CONTROL_POS if w in st)
+                neg = sum(1 for w in CONTROL_NEG if w in st)
+                s += pos * 12
+                s -= neg * 10
 
             return s
 
