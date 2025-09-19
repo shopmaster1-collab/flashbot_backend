@@ -100,8 +100,8 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
         if brand in ql:
             brands.append(brand.capitalize())
     
-    # Detectar tipos de productos
-    if any(w in ql for w in ["sensor", "detector"]):
+    # Detectar tipos de productos específicos
+    if any(w in ql for w in ["sensor", "detector", "medidor"]):
         if p.get("water"):
             product_type = "sensores de agua"
         elif p.get("gas"):
@@ -131,8 +131,38 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
     # Construir respuesta contextual
     response_parts = []
     
-    # Saludo contextual
-    if product_type:
+    # Saludo contextual específico para sensores de gas
+    if product_type == "sensores de gas":
+        response_parts.append("¡Perfecto! Tenemos una excelente selección de sensores de gas")
+        
+        # Información específica de líneas de productos de gas
+        specifics = []
+        if p.get("valve") or any(w in ql for w in ["valvula", "válvula", "electrovalvula"]):
+            specifics.append("incluyendo modelos con válvula electrónica automática (IOT-GASSENSORV)")
+        if p.get("wifi") or "app" in ql:
+            specifics.append("con conectividad WiFi y monitoreo desde app (líneas IOT y CONNECT)")
+        if p.get("display") or any(w in ql for w in ["pantalla", "display"]):
+            specifics.append("con pantalla integrada (línea EASY)")
+        if "alexa" in ql:
+            specifics.append("compatibles con Alexa")
+        
+        if not specifics:
+            specifics.append("de nuestras líneas IOT-GASSENSOR (WiFi), IOT-GASSENSORV (con válvula), EASY-GAS (con pantalla) y CONNECT-GAS (monitoreo remoto)")
+        
+        response_parts.append(" " + ", ".join(specifics))
+    
+    elif product_type == "sensores de agua":
+        response_parts.append("¡Claro! Tenemos excelentes opciones en sensores de agua")
+        specifics = []
+        if p.get("valve"):
+            specifics.append("con válvula automática (IOT-WATERV)")
+        if p.get("ultra"):
+            specifics.append("ultrasónicos de alta precisión (IOT-WATERULTRA)")
+        if not specifics:
+            specifics.append("de nuestras líneas IOT Water, Easy Water y Connect")
+        response_parts.append(" " + ", ".join(specifics))
+    
+    elif product_type:
         if brands:
             response_parts.append(f"¡Perfecto! Para {product_type} de {', '.join(brands)}")
         else:
@@ -140,42 +170,41 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
     else:
         response_parts.append("¡Hola! He encontrado estas opciones para ti")
     
-    # Información específica basada en patrones
-    specifics = []
-    if p.get("water"):
-        specifics.append("de nuestras líneas IOT Water, Easy Water y Connect")
-    elif p.get("gas"):
-        specifics.append("de nuestras líneas IOT Gas Sensor, Easy Gas y Connect Gas")
-    elif p.get("matrix"):
-        specifics.append(f"con matriz {p['matrix']}")
+    # Información específica basada en patrones adicionales
+    additional_specs = []
+    if p.get("matrix"):
+        additional_specs.append(f"con matriz {p['matrix']}")
     elif size_mentioned:
-        specifics.append(f"compatibles con pantallas de {size_mentioned}\"")
+        additional_specs.append(f"compatibles con pantallas de {size_mentioned}\"")
     elif p.get("inches"):
-        specifics.append(f"para pantallas de {', '.join(p['inches'])}\"")
+        additional_specs.append(f"para pantallas de {', '.join(p['inches'])}\"")
     
-    if specifics:
-        response_parts.append(" " + ", ".join(specifics))
+    if additional_specs:
+        response_parts.append(" " + ", ".join(additional_specs))
     
     # Información de resultados
     if total_count > per_page:
         showing = min(per_page, len(items))
         response_parts.append(f". Mostrando {showing} de {total_count} productos disponibles")
     else:
-        response_parts.append(f". Encontré {len(items)} productos que coinciden")
+        response_parts.append(f". Encontré {len(items)} productos que coinciden perfectamente")
     
-    # Sugerencias adicionales
-    suggestions = []
-    if p.get("valve"):
-        suggestions.append("con válvula incluida")
-    if p.get("wifi"):
-        suggestions.append("con conectividad WiFi")
-    if p.get("bt"):
-        suggestions.append("con Bluetooth")
-    if p.get("display"):
-        suggestions.append("con pantalla")
-    
-    if suggestions:
-        response_parts.append(f", incluyendo opciones {', '.join(suggestions)}")
+    # Sugerencias adicionales para sensores
+    if product_type in ["sensores de gas", "sensores de agua", "sensores"]:
+        suggestions = []
+        if p.get("valve"):
+            suggestions.append("con válvula incluida")
+        if p.get("wifi"):
+            suggestions.append("con conectividad WiFi")
+        if p.get("bt"):
+            suggestions.append("con Bluetooth")
+        if p.get("display"):
+            suggestions.append("con pantalla")
+        if p.get("alarm"):
+            suggestions.append("con sistema de alertas")
+        
+        if suggestions:
+            response_parts.append(f", incluyendo opciones {', '.join(suggestions)}")
     
     base_response = "".join(response_parts) + "."
     
@@ -208,31 +237,59 @@ def _plain_items(items):
                     "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
     return out
 
-# ---------- Señales / familias ----------
+# ---------- Señales / familias CORREGIDAS ----------
 _WATER_ALLOW_FAMILIES = [
     "iot-waterv","iot-waterultra","iot-waterp","iot-water",
     "easy-waterultra","easy-water","iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water",
+    "connect-water","connect water"
 ]
-_WATER_ALLOW_KEYWORDS = ["tinaco","cisterna","nivel","agua"]
-_WATER_BLOCK = ["bm-carsensor","carsensor","car","auto","vehiculo","vehículo",
-                "ar-rain","rain","lluvia","ar-gasc","gasc"," gas","co2","humo","smoke",
-                "ar-knock","knock","golpe"]
+_WATER_ALLOW_KEYWORDS = ["tinaco","cisterna","nivel","agua","water","inundacion","inundación","flotador","boya"]
 
+# FAMILIAS DE GAS CORREGIDAS - coinciden con productos reales
 _GAS_ALLOW_FAMILIES = [
-    "iot-gassensorv","iot-gassensor","connect-gas","easy-gas",
-    "iot gassensorv","iot gassensor","connect gas","easy gas",
+    # Nombres exactos de productos reales en Master Electronics
+    "iot-gassensorv","iot-gassensor","easy-gas","connect-gas",
+    # Variaciones con espacios
+    "iot gassensorv","iot gassensor","easy gas","connect gas",
+    # Variaciones con guiones
+    "iot-gas-sensor","iot-gas-sensorv","gas-sensor","gassensor",
+    # Nombres de handles/SKUs posibles
+    "gassensorv","gassensor"
 ]
-_GAS_ALLOW_KEYWORDS = ["gas","tanque","estacionario","estacionaria","lp","propano","butano","nivel","medidor","porcentaje","volumen"]
 
-# Blocklist GAS (evita EASY-ELECTRIC, PEST-KILLER y módulos) + familias de agua
+_GAS_ALLOW_KEYWORDS = [
+    "gas","tanque","estacionario","estacionaria","lp","propano","butano",
+    "nivel","medidor","porcentaje","volumen","gassensor","gas-sensor",
+    "sensor de gas","medidor de gas","detector de gas"
+]
+
+# Blocklist GAS REVISADA - más específica y menos agresiva
 _GAS_BLOCK = [
-    "ar-gasc","ar-flame","ar-photosensor","photosensor","megasensor","ar-megasensor",
-    "arduino","módulo","modulo","module","mq-","mq2","flame","co2","humo","smoke","luz","photo","shield",
+    # Módulos Arduino específicos (no productos IOT principales)
+    "ar-gasc","ar-flame","ar-photosensor","megasensor","ar-megasensor",
+    # Módulos genéricos de desarrollo
+    "arduino","módulo generico","modulo generico","mq-2","mq2","mq-","shield",
+    # Productos de control de plagas
     "pest","plaga","mosquito","insect","insecto","pest-killer","pest killer",
-    "easy-electric","easy electric","eléctrico","electrico","electricidad","energia","energía",
-    "kwh","kw/h","consumo","tarifa","electric meter","medidor de consumo","contador",
+    # Productos eléctricos (medidores de consumo)
+    "easy-electric","easy electric","eléctrico","electrico","electricidad",
+    "kwh","kw/h","consumo electrico","tarifa","electric meter","medidor de consumo","contador electrico",
+    # Productos de lluvia/auto (no gas LP)
     "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
-    "iot-water","iot-waterv","iot-waterultra","iot-waterp","easy-water","easy-waterultra"," water "
+    # Solo familias de agua específicas, no todos los productos de agua
+    "iot-waterv","iot-waterultra","iot-waterp","easy-waterultra"
+]
+
+# FAMILIAS DE AGUA - removemos bloqueadores demasiado amplios
+_WATER_BLOCK = [
+    # Solo productos de gas específicos
+    "iot-gassensorv","iot-gassensor","easy-gas","connect-gas",
+    # Productos de auto/lluvia
+    "bm-carsensor","carsensor","car","auto","vehiculo","vehículo",
+    "ar-rain","rain","lluvia",
+    # Productos de otros gases
+    "ar-gasc","gasc"," co2","humo","smoke",
+    "ar-knock","knock","golpe"
 ]
 
 def _concat_fields(it) -> str:
@@ -256,20 +313,25 @@ def _concat_fields(it) -> str:
         parts.extend([x for x in it["skus"] if x])
     return " ".join(parts).lower()
 
-# ---------- INTENCIÓN (estricta y no ambigua) ----------
+# ---------- INTENCIÓN (mejorada para gas) ----------
 def _intent_from_query(q: str):
     """
-    Regla clara:
-    - Si menciona 'gas' o señales inequívocas de gas (tanque, estacionario/a, lp, propano, butano) => 'gas'
+    Regla clara mejorada:
+    - Si menciona 'gas' o señales inequívocas de gas (tanque, estacionario/a, lp, propano, butano, gassensor) => 'gas'
     - Si NO menciona 'gas' y sí menciona agua/tinaco/cisterna/inundación/boya/flotador => 'water'
     - 'nivel' o 'medidor' NO determinan la intención por sí solos (son ambiguos).
     """
     ql = (q or "").lower()
 
-    gas_hard = ["gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano"]
+    # Señales fuertes de gas (expandidas)
+    gas_hard = [
+        "gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano",
+        "gassensor", "gas-sensor", "iot-gassensor", "easy-gas", "connect-gas"
+    ]
     if any(w in ql for w in gas_hard):
         return "gas"
 
+    # Señales fuertes de agua
     water_hard = ["agua", "tinaco", "cisterna", "inundacion", "inundación", "boya", "flotador"]
     if any(w in ql for w in water_hard):
         return "water"
@@ -277,37 +339,49 @@ def _intent_from_query(q: str):
     return None
 
 def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple[int, bool]:
-    """Devuelve (score, has_family)."""
+    """Devuelve (score, has_family). Mejorado para detectar mejor las familias."""
     s=0
     has_family = any(fam in st for fam in allow_fams)
-    if any(w in st for w in allow_keywords): s+=20
-    if has_family: s+=85
+    
+    # Scoring por keywords
+    if any(w in st for w in allow_keywords): 
+        s += 25  # Aumentado para keywords
+    
+    # Scoring fuerte por pertenencia a familia
+    if has_family: 
+        s += 100  # Aumentado significativamente
+    
+    # Extras específicos
     if extras.get("want_valve"):
         for key in extras.get("valve_fams", []):
-            if key in st: s+=extras.get("valve_bonus", 95)
+            if key in st: s += extras.get("valve_bonus", 95)
     if extras.get("want_ultra"):
         for key in extras.get("ultra_fams", []):
-            if key in st: s+=55
+            if key in st: s += 55
     if extras.get("want_pressure"):
         for key in extras.get("pressure_fams", []):
-            if key in st: s+=55
+            if key in st: s += 55
     if extras.get("want_bt"):
         for key in extras.get("bt_fams", []):
-            if key in st: s+=45
+            if key in st: s += 45
     if extras.get("want_wifi"):
         for key in extras.get("wifi_fams", []):
-            if key in st: s+=45
+            if key in st: s += 45
     if extras.get("want_display"):
         for key in extras.get("display_fams", []):
-            if key in st: s+=40
+            if key in st: s += 40
     if extras.get("want_alarm"):
         for key in extras.get("alarm_words", []):
-            if key in st: s+=25
+            if key in st: s += 25
+    
+    # Penalizaciones por términos negativos
     for neg in extras.get("neg_words", []):
-        if neg in st: s-=80
+        if neg in st: 
+            s -= 80
+    
     return s, has_family
 
-# --------- Rerank/filtrado Agua ----------
+# --------- Rerank/filtrado Agua (mejorado) ----------
 def _rerank_for_water(query: str, items: list):
     ql=(query or "").lower()
     if _intent_from_query(query)!="water" or not items: return items
@@ -345,7 +419,7 @@ def _rerank_for_water(query: str, items: list):
 
     # Fallback suave
     soft = []
-    water_words = ["agua","tinaco","cisterna","nivel"]
+    water_words = ["agua","tinaco","cisterna","nivel","water"]
     for idx,it in enumerate(items):
         st=_concat_fields(it)
         if any(w in st for w in water_words) and not any(b in st for b in _WATER_BLOCK):
@@ -358,32 +432,50 @@ def _rerank_for_water(query: str, items: list):
     rescored.sort(key=lambda x:x[0], reverse=True)
     return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
 
-# --------- Rerank/filtrado Gas ----------
+# --------- Rerank/filtrado Gas (CORREGIDO) ----------
 def _rerank_for_gas(query: str, items: list):
     ql=(query or "").lower()
     if _intent_from_query(query)!="gas" or not items: return items
-    want_valve=("valvula" in ql) or ("válvula" in ql)
-    extras={"want_valve": want_valve, "want_bt": "bluetooth" in ql,
-            "want_wifi": ("wifi" in ql) or ("app" in ql),
-            "want_display": any(w in ql for w in ["pantalla","display"]),
-            "want_alarm": "alarma" in ql,
-            "valve_fams":["iot-gassensorv","iot gassensorv"],
-            "bt_fams":["easy-gas","easy gas"],
-            "wifi_fams":["iot-gassensor","iot gassensor","connect-gas","connect gas"],
-            "display_fams":["easy-gas","easy gas"],
-            "alarm_words":["alarma","alerta"],
-            "neg_words":[]}
+    
+    want_valve=("valvula" in ql) or ("válvula" in ql) or ("electrovalvula" in ql)
+    want_wifi=("wifi" in ql) or ("app" in ql) or ("inteligente" in ql) or ("iot" in ql)
+    want_display=any(w in ql for w in ["pantalla","display","screen"])
+    want_alexa="alexa" in ql
+    
+    extras={
+        "want_valve": want_valve, 
+        "want_bt": "bluetooth" in ql,
+        "want_wifi": want_wifi,
+        "want_display": want_display,
+        "want_alarm": "alarma" in ql,
+        "want_alexa": want_alexa,
+        # Familias corregidas que coinciden con productos reales
+        "valve_fams":["iot-gassensorv","iot gassensorv","gassensorv"],
+        "bt_fams":["easy-gas","easy gas"],
+        "wifi_fams":["iot-gassensor","iot gassensor","connect-gas","connect gas","iot-gassensorv","iot gassensorv"],
+        "display_fams":["easy-gas","easy gas"],
+        "alarm_words":["alarma","alerta","alert"],
+        "alexa_fams":["iot-gassensor","iot-gassensorv","iot gassensor","iot gassensorv"],
+        "neg_words":[]  # Minimizamos las palabras negativas
+    }
+    
     rescored=[]; positives=[]
     for idx,it in enumerate(items):
         st=_concat_fields(it)
         blocked=any(b in st for b in _GAS_BLOCK)
         base=max(0,30-idx)
         score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
+        
+        # Boost extra para productos específicos de gas
+        if any(fam in st for fam in ["iot-gassensor", "easy-gas", "connect-gas"]):
+            score += 50
+        
         total=score+base-(140 if blocked else 0)
-        is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st)
+        is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st) or ("gassensorv" in st)
         rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
-        # Positivo SOLO si pertenece a familia de gas
-        if has_fam and score>=60 and not blocked: positives.append(rec)
+        
+        # Positivo SOLO si pertenece a familia de gas Y tiene score decente
+        if has_fam and score>=40 and not blocked: positives.append(rec)
 
     # HARD FILTER si hay positivos -> solo familias de gas
     if positives:
@@ -395,7 +487,7 @@ def _rerank_for_gas(query: str, items: list):
             ordered=positives
         return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
 
-    # Fallback suave
+    # Fallback suave - buscar productos que contengan "gas" sin bloqueos
     soft = []
     for idx,it in enumerate(items):
         st=_concat_fields(it)
@@ -415,7 +507,7 @@ def _apply_intent_rerank(query: str, items: list):
     if intent=="gas":   return _rerank_for_gas(query, items)
     return items
 
-# --------- PUERTA FINAL (HARD GATE) CONTRA MEZCLAS ---------
+# --------- PUERTA FINAL MEJORADA (HARD GATE) CONTRA MEZCLAS ---------
 def _enforce_intent_gate(query: str, items: list):
     """Filtra de forma estricta resultados de la otra categoría si la intención está clara."""
     intent=_intent_from_query(query)
@@ -426,18 +518,22 @@ def _enforce_intent_gate(query: str, items: list):
     for it in items:
         st=_concat_fields(it)
         if intent=="gas":
+            # Filtrar productos de agua
             if any(fam in st for fam in _WATER_ALLOW_FAMILIES):
                 continue
-            if any(w in st for w in _WATER_ALLOW_KEYWORDS):
+            # Ser más específico con las palabras de agua
+            if any(w in st for w in ["tinaco","cisterna","inundacion","inundación","boya","flotador"]):
                 continue
         elif intent=="water":
+            # Filtrar productos de gas
             if any(fam in st for fam in _GAS_ALLOW_FAMILIES):
                 continue
-            if "gas" in st or any(w in st for w in ["lp","propano","butano","estacionario","estacionaria"]):
+            # Filtrar si menciona gas explícitamente
+            if any(w in st for w in ["gassensor","gas-sensor","iot-gassensor","easy-gas","connect-gas"]):
                 continue
         filtered.append(it)
 
-    return filtered or items
+    return filtered or items  # Si no queda nada, devolver original
 
 # ----------------- Endpoints -----------------
 @app.post("/api/chat")
@@ -449,7 +545,7 @@ def chat():
     
     if not query:
         return jsonify({
-            "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores y mucho más.",
+            "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores de agua, sensores de gas y mucho más.",
             "products":[],
             "pagination": {
                 "page": 1,
@@ -470,8 +566,17 @@ def chat():
     total_count = len(all_items)
     
     if not all_items:
+        # Mensaje mejorado para sensores de gas
+        fallback_msg = "No encontré resultados directos para tu búsqueda. "
+        if any(w in query.lower() for w in ["gas", "tanque", "estacionario", "gassensor"]):
+            fallback_msg += "Para sensores de gas, prueba con: 'sensor gas tanque estacionario', 'IOT-GASSENSOR', 'sensor gas con válvula', 'medidor gas WiFi' o 'EASY-GAS'."
+        elif any(w in query.lower() for w in ["agua", "tinaco", "cisterna"]):
+            fallback_msg += "Para sensores de agua, prueba con: 'sensor agua tinaco', 'IOT-WATER', 'sensor nivel cisterna' o 'medidor agua WiFi'."
+        else:
+            fallback_msg += "Prueba con palabras clave específicas como 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung', 'sensor gas tanque' o 'sensor agua tinaco'."
+        
         return jsonify({
-            "answer":"No encontré resultados directos para tu búsqueda. Prueba con palabras clave más específicas como 'divisor hdmi 1×4', 'soporte pared 55\"', 'antena exterior UHF', 'control Samsung', 'cable RCA audio video', 'sensor agua tinaco' o 'sensor gas estacionario'.",
+            "answer": fallback_msg,
             "products":[],
             "pagination": {
                 "page": 1,
@@ -517,7 +622,7 @@ def chat():
     if deeps and len(answer) > 50:
         try:
             enhanced_answer = deeps.chat(
-                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén toda la información técnica y de productos, pero hazla más conversacional y amigable. No inventes datos:",
+                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén toda la información técnica y de productos, pero hazla más conversacional y amigable. No inventes datos. Si se mencionan sensores de gas, destaca las líneas IOT-GASSENSOR, IOT-GASSENSORV, EASY-GAS y CONNECT-GAS:",
                 answer
             )
             if enhanced_answer and len(enhanced_answer) > 40:
