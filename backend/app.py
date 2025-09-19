@@ -135,21 +135,40 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
     if product_type == "sensores de gas":
         response_parts.append("¡Perfecto! Tenemos una excelente selección de sensores de gas")
         
-        # Información específica de líneas de productos de gas
-        specifics = []
+        # Analizar qué productos específicos están realmente en los resultados
+        found_products = []
+        product_titles = [item.get("title", "").lower() for item in items]
+        
+        for title in product_titles:
+            if "iot-gassensorv" in title or "electroválvula" in title or "válvula" in title:
+                found_products.append("con válvula electrónica")
+            elif "iot-gassensor" in title or ("iot" in title and "sensor" in title and "gas" in title):
+                found_products.append("con WiFi y app Master IOT")
+            elif "easy-gas" in title or ("easy" in title and "gas" in title):
+                found_products.append("con pantalla integrada")
+            elif "connect-gas" in title or ("connect" in title and "gas" in title):
+                found_products.append("con monitoreo remoto")
+        
+        # Solo mencionar características de productos que realmente están en los resultados
+        if found_products:
+            response_parts.append(" " + ", ".join(list(set(found_products))))
+        else:
+            # Respuesta genérica si no se identifican productos específicos
+            response_parts.append(" para tanques estacionarios con diferentes características")
+        
+        # Información específica basada en la consulta
+        additional_specs = []
         if p.get("valve") or any(w in ql for w in ["valvula", "válvula", "electrovalvula"]):
-            specifics.append("incluyendo modelos con válvula electrónica automática (IOT-GASSENSORV)")
+            additional_specs.append("priorizando modelos con válvula electrónica automática")
         if p.get("wifi") or "app" in ql:
-            specifics.append("con conectividad WiFi y monitoreo desde app (líneas IOT y CONNECT)")
+            additional_specs.append("con conectividad WiFi y monitoreo desde app")
         if p.get("display") or any(w in ql for w in ["pantalla", "display"]):
-            specifics.append("con pantalla integrada (línea EASY)")
+            additional_specs.append("con pantalla integrada para lectura directa")
         if "alexa" in ql:
-            specifics.append("compatibles con Alexa")
+            additional_specs.append("compatibles con Alexa")
         
-        if not specifics:
-            specifics.append("de nuestras líneas IOT-GASSENSOR (WiFi), IOT-GASSENSORV (con válvula), EASY-GAS (con pantalla) y CONNECT-GAS (monitoreo remoto)")
-        
-        response_parts.append(" " + ", ".join(specifics))
+        if additional_specs:
+            response_parts.append(", " + ", ".join(additional_specs))
     
     elif product_type == "sensores de agua":
         response_parts.append("¡Claro! Tenemos excelentes opciones en sensores de agua")
@@ -245,22 +264,36 @@ _WATER_ALLOW_FAMILIES = [
 ]
 _WATER_ALLOW_KEYWORDS = ["tinaco","cisterna","nivel","agua","water","inundacion","inundación","flotador","boya"]
 
-# FAMILIAS DE GAS CORREGIDAS - coinciden con productos reales
+# FAMILIAS DE GAS CORREGIDAS - handles y nombres reales de productos
 _GAS_ALLOW_FAMILIES = [
-    # Nombres exactos de productos reales en Master Electronics
+    # Handles reales de productos (encontrados en master.com.mx)
+    "modulo-sensor-inteligente-de-nivel-de-gas",  # IOT-GASSENSOR
+    "sensor-de-gas-inteligente-con-electrovalvula-y-alertas-en-tiempo-real",  # IOT-GASSENSORV
+    "modulo-digital-de-nivel-de-gas-con-alcance-inalambrico-de-500-metros",  # CONNECT-GAS
+    
+    # SKUs y nombres de productos
     "iot-gassensorv","iot-gassensor","easy-gas","connect-gas",
-    # Variaciones con espacios
     "iot gassensorv","iot gassensor","easy gas","connect gas",
-    # Variaciones con guiones
-    "iot-gas-sensor","iot-gas-sensorv","gas-sensor","gassensor",
-    # Nombres de handles/SKUs posibles
-    "gassensorv","gassensor"
+    
+    # Variaciones adicionales
+    "sensor-inteligente-de-nivel-de-gas", "dispositivo-inteligente-sensor-gas",
+    "modulo-sensor-gas", "sensor-gas-tanque-estacionario",
+    "gassensorv","gassensor","gas-sensor"
 ]
 
 _GAS_ALLOW_KEYWORDS = [
+    # Keywords principales de gas
     "gas","tanque","estacionario","estacionaria","lp","propano","butano",
-    "nivel","medidor","porcentaje","volumen","gassensor","gas-sensor",
-    "sensor de gas","medidor de gas","detector de gas"
+    "nivel","medidor","porcentaje","volumen",
+    
+    # Variaciones específicas de productos
+    "gassensor","gas-sensor","sensor de gas","medidor de gas","detector de gas",
+    "modulo sensor inteligente","dispositivo inteligente sensor",
+    "sensor inteligente nivel gas","medidor inteligente gas",
+    
+    # Características específicas encontradas en descripciones
+    "tanques estacionarios","nivel de gas","monitoreo gas",
+    "alertas gas","app master iot","compatible alexa gas"
 ]
 
 # Blocklist GAS REVISADA - más específica y menos agresiva
@@ -466,9 +499,18 @@ def _rerank_for_gas(query: str, items: list):
         base=max(0,30-idx)
         score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
         
-        # Boost extra para productos específicos de gas
-        if any(fam in st for fam in ["iot-gassensor", "easy-gas", "connect-gas"]):
-            score += 50
+        # Boost extra para productos específicos de gas (CRÍTICO)
+        if any(handle in st for handle in [
+            "modulo-sensor-inteligente-de-nivel-de-gas",  # IOT-GASSENSOR
+            "sensor-de-gas-inteligente-con-electrovalvula-y-alertas-en-tiempo-real"  # IOT-GASSENSORV
+        ]):
+            score += 150  # Boost masivo para productos principales
+        elif any(fam in st for fam in ["iot-gassensor", "easy-gas", "connect-gas"]):
+            score += 75   # Boost fuerte para otros productos de gas
+        
+        # Boost adicional por SKU/nombre de modelo específico
+        if any(sku in st for sku in ["iot-gassensor", "iot-gassensorv"]):
+            score += 100
         
         total=score+base-(140 if blocked else 0)
         is_valve=("iot-gassensorv" in st) or ("iot gassensorv" in st) or ("gassensorv" in st)
