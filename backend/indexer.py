@@ -576,8 +576,14 @@ class CatalogIndexer:
             "divisor": ["splitter","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
             "splitter": ["divisor","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
             "switch": ["conmutador","selector"],
-            # antenas
-            "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
+            # ============== ANTENAS SEPARADAS POR TIPO ==============
+            "antena": ["tvant","uhf","vhf","aerea","aérea","digital","hd","televisión","tv"],
+            "exterior": ["externa","afuera","outdoor","external","pared","muro","techo","tejado"],
+            "interior": ["interna","adentro","indoor","internal","casa","habitación"],
+            "externa": ["exterior","afuera","outdoor","external","pared","muro"],
+            "interna": ["interior","adentro","indoor","internal","casa"],
+            "outdoor": ["exterior","externa","afuera","external"],
+            "indoor": ["interior","interna","adentro","internal"],
             # controles
             "control": ["remoto","remote","mando","controlador"],
             "remoto": ["control","remote","mando","controlador"],
@@ -620,8 +626,15 @@ class CatalogIndexer:
         COMBOS = [
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
-            ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
             ({"sensor","detector","sonda","medidor"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
+
+            # ============== COMBOS PARA ANTENAS ESPECÍFICAS (NUEVO) ==============
+            ({"antena","tvant"}, {"exterior","externa","outdoor","external","pared","techo","muro","tejado"}, 55),
+            ({"antena","tvant"}, {"interior","interna","indoor","internal","casa","habitación"}, 55),
+            ({"exterior","externa","outdoor","external"}, {"tv","televisor","television","digital","uhf","vhf"}, 45),
+            ({"interior","interna","indoor","internal"}, {"tv","televisor","television","digital","uhf","vhf"}, 45),
+            ({"antena","tvant"}, {"tv","uhf","vhf","digital","hd","televisor","television"}, 35),
+            # =================================================================
 
             # ============== COMBOS PARA DECODIFICADORES (NUEVO) ==============
             ({"decodificador","decoder","receptor","sintonizador","convertidor","conversor"}, {"tv","televisor","television","pantalla"}, 60),
