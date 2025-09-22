@@ -528,11 +528,46 @@ class CatalogIndexer:
         }
         SYN = {
             # vídeo / pantallas / soportes
-            "tv": ["televisor","pantalla"],
-            "pantalla": ["tv","televisor","monitor"],
+            "tv": ["televisor","pantalla","television","tele"],
+            "pantalla": ["tv","televisor","monitor","television"],
+            "televisor": ["tv","pantalla","monitor","television","tele"],
+            "television": ["tv","televisor","pantalla","tele"],
             "soporte": ["base","bracket","montaje","mount","pared","techo","mural"],
+            
+            # ============== DECODIFICADORES Y TV DIGITAL (NUEVO) ==============
+            "decodificador": ["decoder","receptor","sintonizador","tdt","isdb-t","dtv","digital","señal","convertidor","conversor","mv-tdtplus","tdtplus"],
+            "decoder": ["decodificador","receptor","sintonizador","tdt","isdb-t","dtv","digital","convertidor","conversor"],
+            "receptor": ["decodificador","decoder","sintonizador","tdt","digital","conversor","convertidor"],
+            "sintonizador": ["decodificador","decoder","receptor","tdt","digital","tuner","conversor"],
+            "tdt": ["decodificador","decoder","receptor","digital","terrestre","isdb-t","dtv","mv-tdtplus","tdtplus"],
+            "isdb-t": ["tdt","decodificador","digital","terrestre","decoder","receptor"],
+            "dtv": ["digital","tdt","decodificador","decoder","television digital","tv digital"],
+            "señal": ["signal","decodificador","receptor","antena","tdt","digital"],
+            "signal": ["señal","decodificador","receptor","antena","digital"],
+            "digital": ["tdt","decodificador","decoder","receptor","dtv","isdb-t","señal"],
+            "terrestre": ["tdt","digital","decodificador","antena","aerea","aérea"],
+            "convertidor": ["decodificador","decoder","receptor","conversor","adaptador"],
+            "conversor": ["decodificador","decoder","receptor","convertidor","adaptador"],
+            
+            # TV antigua/vieja - contexto importante para decodificadores
+            "antigua": ["vieja","old","legacy","analogica","analógica","análoga"],
+            "vieja": ["antigua","old","legacy","analogica","analógica","análoga"],
+            "analogica": ["analógica","antigua","vieja","legacy","análoga"],
+            "analógica": ["analogica","antigua","vieja","legacy","análoga"],
+            "análoga": ["analogica","analógica","antigua","vieja"],
+            "legacy": ["antigua","vieja","analogica","analógica"],
+            
+            # Productos específicos MV
+            "mv-tdtplus": ["tdtplus","tdt-plus","decodificador","tdt","receptor","decoder"],
+            "tdtplus": ["mv-tdtplus","tdt-plus","decodificador","tdt","receptor"],
+            "mv-atscontrol": ["atscontrol","mv-atscontrol2","control","remoto","decodificador"],
+            "mv-atscontrol2": ["atscontrol2","mv-atscontrol","control","remoto","decodificador"],
+            "atscontrol": ["mv-atscontrol","mv-atscontrol2","control","remoto"],
+            "atscontrol2": ["mv-atscontrol2","atscontrol","control","remoto"],
+            # ===============================================================
+            
             # cables / conectividad
-            "cable": ["cordon","cordon","conector","conexion","conexión"],
+            "cable": ["cordon","cordón","conector","conexion","conexión"],
             "hdmi": ["hdmi","uhd","4k","8k","microhdmi","mini hdmi","arc","earc"],
             "rca": ["av","audio video","a/v"],
             "vga": ["dsub","d-sub"],
@@ -544,8 +579,8 @@ class CatalogIndexer:
             # antenas
             "antena": ["tvant","exterior","interior","uhf","vhf","aerea","aérea","digital","hd"],
             # controles
-            "control": ["remoto","remote"],
-            "remoto": ["control","remote"],
+            "control": ["remoto","remote","mando","controlador"],
+            "remoto": ["control","remote","mando","controlador"],
             # cámaras / seguridad
             "camara": ["cámara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
             "cámara": ["camara","ip","cctv","vigilancia","seguridad","poe","dvr","nvr"],
@@ -566,10 +601,9 @@ class CatalogIndexer:
             "tanque": ["estacionario","estacionaria","gas","lp","deposito","depósito"],
             "estacionario": ["tanque","gas","lp","fijo"],
             "estacionaria": ["tanque","gas","lp","fija"],
-            "valvula": ["válvula","electrovalvula","electrovÃ¡lvula","valve"],
-            "válvula": ["valvula","electrovalvula","electrovÃ¡lvula","valve"],
+            "valvula": ["válvula","electrovalvula","electroválvula","valve"],
+            "válvula": ["valvula","electrovalvula","electroválvula","valve"],
             "alexa": ["voz","amazon alexa","asistente","voice"],
-            "pantalla": ["display","lcd","led"],
             "display": ["pantalla","lcd","screen"],
             "monoxido": ["monóxido","co","co-"],
             "monóxido": ["monoxido","co","co-"],
@@ -589,6 +623,16 @@ class CatalogIndexer:
             ({"antena"}, {"tv","uhf","vhf","digital","hd"}, 25),
             ({"sensor","detector","sonda","medidor"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
 
+            # ============== COMBOS PARA DECODIFICADORES (NUEVO) ==============
+            ({"decodificador","decoder","receptor","sintonizador","convertidor","conversor"}, {"tv","televisor","television","pantalla"}, 60),
+            ({"decodificador","decoder","receptor","sintonizador"}, {"tdt","isdb-t","digital","señal","dtv","terrestre"}, 55),
+            ({"tv","televisor","television","pantalla"}, {"antigua","vieja","analogica","analógica","legacy"}, 50),
+            ({"control","remoto","mando"}, {"decodificador","decoder","tdt","mv-atscontrol","mv-tdtplus","atscontrol"}, 45),
+            ({"señal","signal"}, {"digital","tv","televisor","antena","tdt"}, 35),
+            ({"mv-tdtplus","tdtplus","tdt-plus"}, {"decodificador","tdt","digital","receptor"}, 70),
+            ({"mv-atscontrol","mv-atscontrol2","atscontrol","atscontrol2"}, {"control","remoto","decodificador","tdt"}, 65),
+            # =================================================================
+
             # ---------- COMBOS DE GAS (expandidos y mejorados) ----------
             ({"sensor","detector","medidor","monitor"}, {"gas","tanque","estacionario","estacionaria","lp","propano","butano","gassensor"}, 50),
             ({"iot","inteligente","wifi","smart"}, {"gas","gassensor","gas-sensor"}, 45),
@@ -600,9 +644,9 @@ class CatalogIndexer:
         base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
 
         # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
-        m_q = re.search(r"\b(\d+)\s*[xÃ—]\s*(\d+)\b", q_norm)
+        m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
         if m_q:
-            base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("Ã—", "x"))
+            base_terms.append(re.sub(r"\s+", "", m_q.group(0)).replace("×", "x"))
         q_matrix = f"{m_q.group(1)}x{m_q.group(2)}" if m_q else None  # matriz pedida en la consulta
 
         seen = set()
@@ -708,7 +752,7 @@ class CatalogIndexer:
                 "skus": [x.get("sku") for x in v_infos if x.get("sku")],
             })
 
-        # --- Filtro contextual ligero por combos (HDMI/Divisor, etc.) ---
+        # --- Filtro contextual ligero por combos (HDMI/Divisor, Decodificadores, etc.) ---
         def strong_text(it: Dict[str, Any]) -> str:
             return _norm(it["title"] + " " + it["handle"] + " " + it["tags"] + " " + it.get("product_type","") + " " + it.get("vendor",""))
 
@@ -732,7 +776,7 @@ class CatalogIndexer:
             return t.count(term)
 
         def _has_matrix(text_norm: str, mx: str) -> bool:
-            return (mx in text_norm) or (mx.replace("x", "Ã—") in text_norm)
+            return (mx in text_norm) or (mx.replace("x", "×") in text_norm)
 
         def score_item(it: Dict[str, Any]) -> int:
             ttl, hdl, tgs, bdy = it["title"], it["handle"], it["tags"], it["body"]
@@ -751,6 +795,26 @@ class CatalogIndexer:
             for A, B, bonus in combo_hits:
                 if any(a in st for a in A) and any(b in st for b in B):
                     s += bonus
+
+            # ============== BOOST ESPECIAL PARA DECODIFICADORES (NUEVO) ==============
+            # Detectar si la búsqueda es sobre decodificadores
+            is_decoder_query = any(term in clean_terms for term in ["decodificador", "decoder", "receptor", "sintonizador", "tdt", "digital", "convertidor", "conversor"])
+            is_tv_old_query = any(term in clean_terms for term in ["tv", "televisor", "television"]) and any(term in clean_terms for term in ["antigua", "vieja", "analogica", "analógica"])
+            
+            if is_decoder_query or is_tv_old_query:
+                # Boost masivo para productos específicos de decodificadores
+                if any(prod in st for prod in ["mv-tdtplus", "tdtplus", "tdt-plus"]):
+                    s += 100
+                if any(prod in st for prod in ["mv-atscontrol", "atscontrol"]):
+                    s += 90
+                # Boost para términos relacionados en el texto del producto
+                if "decodificador" in st or "decoder" in st:
+                    s += 80
+                if "tdt" in st or "digital" in st:
+                    s += 70
+                if "receptor" in st or "sintonizador" in st:
+                    s += 60
+            # ==========================================================================
 
             # Inicio de título con primer término
             if clean_terms:
@@ -775,7 +839,7 @@ class CatalogIndexer:
                 if _has_matrix(st_full, q_matrix):
                     s += 60  # fuerte boost si coincide la matriz pedida (p. ej., 1x4)
                 else:
-                    other = re.findall(r"\b(\d+)\s*[xÃ—]\s*(\d+)\b", st_full)
+                    other = re.findall(r"\b(\d+)\s*[x×]\s*(\d+)\b", st_full)
                     for a, b in other:
                         mx = f"{a}x{b}"
                         if mx != q_matrix:
