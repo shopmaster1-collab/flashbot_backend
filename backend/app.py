@@ -603,7 +603,6 @@ def _enforce_intent_gate(query: str, items: list):
 
 # =========================
 #  NUEVO (ADICIONAL): ESTATUS DE PEDIDOS desde Google Sheets (pubhtml)
-#  * No altera el flujo de productos *
 # =========================
 import time, html
 try:
@@ -692,15 +691,20 @@ def _fetch_order_rows(force: bool=False):
     return rows
 
 def _detect_order_number(text: str):
-    if not text: return None
+    if not text:
+        return None
     m = _ORDER_RE.search(text)
     return m.group(1) if m else None
 
 def _looks_like_order_intent(text: str) -> bool:
-    if not text: return False
+    if not text:
+        return False
     t = text.lower()
     keys = ("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
-    return any(k in t for k in keys)
+    if any(k in t for k in keys):
+        return True
+    # Si el usuario escribe solo el número (4-15 dígitos) también lo tratamos como intento de pedido
+    return bool(_ORDER_RE.search(t))
 
 def _lookup_order(order_number: str):
     rows = _fetch_order_rows(force=True)
@@ -730,12 +734,46 @@ def _render_order_vertical(rows: list) -> str:
         parts.append("\n".join(blk))
     return "\n\n".join(parts)
 
+# --------- NUEVO: extractor robusto del texto (para widgets anidados) ----------
+def _extract_user_text(payload):
+    """Devuelve el primer string encontrado en el JSON (buscando keys comunes y también de forma recursiva)."""
+    if not payload:
+        return ""
+    for k in ("message","q","text","query","prompt","content","input","user_input"):
+        v = payload.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            for kk in ("message","q","text","query","prompt","content","user_input","text"):
+                vv = v.get(kk)
+                if isinstance(vv, str) and vv.strip():
+                    return vv.strip()
+    def _walk(obj):
+        if isinstance(obj, str):
+            s = obj.strip()
+            if s:
+                return s
+        elif isinstance(obj, dict):
+            for vv in obj.values():
+                r = _walk(vv)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for it in obj:
+                r = _walk(it)
+                if r:
+                    return r
+        return ""
+    return _walk(payload) or ""
+
 # ----------------- Endpoints -----------------
 @app.post("/api/chat")
 def chat():
     data=request.get_json(force=True) or {}
-    # Cambios mínimos: soportar 'message', 'q' y 'text'
-    query=(data.get("message") or data.get("q") or data.get("text") or "").strip()
+    # Usa el extractor robusto y acepta también ?q= en querystring
+    query = (_extract_user_text(data) or request.args.get("q") or "").strip()
+    print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}'", flush=True)
+
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
     
@@ -753,82 +791,57 @@ def chat():
             }
         })
 
-    # ---------- NUEVO: Desvío quirúrgico para ESTATUS DE PEDIDO ----------
+    # ---------- DESVÍO QUIRÚRGICO: ESTATUS DE PEDIDO ----------
     try:
         if _looks_like_order_intent(query):
             order_no = _detect_order_number(query)
             if order_no:
-                rows = _lookup_order(order_no)  # lee siempre la publicación viva
+                rows = _lookup_order(order_no)  # lee la publicación viva
                 answer = _render_order_vertical(rows)
                 return jsonify({
                     "answer": answer,
                     "products": [],
-                    "pagination": {
-                        "page": 1, "per_page": 10, "total": 0, "total_pages": 0,
-                        "has_next": False, "has_prev": False
-                    }
+                    "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}
                 })
     except Exception as e:
-        # Si algo falla en pedidos, continuamos con el flujo normal de productos
         print(f"[WARN] order-status pipeline error: {e}", flush=True)
-    # ---------- FIN desvío de pedidos ------------------------------------
+    # ---------- FIN desvío de pedidos ----------
 
-    # Buscar muchos más candidatos para poder paginar
+    # Flujo normal de productos (intacto)
     max_search = 200
     all_items=indexer.search(query, k=max_search)
     all_items=_apply_intent_rerank(query, all_items)
     all_items=_enforce_intent_gate(query, all_items)
-    
     total_count = len(all_items)
     
     if not all_items:
         fallback_msg = "No encontré resultados directos para tu búsqueda. "
-        if any(w in query.lower() for w in ["gas", "tanque", "estacionario", "gassensor"]):
+        if any(w in query.lower() for w in ["gas","tanque","estacionario","gassensor"]):
             fallback_msg += "Para sensores de gas, prueba con: 'sensor gas tanque estacionario', 'IOT-GASSENSOR', 'sensor gas con válvula', 'medidor gas WiFi' o 'EASY-GAS'."
-        elif any(w in query.lower() for w in ["agua", "tinaco", "cisterna"]):
+        elif any(w in query.lower() for w in ["agua","tinaco","cisterna"]):
             fallback_msg += "Para sensores de agua, prueba con: 'sensor agua tinaco', 'IOT-WATER', 'sensor nivel cisterna' o 'medidor agua WiFi'."
         else:
             fallback_msg += "Prueba con palabras clave específicas como 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung', 'sensor gas tanque' o 'sensor agua tinaco'."
-        
         return jsonify({
             "answer": fallback_msg,
             "products":[],
-            "pagination": {
-                "page": 1,
-                "per_page": per_page,
-                "total": 0,
-                "total_pages": 0,
-                "has_next": False,
-                "has_prev": False
-            }
+            "pagination": {"page":1,"per_page":per_page,"total":0,"total_pages":0,"has_next":False,"has_prev":False}
         })
 
-    # Calcular paginación
     total_pages = (total_count + per_page - 1) // per_page
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
-    
-    if page < 1:
-        page = 1
+    if page < 1: page = 1
     elif page > total_pages:
         page = total_pages
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
-    
     items = all_items[start_idx:end_idx]
-    
-    pagination = {
-        "page": page,
-        "per_page": per_page,
-        "total": total_count,
-        "total_pages": total_pages,
-        "has_next": page < total_pages,
-        "has_prev": page > 1
-    }
+    pagination = {"page": page,"per_page": per_page,"total": total_count,"total_pages": total_pages,
+                  "has_next": page < total_pages,"has_prev": page > 1}
 
     cards=_cards_from_items(items)
     answer = _generate_contextual_answer(query, items, total_count, page, per_page)
-    
     if deeps and len(answer) > 50:
         try:
             enhanced_answer = deeps.chat(
@@ -839,12 +852,22 @@ def chat():
                 answer = enhanced_answer
         except Exception as e:
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
-    
-    return jsonify({
-        "answer": answer, 
-        "products": cards,
-        "pagination": pagination
-    })
+    return jsonify({"answer": answer, "products": cards, "pagination": pagination})
+
+# --- Endpoint de diagnóstico admin (opcional)
+@app.post("/api/admin/chat-debug")
+def admin_chat_debug():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    payload = request.get_json(force=True) or {}
+    txt = (_extract_user_text(payload) or request.args.get("q") or "").strip()
+    return {
+        "ok": True,
+        "extracted": txt,
+        "looks_order": _looks_like_order_intent(txt),
+        "order_no": _detect_order_number(txt),
+        "payload_keys": list(payload.keys()),
+    }
 
 # --- Reindex background
 def _do_reindex():
@@ -867,15 +890,10 @@ def admin_stats():
 @app.get("/api/admin/diag")
 def admin_diag():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    return {
-        "ok": True,
-        "env": {
-            "STORE_BASE_URL": os.getenv("STORE_BASE_URL"),
-            "FORCE_REST": os.getenv("FORCE_REST"),
-            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE"),
-            "CHAT_WRITER": CHAT_WRITER,
-        }
-    }
+    return {"ok": True, "env": {"STORE_BASE_URL": os.getenv("STORE_BASE_URL"),
+                                 "FORCE_REST": os.getenv("FORCE_REST"),
+                                 "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE"),
+                                 "CHAT_WRITER": CHAT_WRITER}}
 
 @app.get("/api/admin/preview")
 def admin_preview():
