@@ -603,7 +603,6 @@ def _enforce_intent_gate(query: str, items: list):
 
 # =========================
 #  NUEVO: FUNCIÓN ADICIONAL — ESTATUS DE PEDIDOS (pubhtml)
-#  * No interfiere con la lógica de productos *
 # =========================
 import time, html
 try:
@@ -613,21 +612,17 @@ except Exception:
     requests = None
     BeautifulSoup = None
 
-# ENV para pedidos
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
 ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" lee siempre; "0" usa TTL corto
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 
-# Cache simple en memoria
 _orders_cache = {"ts": 0.0, "rows": []}
 
-# Columnas objetivo (tolerantes a encabezados variables)
 _ORDER_COLS = [
     "# de Orden", "SKU", "Pzas", "Precio Unitario", "Precio Total",
     "Fecha Inicio", "EN PROCESO", "Paquetería", "Fecha envío", "Fecha Entrega"
 ]
 
-# Mapa flexible de encabezados
 _HEADER_MAP = {
     "# DE ORDEN": "# de Orden",
     "NO. DE ORDEN": "# de Orden",
@@ -686,7 +681,6 @@ def _fetch_order_rows(force: bool=False):
     if not table:
         return []
 
-    # Encabezados
     trs = table.find_all("tr")
     if not trs:
         return []
@@ -710,12 +704,14 @@ def _fetch_order_rows(force: bool=False):
     return rows
 
 def _detect_order_number(text: str):
-    if not text: return None
+    if not text:
+        return None
     m = _ORDER_RE.search(text)
     return m.group(1) if m else None
 
 def _looks_like_order_intent(text: str) -> bool:
-    if not text: return False
+    if not text:
+        return False
     t = text.lower()
     keys = ("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
     return any(k in t for k in keys)
@@ -739,7 +735,7 @@ def _lookup_order(order_number: str):
 def _render_order_vertical(rows: list) -> str:
     """Formato mobile-first (widget vertical): bloques de 'clave: valor' por ítem."""
     if not rows:
-    return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
+        return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
     parts=[]
     for i, r in enumerate(rows, 1):
         blk=[f"**Artículo {i}**"]
@@ -752,6 +748,7 @@ def _render_order_vertical(rows: list) -> str:
 @app.post("/api/chat")
 def chat():
     data=request.get_json(force=True) or {}
+    # LEE 'message' O 'q' (tu widget usa 'q')
     query=(data.get("message") or data.get("q") or "").strip()
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
