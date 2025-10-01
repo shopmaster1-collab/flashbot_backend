@@ -44,6 +44,29 @@ except Exception as e:
 def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
+# =========================
+#  NUEVO: servir widget estático desde /widget/*
+# =========================
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+# Busca la carpeta 'widget' en ubicaciones comunes (según cómo se ejecute el paquete)
+_WIDGET_CANDIDATES = [
+    os.path.join(BASE_DIR, "widget"),
+    os.path.join(os.path.dirname(BASE_DIR), "widget"),
+    os.path.join(os.path.dirname(os.path.dirname(BASE_DIR)), "widget"),
+]
+WIDGET_DIR = next((p for p in _WIDGET_CANDIDATES if os.path.isdir(p)), _WIDGET_CANDIDATES[0])
+
+@app.get("/widget/<path:filename>")
+def serve_widget(filename):
+    full = os.path.join(WIDGET_DIR, filename)
+    if not os.path.isfile(full):
+        return {"ok": False, "error": "not_found"}, 404
+    resp = send_from_directory(WIDGET_DIR, filename)
+    # Cache 7 días
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+# =========================
+
 @app.get("/")
 def home():
     return ("<h1>Maxter backend</h1>"
@@ -56,7 +79,9 @@ def home():
             '<code>GET /api/admin/discards</code>, '
             '<code>GET /api/admin/products</code>, '
             '<code>GET /api/admin/diag</code>, '
-            '<code>GET /api/admin/preview?q=...</code>'
+            '<code>GET /api/admin/preview?q=...</code>, '
+            '<code>GET /widget/widget.css</code>, '
+            '<code>GET /widget/widget.js</code>'
             "</p>")
 
 @app.get("/health")
