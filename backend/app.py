@@ -739,7 +739,7 @@ def _lookup_order(order_number: str):
 def _render_order_vertical(rows: list) -> str:
     """Formato mobile-first (widget vertical): bloques de 'clave: valor' por ítem."""
     if not rows:
-        return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
+    return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
     parts=[]
     for i, r in enumerate(rows, 1):
         blk=[f"**Artículo {i}**"]
@@ -752,7 +752,7 @@ def _render_order_vertical(rows: list) -> str:
 @app.post("/api/chat")
 def chat():
     data=request.get_json(force=True) or {}
-    query=(data.get("message") or "").strip()
+    query=(data.get("message") or data.get("q") or "").strip()
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
     
