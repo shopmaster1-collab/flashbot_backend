@@ -3,10 +3,6 @@ import os, re, threading
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
-import requests
-import csv
-from io import StringIO
-from datetime import datetime
 
 from .shopify_client import ShopifyClient
 from .indexer import CatalogIndexer
@@ -39,13 +35,6 @@ if CHAT_WRITER == "deepseek" and DeepseekClient:
     except Exception:
         deeps = None
 
-# URL de Google Sheets publicada (formato CSV)
-ORDERS_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSvtBeUGaoH4_9UOuVJUEh3hbWq1tLSloCQyB9Hxp3-Eg4bSRFFwArFbbFtGTPF98rAcukeYr_rYWXq/pub?gid=0&single=true&output=csv"
-
-# Cache para los datos de pedidos (se actualiza cada cierto tiempo)
-_orders_cache = {"data": None, "last_update": None}
-_orders_cache_ttl = 300  # 5 minutos
-
 # Construcción inicial del índice (no caer si falla)
 try:
     indexer.build()
@@ -73,148 +62,6 @@ def home():
 @app.get("/health")
 def health():
     return {"ok": True}
-
-# =========== FUNCIONES PARA CONSULTA DE PEDIDOS ===========
-
-def _fetch_orders_data():
-    """Obtiene los datos de pedidos desde Google Sheets"""
-    global _orders_cache
-    
-    # Verificar si el cache es válido
-    if _orders_cache["data"] is not None and _orders_cache["last_update"]:
-        elapsed = (datetime.now() - _orders_cache["last_update"]).total_seconds()
-        if elapsed < _orders_cache_ttl:
-            return _orders_cache["data"]
-    
-    try:
-        response = requests.get(ORDERS_SHEET_URL, timeout=10)
-        response.raise_for_status()
-        
-        # Parsear CSV
-        csv_data = StringIO(response.text)
-        reader = csv.DictReader(csv_data)
-        orders = list(reader)
-        
-        # Actualizar cache
-        _orders_cache["data"] = orders
-        _orders_cache["last_update"] = datetime.now()
-        
-        return orders
-    except Exception as e:
-        print(f"[ERROR] Failed to fetch orders: {e}", flush=True)
-        return None
-
-def _is_order_query(query: str) -> bool:
-    """Detecta si la consulta es sobre un pedido"""
-    ql = query.lower()
-    
-    # Palabras clave para consultas de pedidos
-    order_keywords = [
-        "pedido", "orden", "order", "compra", "envio", "envío",
-        "rastreo", "seguimiento", "status", "estatus", "estado",
-        "tracking", "entrega", "paquete", "paqueteria", "paquetería"
-    ]
-    
-    return any(keyword in ql for keyword in order_keywords)
-
-def _extract_order_number(query: str) -> str:
-    """Extrae el número de pedido de la consulta"""
-    # Buscar patrones como: #1234, orden 1234, pedido 1234, etc.
-    patterns = [
-        r'#\s*(\d+)',  # #1234 o # 1234
-        r'(?:pedido|orden|order|compra)\s*[#:]?\s*(\d+)',  # pedido 1234, orden #1234
-        r'\b(\d{4,})\b'  # Número de 4+ dígitos
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, query, re.IGNORECASE)
-        if match:
-            return match.group(1)
-    
-    return None
-
-def _search_order(order_number: str) -> list:
-    """Busca un pedido específico en los datos"""
-    orders_data = _fetch_orders_data()
-    
-    if not orders_data:
-        return None
-    
-    # Buscar todas las líneas que coincidan con el número de orden
-    matching_orders = []
-    for order in orders_data:
-        # El campo puede llamarse "# de Orden" o similar
-        order_id = str(order.get("# de Orden", "")).strip()
-        if order_id == str(order_number).strip():
-            matching_orders.append(order)
-    
-    return matching_orders if matching_orders else None
-
-def _format_order_response(order_number: str, order_items: list) -> str:
-    """Formatea la respuesta con los datos del pedido"""
-    if not order_items:
-        return (f"Lo siento, no encontré información sobre el pedido #{order_number}. "
-                f"Por favor verifica el número de orden e intenta nuevamente.")
-    
-    # Construir respuesta detallada
-    response = f"📦 **Información del Pedido #{order_number}**\n\n"
-    
-    # Si hay múltiples items en el pedido
-    if len(order_items) > 1:
-        response += f"Tu pedido contiene {len(order_items)} productos:\n\n"
-    
-    for idx, item in enumerate(order_items, 1):
-        if len(order_items) > 1:
-            response += f"**Producto {idx}:**\n"
-        
-        # SKU y cantidad
-        sku = item.get("SKU", "N/A")
-        pzas = item.get("Pzas", "N/A")
-        response += f"• SKU: {sku}\n"
-        response += f"• Cantidad: {pzas} pza(s)\n"
-        
-        # Precios
-        precio_unit = item.get("Precio Unitario", "N/A")
-        precio_total = item.get("Precio Total", "N/A")
-        if precio_unit != "N/A":
-            try:
-                response += f"• Precio unitario: ${float(precio_unit):,.2f}\n"
-            except:
-                response += f"• Precio unitario: {precio_unit}\n"
-        if precio_total != "N/A":
-            try:
-                response += f"• Precio total: ${float(precio_total):,.2f}\n"
-            except:
-                response += f"• Precio total: {precio_total}\n"
-        
-        # Fechas
-        fecha_inicio = item.get("Fecha Inicio", "N/A")
-        if fecha_inicio != "N/A":
-            response += f"• Fecha de inicio: {fecha_inicio}\n"
-        
-        # Estado del pedido
-        en_proceso = item.get("EN PROCESO", "N/A")
-        if en_proceso != "N/A":
-            response += f"• Estado: {en_proceso}\n"
-        
-        # Información de envío
-        paqueteria = item.get("Paqueteria", "N/A")
-        fecha_envio = item.get("Fecha envió", "N/A")  # Nota: tiene acento en "envió"
-        fecha_entrega = item.get("Fecha Entrega", "N/A")
-        
-        if paqueteria != "N/A":
-            response += f"• Paquetería: {paqueteria}\n"
-        if fecha_envio != "N/A":
-            response += f"• Fecha de envío: {fecha_envio}\n"
-        if fecha_entrega != "N/A":
-            response += f"• Fecha de entrega estimada: {fecha_entrega}\n"
-        
-        if len(order_items) > 1 and idx < len(order_items):
-            response += "\n"
-    
-    response += "\n¿Necesitas más información sobre tu pedido?"
-    
-    return response
 
 # --------- util de patrones para la redacción ----------
 _PAT_ONE_BY_N = re.compile(r"\b(\d+)\s*[x×]\s*(\d+)\b", re.IGNORECASE)
@@ -739,7 +586,7 @@ def chat():
     
     if not query:
         return jsonify({
-            "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores de agua, sensores de gas y mucho más. También puedes consultar el estado de tu pedido proporcionando tu número de orden.",
+            "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores de agua, sensores de gas y mucho más.",
             "products":[],
             "pagination": {
                 "page": 1,
@@ -751,44 +598,6 @@ def chat():
             }
         })
 
-    # ===== PRIMERO: Verificar si es una consulta de pedido =====
-    if _is_order_query(query):
-        order_number = _extract_order_number(query)
-        
-        if order_number:
-            order_items = _search_order(order_number)
-            answer = _format_order_response(order_number, order_items)
-            
-            return jsonify({
-                "answer": answer,
-                "products": [],
-                "pagination": {
-                    "page": 1,
-                    "per_page": per_page,
-                    "total": 0,
-                    "total_pages": 0,
-                    "has_next": False,
-                    "has_prev": False
-                },
-                "order_query": True
-            })
-        else:
-            # Detectó que es consulta de pedido pero no encontró número
-            return jsonify({
-                "answer": "Para consultar tu pedido, por favor proporciona tu número de orden. Por ejemplo: 'pedido #1234' o 'orden 1234'.",
-                "products": [],
-                "pagination": {
-                    "page": 1,
-                    "per_page": per_page,
-                    "total": 0,
-                    "total_pages": 0,
-                    "has_next": False,
-                    "has_prev": False
-                },
-                "order_query": True
-            })
-
-    # ===== Si no es consulta de pedido, proceder con búsqueda de productos =====
     # Buscar muchos más candidatos para poder paginar
     max_search = 200
     all_items=indexer.search(query, k=max_search)
