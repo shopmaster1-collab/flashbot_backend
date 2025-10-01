@@ -3,12 +3,25 @@
 Flask App – Backend del chatbot con capacidad de consulta de pedidos desde Google Sheets.
 
 NUEVO:
-- OrderService (cache en SQLite, refresco desde Google Sheet o CSV publicado)
-- POST /api/orders/lookup        -> consulta por order_id, tracking o texto libre
-- POST /admin/orders/reload      -> recarga el cache desde la fuente (CSV/Sheets)
-- handle_orders_intent(...)      -> helper para integrarlo en tu /api/chat sin romper nada
+- Soporte para ORDERS_PUBHTML_URL (link "publicado en la web" en formato HTML).
+  Se convierte automáticamente a CSV interno: .../pub?output=csv&gid=<gid>
+- Se mantienen las opciones previas:
+  * ORDERS_CSV_URL (CSV directo publicado)
+  * GOOGLE_SERVICE_ACCOUNT_JSON + ORDERS_SPREADSHEET_ID + ORDERS_RANGE (API Sheets)
 
-No interfiere con rutas existentes: solo agrega nuevas rutas y utilitarios.
+Rutas añadidas (no afectan tus rutas actuales):
+- POST /api/orders/lookup        -> consulta por número de orden / guía / texto libre
+- POST /admin/orders/reload      -> recarga el cache desde la fuente (HTML->CSV, CSV o API)
+- handle_orders_intent(...)      -> helper para interceptar intención desde tu /api/chat
+
+Variables de entorno relevantes:
+- ORDERS_PUBHTML_URL         (p.ej. tu link .../pubhtml?... )
+- ORDERS_CSV_URL             (si ya tienes CSV directo)
+- GOOGLE_SERVICE_ACCOUNT_JSON (opcional, JSON inline o ruta)
+- ORDERS_SPREADSHEET_ID      (opcional)
+- ORDERS_RANGE               (opcional, p.ej. Pedidos!A:Z)
+- ORDERS_SQLITE_PATH         (por defecto /data/orders.sqlite3)
+- ORDERS_AUTORELOAD          (1 para recargar al iniciar)
 """
 
 import os
@@ -20,7 +33,7 @@ import math
 import sqlite3
 import datetime as dt
 import re
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 import requests
 from flask import Flask, request, jsonify
@@ -38,21 +51,14 @@ def env_bool(name: str, default: bool = False) -> bool:
     return default
 
 def parse_service_account_json() -> Optional[dict]:
-    """
-    Devuelve el JSON del Service Account si:
-    - GOOGLE_SERVICE_ACCOUNT_JSON contiene JSON inline, o
-    - es una ruta a archivo con el JSON del service account.
-    """
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
         return None
-    # ¿Es JSON inline?
     if raw.startswith("{"):
         try:
             return json.loads(raw)
         except Exception:
             return None
-    # ¿Es ruta?
     if os.path.exists(raw):
         try:
             with open(raw, "r", encoding="utf-8") as fh:
@@ -92,10 +98,6 @@ def safe_int(x) -> Optional[int]:
         return None
 
 def to_date(s: str) -> Optional[str]:
-    """
-    Convierte cualquier string de fecha a ISO YYYY-MM-DD para guardar en DB.
-    A la hora de responder al cliente, se formatea a DD/MM/AAAA.
-    """
     if not s:
         return None
     s = str(s).strip()
@@ -116,7 +118,6 @@ def to_date(s: str) -> Optional[str]:
             return d.strftime("%Y-%m-%d")
         except Exception:
             pass
-    # Último intento: dejar tal cual si parece una fecha
     return None
 
 def fmt_date_ddmmyyyy(iso_date: Optional[str]) -> Optional[str]:
@@ -129,18 +130,35 @@ def fmt_date_ddmmyyyy(iso_date: Optional[str]) -> Optional[str]:
         return iso_date
 
 # --------------------------------------------------------------------------------------
+# Helpers para Google "pubhtml" -> CSV
+# --------------------------------------------------------------------------------------
+
+def derive_csv_from_pubhtml(pubhtml_url: str) -> Optional[str]:
+    """
+    Convierte una URL publicada en HTML de Google Sheets a su equivalente CSV.
+
+    Soporta patrones como:
+      https://docs.google.com/spreadsheets/d/e/<KEY>/pubhtml?gid=0&single=true
+    Devuelve:
+      https://docs.google.com/spreadsheets/d/e/<KEY>/pub?gid=0&single=true&output=csv
+    """
+    if not pubhtml_url:
+        return None
+    u = pubhtml_url.strip()
+    if "/pubhtml" not in u:
+        return None
+    # Conservar parámetros existentes y agregar output=csv
+    u = u.replace("/pubhtml", "/pub")
+    if "output=csv" not in u:
+        sep = "&" if "?" in u else "?"
+        u = f"{u}{sep}output=csv"
+    return u
+
+# --------------------------------------------------------------------------------------
 # OrderService – carga y cache de pedidos
 # --------------------------------------------------------------------------------------
 
 class OrderService:
-    """
-    Carga pedidos desde:
-      A) CSV publicado (ORDERS_CSV_URL)
-      B) Google Sheets API con Service Account (ORDERS_SPREADSHEET_ID + ORDERS_RANGE)
-
-    Normaliza columnas y guarda en SQLite para respuestas rápidas.
-    """
-
     DEFAULT_DB = os.getenv("ORDERS_SQLITE_PATH", "/data/orders.sqlite3")
 
     def __init__(self, db_path: Optional[str] = None):
@@ -162,8 +180,8 @@ class OrderService:
             qty INTEGER,
             unit_price REAL,
             total_price REAL,
-            start_date TEXT,   -- ISO YYYY-MM-DD
-            ship_date TEXT,    -- ISO YYYY-MM-DD
+            start_date TEXT,
+            ship_date TEXT,
             customer_email TEXT,
             customer_phone TEXT,
             raw_json TEXT
@@ -176,12 +194,6 @@ class OrderService:
         con.commit()
         con.close()
 
-    def _clear(self):
-        con = sqlite3.connect(self.db_path)
-        con.execute("DELETE FROM orders")
-        con.commit()
-        con.close()
-
     # ------------------ Fuente de datos ------------------
 
     def _load_from_csv_url(self, url: str) -> List[Dict[str, Any]]:
@@ -189,24 +201,14 @@ class OrderService:
         r.raise_for_status()
         content = r.content.decode("utf-8", errors="replace")
         reader = csv.DictReader(io.StringIO(content))
-        rows = [dict(row) for row in reader]
-        return rows
+        return [dict(row) for row in reader]
 
     def _load_from_google_sheets(self) -> List[Dict[str, Any]]:
-        """
-        Llamada directa a la API de Google Sheets v4 vía token del Service Account.
-
-        Requiere:
-          - GOOGLE_SERVICE_ACCOUNT_JSON (inline o ruta)
-          - ORDERS_SPREADSHEET_ID
-          - ORDERS_RANGE  (p.ej. 'Pedidos!A:Z')
-        """
         sa = parse_service_account_json()
         spreadsheet_id = os.getenv("ORDERS_SPREADSHEET_ID", "").strip()
         range_name = os.getenv("ORDERS_RANGE", "Pedidos!A:Z")
         assert sa and spreadsheet_id, "Faltan credenciales o SPREADSHEET_ID para Google Sheets"
 
-        # 1) OAuth2 JWT -> access_token
         token_url = "https://oauth2.googleapis.com/token"
         import jwt  # PyJWT
         now = int(time.time())
@@ -226,7 +228,6 @@ class OrderService:
         token_resp.raise_for_status()
         access_token = token_resp.json()["access_token"]
 
-        # 2) Sheets API
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{range_name}?majorDimension=ROWS"
         headers = {"Authorization": f"Bearer {access_token}"}
         resp = requests.get(url, headers=headers, timeout=30)
@@ -252,11 +253,6 @@ class OrderService:
         return re.sub(r"[^a-z0-9_]+", "_", k.strip().lower())
 
     def _normalize_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Mapear nombres flexibles de columnas a nuestro esquema.
-        Acepta sinónimos comunes en español.
-        """
-        # Construir dict con claves normalizadas
         n = {self._norm_key(k): v for k, v in row.items()}
 
         def pick(*names, default=None):
@@ -266,19 +262,18 @@ class OrderService:
                     return n[kn]
             return default
 
-        order_number = pick("Número de orden", "No de orden", "orden", "order", "order_number", "numero de orden", "pedido", "folio")
-        tracking     = pick("Guía", "tracking", "no de guia", "numero de guia", "num guia", "guia")
-        carrier      = pick("Paquetería", "carrier", "paqueteria")
-        sku          = pick("SKU", "sku", "clave", "codigo", "código")
-        qty          = safe_int(pick("Pzas", "pzas", "cantidad", "qty", "cantidad pzs", "piezas"))
-        unit_price   = safe_float(pick("Precio unitario", "precio unitario", "unit_price", "precio_u"))
-        total_price  = safe_float(pick("Precio total", "total", "precio total", "total_price"))
-        start_date   = to_date(pick("Fecha de inicio", "inicio", "fecha compra", "start_date"))
-        ship_date    = to_date(pick("Fecha de envío", "envio", "fecha envio", "ship_date"))
+        order_number   = pick("Número de orden", "No de orden", "orden", "order", "order_number", "numero de orden", "pedido", "folio")
+        tracking       = pick("Guía", "tracking", "no de guia", "numero de guia", "num guia", "guia")
+        carrier        = pick("Paquetería", "carrier", "paqueteria")
+        sku            = pick("SKU", "sku", "clave", "codigo", "código")
+        qty            = safe_int(pick("Pzas", "pzas", "cantidad", "qty", "cantidad pzs", "piezas"))
+        unit_price     = safe_float(pick("Precio unitario", "precio unitario", "unit_price", "precio_u"))
+        total_price    = safe_float(pick("Precio total", "total", "precio total", "total_price"))
+        start_date     = to_date(pick("Fecha de inicio", "inicio", "fecha compra", "start_date"))
+        ship_date      = to_date(pick("Fecha de envío", "envio", "fecha envio", "ship_date"))
         customer_email = pick("Correo", "email", "mail", "customer_email")
         customer_phone = pick("Telefono", "teléfono", "telefono", "phone", "customer_phone")
 
-        # Si no hay total y sí hay unit + qty, calcúlalo
         if total_price is None and unit_price is not None and qty is not None:
             total_price = round(unit_price * qty, 2)
 
@@ -301,16 +296,27 @@ class OrderService:
 
     def reload(self) -> Dict[str, Any]:
         """
-        Recarga el cache desde la fuente configurada.
+        Orden de preferencia:
+        1) ORDERS_CSV_URL
+        2) ORDERS_PUBHTML_URL (se deriva CSV automáticamente)
+        3) Google Sheets API (service account)
         """
         csv_url = os.getenv("ORDERS_CSV_URL", "").strip()
+        pubhtml_url = os.getenv("ORDERS_PUBHTML_URL", "").strip()
+
+        rows: List[Dict[str, Any]] = []
         if csv_url:
             rows = self._load_from_csv_url(csv_url)
+        elif pubhtml_url:
+            derived_csv = derive_csv_from_pubhtml(pubhtml_url)
+            if not derived_csv:
+                raise AssertionError("No se pudo derivar la URL CSV desde ORDERS_PUBHTML_URL.")
+            rows = self._load_from_csv_url(derived_csv)
         else:
             rows = self._load_from_google_sheets()
 
         norm = [self._normalize_row(r) for r in rows]
-        # Volcar en DB
+
         con = sqlite3.connect(self.db_path)
         self._ensure_schema()
         con.execute("DELETE FROM orders")
@@ -348,10 +354,6 @@ class OrderService:
 
     def lookup(self, order_id: Optional[str] = None, tracking: Optional[str] = None,
                email: Optional[str] = None, phone: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Devuelve resumen y detalle (ítems) del pedido. Si encuentra múltiples filas del mismo pedido,
-        agrega cantidades y totales.
-        """
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
@@ -360,7 +362,6 @@ class OrderService:
         if tracking:
             cur.execute("SELECT * FROM orders WHERE tracking = ?", (tracking,))
             rows = cur.fetchall()
-            # Si hay tracking, tratamos de encontrar el order_number asociado para agregar el resto
             if rows and rows[0]["order_number"]:
                 cur.execute("SELECT * FROM orders WHERE order_number = ?", (rows[0]["order_number"],))
                 rows = cur.fetchall()
@@ -371,7 +372,9 @@ class OrderService:
             cur.execute("SELECT * FROM orders WHERE customer_email = ?", (email,))
             rows = cur.fetchall()
         elif phone:
-            cur.execute("SELECT * FROM orders WHERE customer_phone LIKE ?", (f"%{phone[-4:]}%",))
+            # búsqueda por últimos 4 dígitos
+            p4 = phone[-4:] if phone else ""
+            cur.execute("SELECT * FROM orders WHERE customer_phone LIKE ?", (f"%{p4}%",))
             rows = cur.fetchall()
 
         con.close()
@@ -379,7 +382,6 @@ class OrderService:
         if not rows:
             return {"ok": False, "reason": "not_found"}
 
-        # Agregación por pedido
         order_number = rows[0]["order_number"] or order_id
         tracking_code = None
         carrier = None
@@ -391,7 +393,6 @@ class OrderService:
         total_amount = 0.0
 
         for r in rows:
-            # Preferir valores no vacíos
             if (r["tracking"] or "").strip():
                 tracking_code = r["tracking"]
             if (r["carrier"] or "").strip():
@@ -436,8 +437,6 @@ class OrderService:
         message_parts.append(head + ".")
 
         message_parts.append(f"Resumen: {summary['lines']} renglones / **{summary['total_qty']} pzas**. Total: **{money_mx(summary['total_amount'])}**.")
-
-        # Detalle de líneas
         for it in items:
             message_parts.append(f"- SKU {it['sku']} — {it['qty']} pzas — {money_mx(it['unit_price'])} c/u — Subtotal {money_mx(it['line_total'])}")
 
@@ -468,8 +467,8 @@ def health():
 @app.route("/admin/orders/reload", methods=["POST"])
 def admin_orders_reload():
     """
-    Recarga el cache desde el Sheet/CSV.
-    Protege esta ruta con un reverse proxy o header personalizado si lo deseas.
+    Recarga el cache desde la fuente configurada (CSV, PUBHTML -> CSV, o API Sheets).
+    Protege esta ruta con un header/secret en tu reverse proxy si gustas.
     """
     try:
         result = orders.reload()
@@ -484,7 +483,7 @@ def api_orders_lookup():
     """
     Body (cualquiera de los campos):
     {
-      "query": "quiero saber el estatus de mi pedido #ME-12345",
+      "query": "Quiero saber el estatus de mi pedido #ME-12345",
       "order_id": "ME-12345",
       "tracking": "ABC123456MX",
       "email": "cliente@correo.com",
@@ -498,13 +497,12 @@ def api_orders_lookup():
     email = (data.get("email") or "").strip() or None
     phone = (data.get("phone") or "").strip() or None
 
-    # Extraer id desde texto libre si no llegó explícito
+    # Extraer identificadores desde texto libre
     if query and not (order_id or tracking):
         ids = orders.extract_identifiers(query)
         order_id = order_id or ids.get("order_id")
         tracking = tracking or ids.get("tracking")
 
-    # Si no hay identificadores, pedirlos
     if not (order_id or tracking or email or phone):
         return jsonify({
             "ok": False,
@@ -519,7 +517,8 @@ def api_orders_lookup():
                 "ok": False,
                 "message": "No encontré coincidencias. ¿Puedes confirmar tu número de orden o guía?"
             }), 200
-        # Adjuntar tracking_url si se reconoce la paquetería
+
+        # Adjuntar URL de rastreo si reconocemos la paquetería
         trk = res.get("tracking")
         carrier = (res.get("carrier") or "").lower()
         if trk:
@@ -531,6 +530,7 @@ def api_orders_lookup():
                 res["tracking_url"] = f"https://www.dhl.com/mx-es/home/rastreo.html?tracking-id={trk}"
             elif "99minutos" in carrier or "99 minutos" in carrier:
                 res["tracking_url"] = f"https://99minutos.com/track?tracking={trk}"
+
         return jsonify(res), 200
     except Exception as e:
         return jsonify({"ok": False, "error": repr(e)}), 500
@@ -555,15 +555,11 @@ def handle_orders_intent(message: str, meta: Optional[dict] = None) -> Optional[
     Llama esta función desde tu flujo actual de /api/chat ANTES de tu lógica normal:
         maybe = handle_orders_intent(user_message)
         if maybe: return jsonify(maybe)
-
-    Si detecta intención de pedido/guía, responde inmediatamente con el JSON del pedido.
-    Si no, devuelve None y tu flujo sigue normal.
     """
     text = (message or "").strip()
     if not text:
         return None
 
-    # ¿Coincide con intención?
     if not any(p.search(text) for p in INTENT_RES) and not (ORDER_RE.search(text) or TRACK_RE.search(text)):
         return None
 
@@ -575,7 +571,6 @@ def handle_orders_intent(message: str, meta: Optional[dict] = None) -> Optional[
             "need": "identifier",
             "message": "¿Me compartes tu número de orden o guía para localizar tu pedido?"
         }
-    # Adjunta tracking_url si aplica
     trk = res.get("tracking")
     carrier = (res.get("carrier") or "").lower()
     if trk:
@@ -594,9 +589,10 @@ def handle_orders_intent(message: str, meta: Optional[dict] = None) -> Optional[
 # --------------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Carga inicial del cache si ORDERS_AUTORELOAD=1
     if env_bool("ORDERS_AUTORELOAD", True):
         try:
+            # Si solo tienes el link HTML publicado, bastará con setear ORDERS_PUBHTML_URL
+            # y aquí se derivará automáticamente a CSV.
             orders.reload()
         except Exception as e:
             print("WARN: No se pudo cargar pedidos al inicio:", repr(e))
