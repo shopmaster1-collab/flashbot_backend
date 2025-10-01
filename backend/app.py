@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, threading
+import os, re, threading, time, html
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -13,6 +13,14 @@ try:
     from .deepseek_client import DeepseekClient
 except Exception:
     DeepseekClient = None
+
+# --- HTTP libs para Google Sheet
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except Exception:
+    requests = None
+    BeautifulSoup = None
 
 load_dotenv()
 app = Flask(__name__)
@@ -45,7 +53,7 @@ def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
 # =========================
-#  NUEVO: servir widget estático desde /widget/*
+#  Servir widget estático desde /widget/*
 # =========================
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 _WIDGET_CANDIDATES = [
@@ -63,7 +71,6 @@ def serve_widget(filename):
     resp = send_from_directory(WIDGET_DIR, filename)
     resp.headers["Cache-Control"] = "public, max-age=604800"  # 7 días
     return resp
-# =========================
 
 @app.get("/")
 def home():
@@ -78,8 +85,7 @@ def home():
             '<code>GET /api/admin/products</code>, '
             '<code>GET /api/admin/diag</code>, '
             '<code>GET /api/admin/preview?q=...</code>, '
-            '<code>GET /widget/widget.css</code>, '
-            '<code>GET /widget/widget.js</code>'
+            '<code>GET /api/admin/orders-ping</code>'
             "</p>")
 
 @app.get("/health")
@@ -200,7 +206,7 @@ def _plain_items(items):
                     "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
     return out
 
-# ---------- Señales / familias ULTRA PERMISIVAS ----------
+# ---------- Señales / familias (sin cambios de negocio) ----------
 _WATER_ALLOW_FAMILIES = [
     "iot-waterv","iot-waterultra","iot-waterp","iot-water",
     "easy-waterultra","easy-water","iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water",
@@ -240,8 +246,8 @@ def _concat_fields(it) -> str:
     v = it.get("variant", {})
     body = (it.get("body") or "").lower()
     if len(body) > 1500: body = body[:1500]
-    parts = [it.get("title") or "", it.get("handle") or "", it.get("tags") or "", it.get("vendor") or "",
-             it.get("product_type") or "", v.get("sku") or "", body]
+    parts = [it.get("title") or "", it.get("handle") or "", it.get("tags") or "",
+             it.get("vendor") or "", it.get("product_type") or "", v.get("sku") or "", body]
     if isinstance(it.get("skus"), (list, tuple)):
         parts.extend([x for x in it["skus"] if x])
     return " ".join(parts).lower()
@@ -398,22 +404,15 @@ def _enforce_intent_gate(query: str, items: list):
 # =========================
 #  ESTATUS DE PEDIDOS (Google Sheets pubhtml)
 # =========================
-import time, html
-try:
-    import requests
-    from bs4 import BeautifulSoup
-except Exception:
-    requests = None
-    BeautifulSoup = None
-
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
 ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
-_orders_cache = {"ts": 0.0, "rows": []}
+_orders_cache = {"ts": 0.0, "rows": [], "headers": []}
 
 _ORDER_COLS = ["# de Orden","SKU","Pzas","Precio Unitario","Precio Total","Fecha Inicio","EN PROCESO","Paquetería","Fecha envío","Fecha Entrega"]
 _HEADER_MAP = {
-    "# DE ORDEN":"# de Orden","NO. DE ORDEN":"# de Orden","NÚMERO DE ORDEN":"# de Orden","NÚMERO DE PEDIDO":"# de Orden","ORDEN":"# de Orden","# ORDEN":"# de Orden","#":"# de Orden",
+    "# DE ORDEN":"# de Orden","NO. DE ORDEN":"# de Orden","NÚMERO DE ORDEN":"# de Orden",
+    "NÚMERO DE PEDIDO":"# de Orden","ORDEN":"# de Orden","# ORDEN":"# de Orden","#":"# de Orden",
     "SKU":"SKU","PZAS":"Pzas","PIEZAS":"Pzas","CANTIDAD":"Pzas",
     "PRECIO UNITARIO":"Precio Unitario","PRECIO":"Precio Unitario",
     "PRECIO TOTAL":"Precio Total","TOTAL":"Precio Total",
@@ -430,34 +429,72 @@ def _norm_header(t: str) -> str:
     return _HEADER_MAP.get(u, t)
 
 def _fetch_order_rows(force: bool=False):
+    """Lee la tabla 'waffle' del pubhtml y devuelve filas normalizadas."""
     global _orders_cache
     now=time.time()
-    if ORDERS_AUTORELOAD!="1":
-        if _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
-            return _orders_cache["rows"]
+
+    if ORDERS_AUTORELOAD!="1" and _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
+        return _orders_cache["rows"]
+
     if not (ORDERS_PUBHTML_URL and requests and BeautifulSoup):
+        print("[ORDERS] missing deps or URL", flush=True)
         return []
+
     try:
         r=requests.get(ORDERS_PUBHTML_URL, timeout=20, headers={"Cache-Control":"no-cache"})
         r.raise_for_status()
     except Exception as e:
-        print(f"[WARN] orders pubhtml fetch error: {e}", flush=True)
+        print(f"[ORDERS] fetch error: {e}", flush=True)
         return []
+
     soup=BeautifulSoup(r.text, "html.parser")
-    table=soup.find("table")
-    if not table: return []
-    trs=table.find_all("tr")
-    if not trs: return []
-    headers=[_norm_header(c.get_text(strip=True)) for c in trs[0].find_all(["th","td"])]
+    tables=soup.find_all("table")
+    waffle=soup.find("table", {"class":"waffle"}) or (tables[-1] if tables else None)
+    if not waffle:
+        print(f"[ORDERS] no table found. total_tables={len(tables)}", flush=True)
+        return []
+
+    # Headers: prefer thead > tr > th/td
+    headers=[]
+    thead=waffle.find("thead")
+    if thead:
+        thr=thead.find("tr")
+        if thr:
+            headers=[_norm_header(c.get_text(strip=True)) for c in thr.find_all(["th","td"])]
+    if not headers:
+        # fallback: first tr having th
+        first_th_tr=None
+        for tr in waffle.find_all("tr"):
+            if tr.find("th"):
+                first_th_tr=tr; break
+        if first_th_tr:
+            headers=[_norm_header(c.get_text(strip=True)) for c in first_th_tr.find_all(["th","td"])]
+    if not headers:
+        # ultimate fallback: first tr
+        tr=waffle.find("tr")
+        if tr:
+            headers=[_norm_header(c.get_text(strip=True)) for c in tr.find_all(["th","td"])]
+
+    # Body rows
     rows=[]
-    for tr in trs[1:]:
+    tbody=waffle.find("tbody")
+    body_trs=tbody.find_all("tr") if tbody else [tr for tr in waffle.find_all("tr")]
+    # si usamos thead, saltar el primer tr (header)
+    for tr in body_trs:
         tds=[c.get_text(strip=True) for c in tr.find_all(["td","th"])]
-        if not any(tds): continue
+        if not tds: continue
+        # saltar filas que son exactamente el header
+        if headers and all(_norm_header(v) == headers[i] if i < len(headers) else False for i,v in enumerate(tds)):
+            continue
         row={}
         for i,val in enumerate(tds):
-            if i < len(headers): row[headers[i]] = val
-        if row: rows.append(row)
-    _orders_cache["rows"]=rows; _orders_cache["ts"]=now
+            if i < len(headers):
+                row[headers[i]] = val
+        if row and any(v for v in row.values()):
+            rows.append(row)
+
+    _orders_cache.update({"ts": now, "rows": rows, "headers": headers})
+    print(f"[ORDERS] parsed headers={headers} rows={len(rows)}", flush=True)
     return rows
 
 def _detect_order_number(text: str):
@@ -469,19 +506,21 @@ def _looks_like_order_intent(text: str) -> bool:
     if not text: return False
     t=text.lower()
     keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
-    if any(k in t for k in keys): return True
-    return bool(_ORDER_RE.search(t))
+    return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
 
 def _lookup_order(order_number: str):
     rows=_fetch_order_rows(force=True)
-    if not rows: return []
+    if not rows: 
+        print("[ORDERS] no rows loaded", flush=True)
+        return []
     wanted=[]; target=re.sub(r"\D+","", str(order_number))
     for r in rows:
-        num=r.get("# de Orden") or r.get("# Orden") or r.get("#") or ""
+        num=r.get("# de Orden") or r.get("# Orden") or r.get("#") or r.get("ORDEN") or ""
         digits=re.sub(r"\D+","", str(num))
         if digits == target:
             item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
             wanted.append(item)
+    print(f"[ORDERS] lookup order={target} matches={len(wanted)}", flush=True)
     return wanted
 
 def _render_order_vertical(rows: list) -> str:
@@ -497,13 +536,7 @@ def _render_order_vertical(rows: list) -> str:
 
 # --------- EXTRACTOR ROBUSTO ----------
 def _extract_text_and_all_strings(payload):
-    """
-    Devuelve (texto_principal, todo_el_texto_concatenado).
-    Prioriza claves comunes; si no, recorre todo el JSON recolectando strings.
-    """
     strings=[]
-
-    # 1) Preferidas
     for k in ("message","q","text","query","prompt","content","user_input"):
         v = payload.get(k) if isinstance(payload, dict) else None
         if isinstance(v, str) and v.strip():
@@ -513,8 +546,6 @@ def _extract_text_and_all_strings(payload):
                 vv=v.get(kk)
                 if isinstance(vv,str) and vv.strip():
                     return vv.strip(), vv.strip()
-
-    # 2) Recolección recursiva
     def walk(o):
         if isinstance(o,str):
             s=o.strip()
@@ -525,15 +556,12 @@ def _extract_text_and_all_strings(payload):
             for it in o: walk(it)
     walk(payload)
     if not strings: return "", ""
-    # a) Si alguna cadena parece pedido, devuélvela primero
     for s in strings:
         if _looks_like_order_intent(s):
             return s, " ".join(strings)
-    # b) Si alguna tiene un número de pedido válido, priorízala
     for s in strings:
         if _detect_order_number(s):
             return s, " ".join(strings)
-    # c) Si no, devuelve la primera no vacía
     return strings[0], " ".join(strings)
 
 # ----------------- Endpoints -----------------
@@ -541,14 +569,12 @@ def _extract_text_and_all_strings(payload):
 def chat():
     data = request.get_json(force=True) or {}
     primary_text, all_text = _extract_text_and_all_strings(data)
-    # También acepta ?q= en GET
     query = (primary_text or request.args.get("q") or "").strip()
 
-    # Detección agresiva de número en el payload completo
     detected_from_all = _detect_order_number(all_text)
     order_intent = _looks_like_order_intent(query) or bool(detected_from_all)
 
-    print(f"[CHAT] keys={list(data.keys())} | primary='{query}' | any_order='{detected_from_all}'", flush=True)
+    print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}' | any_order='{detected_from_all}'", flush=True)
 
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
@@ -560,7 +586,7 @@ def chat():
             "pagination":{"page":1,"per_page":per_page,"total":0,"total_pages":0,"has_next":False,"has_prev":False}
         })
 
-    # ---------- DESVÍO QUIRÚRGICO: ESTATUS DE PEDIDO ----------
+    # ---------- DESVÍO: ESTATUS DE PEDIDO ----------
     try:
         if order_intent:
             order_no = _detect_order_number(query) or detected_from_all
@@ -573,7 +599,7 @@ def chat():
         print(f"[WARN] order-status pipeline error: {e}", flush=True)
     # ---------- FIN desvío de pedidos ----------
 
-    # Flujo normal de productos (intacto)
+    # Flujo normal de productos (INTACTO)
     max_search = 200
     all_items=indexer.search(query, k=max_search)
     all_items=_apply_intent_rerank(query, all_items)
@@ -614,7 +640,20 @@ def chat():
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
     return jsonify({"answer": answer, "products": cards, "pagination": pagination})
 
-# --- Endpoint de diagnóstico admin (opcional)
+# --- Endpoint de diagnóstico admin
+@app.get("/api/admin/orders-ping")
+def admin_orders_ping():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    rows=_fetch_order_rows(force=True)
+    sample = rows[:2] if rows else []
+    return {"ok": True,
+            "url": ORDERS_PUBHTML_URL,
+            "headers": _orders_cache.get("headers", []),
+            "rows_count": len(rows),
+            "sample": sample}
+
+# --- Endpoint de diagnóstico del chat (opcional)
 @app.post("/api/admin/chat-debug")
 def admin_chat_debug():
     if not _admin_ok(request):
