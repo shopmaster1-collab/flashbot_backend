@@ -602,7 +602,8 @@ def _enforce_intent_gate(query: str, items: list):
     return filtered or items
 
 # =========================
-#  NUEVO: FUNCIÓN ADICIONAL — ESTATUS DE PEDIDOS (pubhtml)
+#  NUEVO (ADICIONAL): ESTATUS DE PEDIDOS desde Google Sheets (pubhtml)
+#  * No altera el flujo de productos *
 # =========================
 import time, html
 try:
@@ -613,7 +614,7 @@ except Exception:
     BeautifulSoup = None
 
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
-ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" lee siempre; "0" usa TTL corto
+ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" lee siempre; "0" usa TTL
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 
 _orders_cache = {"ts": 0.0, "rows": []}
@@ -624,28 +625,15 @@ _ORDER_COLS = [
 ]
 
 _HEADER_MAP = {
-    "# DE ORDEN": "# de Orden",
-    "NO. DE ORDEN": "# de Orden",
-    "NÚMERO DE ORDEN": "# de Orden",
-    "NÚMERO DE PEDIDO": "# de Orden",
-    "ORDEN": "# de Orden",
-    "# ORDEN": "# de Orden",
-    "#": "# de Orden",
-    "SKU": "SKU",
-    "PZAS": "Pzas",
-    "PIEZAS": "Pzas",
-    "CANTIDAD": "Pzas",
-    "PRECIO UNITARIO": "Precio Unitario",
-    "PRECIO": "Precio Unitario",
-    "PRECIO TOTAL": "Precio Total",
-    "TOTAL": "Precio Total",
+    "# DE ORDEN": "# de Orden", "NO. DE ORDEN": "# de Orden", "NÚMERO DE ORDEN": "# de Orden",
+    "NÚMERO DE PEDIDO": "# de Orden", "ORDEN": "# de Orden", "# ORDEN": "# de Orden", "#": "# de Orden",
+    "SKU": "SKU", "PZAS": "Pzas", "PIEZAS": "Pzas", "CANTIDAD": "Pzas",
+    "PRECIO UNITARIO": "Precio Unitario", "PRECIO": "Precio Unitario",
+    "PRECIO TOTAL": "Precio Total", "TOTAL": "Precio Total",
     "FECHA INICIO": "Fecha Inicio",
     "EN PROCESO": "EN PROCESO",
-    "PAQUETERÍA": "Paquetería",
-    "PAQUETERIA": "Paquetería",
-    "FECHA ENVÍO": "Fecha envío",
-    "FECHA ENVIÓ": "Fecha envío",
-    "FECHA ENVIO": "Fecha envío",
+    "PAQUETERÍA": "Paquetería", "PAQUETERIA": "Paquetería",
+    "FECHA ENVÍO": "Fecha envío", "FECHA ENVIÓ": "Fecha envío", "FECHA ENVIO": "Fecha envío",
     "FECHA ENTREGA": "Fecha Entrega",
 }
 
@@ -704,14 +692,12 @@ def _fetch_order_rows(force: bool=False):
     return rows
 
 def _detect_order_number(text: str):
-    if not text:
-        return None
+    if not text: return None
     m = _ORDER_RE.search(text)
     return m.group(1) if m else None
 
 def _looks_like_order_intent(text: str) -> bool:
-    if not text:
-        return False
+    if not text: return False
     t = text.lower()
     keys = ("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
     return any(k in t for k in keys)
@@ -748,8 +734,8 @@ def _render_order_vertical(rows: list) -> str:
 @app.post("/api/chat")
 def chat():
     data=request.get_json(force=True) or {}
-    # LEE 'message' O 'q' (tu widget usa 'q')
-    query=(data.get("message") or data.get("q") or "").strip()
+    # Cambios mínimos: soportar 'message', 'q' y 'text'
+    query=(data.get("message") or data.get("q") or data.get("text") or "").strip()
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
     
