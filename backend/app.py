@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
 import os, re, threading
-
-# === NUEVO: imports para pedidos ===
-import csv, io, json, time, sqlite3, datetime as dt
-from typing import Dict, Any, List, Optional
-import requests
-
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -20,282 +14,6 @@ try:
 except Exception:
     DeepseekClient = None
 
-# --------------------------------------------------------------------------------------
-# Utilidades generales (fechas para pedidos)
-# --------------------------------------------------------------------------------------
-def _to_iso_date(s: str) -> Optional[str]:
-    if not s:
-        return None
-    s = str(s).strip()
-    if not s:
-        return None
-    fmts = [
-        "%Y-%m-%d",
-        "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%y", "%Y/%m/%d", "%d-%m-%y",
-        "%d.%m.%Y"
-    ]
-    for f in fmts:
-        try:
-            d = dt.datetime.strptime(s, f).date()
-            return d.strftime("%Y-%m-%d")
-        except Exception:
-            pass
-    return None
-
-def _fmt_ddmmyyyy(iso_date: Optional[str]) -> Optional[str]:
-    if not iso_date:
-        return None
-    try:
-        d = dt.datetime.strptime(iso_date, "%Y-%m-%d").date()
-        return d.strftime("%d/%m/%Y")
-    except Exception:
-        return iso_date
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = (os.getenv(name) or "").strip().lower()
-    if v in ("1","true","yes","y","on"): return True
-    if v in ("0","false","no","n","off"): return False
-    return default
-
-# --------------------------------------------------------------------------------------
-# OrderService – lee tu hoja publicada (pubhtml → CSV), normaliza y cachea en SQLite
-# --------------------------------------------------------------------------------------
-def _derive_csv_from_pubhtml(pubhtml_url: str) -> Optional[str]:
-    if not pubhtml_url:
-        return None
-    u = pubhtml_url.strip()
-    if "/pubhtml" not in u:
-        return None
-    u = u.replace("/pubhtml", "/pub")
-    if "output=csv" not in u:
-        u += ("&" if "?" in u else "?") + "output=csv"
-    return u
-
-class OrderService:
-    ORDER_RE = re.compile(r"(?:pedido|orden|folio|#)\s*[:#]?\s*([A-Z0-9\-\_]+)", re.I)
-
-    def __init__(self, db_path: Optional[str] = None):
-        default_db = os.getenv("ORDERS_SQLITE_PATH") or "/data/orders.sqlite3"
-        self.db_path = db_path or default_db
-        # asegurar directorio
-        try:
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        except Exception:
-            pass
-        self._ensure_schema()
-
-    def _ensure_schema(self):
-        con = sqlite3.connect(self.db_path)
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_number TEXT,   -- # de Orden
-            sku TEXT,            -- SKU
-            qty INTEGER,         -- Pzas
-            unit_price REAL,     -- Precio Unitario
-            total_price REAL,    -- Precio Total
-            start_date TEXT,     -- Fecha Inicio (ISO)
-            status TEXT,         -- EN PROCESO (texto)
-            carrier TEXT,        -- Paqueteria
-            ship_date TEXT,      -- Fecha envió (ISO)
-            delivery_date TEXT,  -- Fecha Entrega (ISO)
-            raw_json TEXT
-        )
-        """)
-        con.execute("CREATE INDEX IF NOT EXISTS idx_orders_ordnum ON orders(order_number)")
-        con.commit()
-        con.close()
-
-    # ---- carga desde CSV (derivado del pubhtml) ----
-    def _load_csv(self) -> List[Dict[str, Any]]:
-        csv_url = (os.getenv("ORDERS_CSV_URL") or "").strip()
-        if not csv_url:
-            pubhtml = (os.getenv("ORDERS_PUBHTML_URL") or "").strip()
-            csv_url = _derive_csv_from_pubhtml(pubhtml) or ""
-        if not csv_url:
-            raise RuntimeError("Configura ORDERS_PUBHTML_URL (o ORDERS_CSV_URL) para leer la tabla de pedidos.")
-
-        r = requests.get(csv_url, timeout=30)
-        r.raise_for_status()
-        content = r.content.decode("utf-8", errors="replace")
-        reader = csv.DictReader(io.StringIO(content))
-        return [dict(row) for row in reader]
-
-    # ---- normalización de columnas (exacto a tu hoja, con tolerancia de acentos) ----
-    @staticmethod
-    def _norm_key(k: str) -> str:
-        return re.sub(r"[^a-z0-9_#]+", "_", (k or "").strip().lower())
-
-    def _pick(self, norm_row: Dict[str, Any], *names, default=None):
-        for name in names:
-            k = self._norm_key(name)
-            if k in norm_row and str(norm_row[k]).strip() != "":
-                return norm_row[k]
-        return default
-
-    def _normalize_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        n = {self._norm_key(k): v for k, v in row.items()}
-        order_number = self._pick(n, "# de orden","numero de orden","no de orden","orden","pedido","folio","order number")
-        sku          = self._pick(n, "sku","código","codigo","clave")
-        qty          = self._pick(n, "pzas","piezas","cantidad","qty")
-        unit_price   = self._pick(n, "precio unitario","precio_unitario","unit price")
-        total_price  = self._pick(n, "precio total","total","importe","total price")
-        start_date   = self._pick(n, "fecha inicio","inicio","fecha de inicio")
-        en_proceso   = self._pick(n, "en proceso","estatus","estado")
-        carrier      = self._pick(n, "paqueteria","paquetería","carrier","mensajeria","mensajería")
-        ship_date    = self._pick(n, "fecha envió","fecha envío","fecha envio","envio","envió")
-        delivery     = self._pick(n, "fecha entrega","entrega")
-
-        def sfloat(x):
-            try:
-                if x is None or str(x).strip()=="":
-                    return None
-                return float(str(x).replace(",","").strip())
-            except Exception:
-                return None
-
-        def sint(x):
-            try:
-                if x is None or str(x).strip()=="":
-                    return None
-                return int(float(str(x).strip()))
-            except Exception:
-                return None
-
-        qty_i = sint(qty)
-        unit_f = sfloat(unit_price)
-        total_f = sfloat(total_price)
-        if total_f is None and unit_f is not None and qty_i is not None:
-            total_f = round(unit_f * qty_i, 2)
-
-        return {
-            "order_number": str(order_number or "").strip(),
-            "sku": str(sku or "").strip(),
-            "qty": qty_i,
-            "unit_price": unit_f,
-            "total_price": total_f,
-            "start_date": _to_iso_date(start_date) if start_date else None,
-            "status": (str(en_proceso).strip() if en_proceso is not None else None),
-            "carrier": str(carrier or "").strip(),
-            "ship_date": _to_iso_date(ship_date) if ship_date else None,
-            "delivery_date": _to_iso_date(delivery) if delivery else None,
-            "raw_json": json.dumps(row, ensure_ascii=False),
-        }
-
-    def reload(self) -> Dict[str, Any]:
-        rows = self._load_csv()
-        norm = [self._normalize_row(r) for r in rows if r]
-        con = sqlite3.connect(self.db_path)
-        self._ensure_schema()
-        con.execute("DELETE FROM orders")
-        ins = """
-        INSERT INTO orders (order_number, sku, qty, unit_price, total_price, start_date, status,
-                            carrier, ship_date, delivery_date, raw_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        cur = con.cursor()
-        cur.executemany(ins, [
-            (r["order_number"], r["sku"], r["qty"], r["unit_price"], r["total_price"],
-             r["start_date"], r["status"], r["carrier"], r["ship_date"], r["delivery_date"], r["raw_json"])
-            for r in norm
-        ])
-        con.commit()
-        con.close()
-        return {"ok": True, "rows": len(norm)}
-
-    def _extract_order_id(self, text: str) -> Optional[str]:
-        if not text:
-            return None
-        m = self.ORDER_RE.search(text.strip())
-        return m.group(1).strip() if m else None
-
-    def lookup(self, order_id: Optional[str] = None, query: Optional[str] = None) -> Dict[str, Any]:
-        if (not order_id) and query:
-            order_id = self._extract_order_id(query)
-
-        if not order_id:
-            return {"ok": False, "need": "order_id",
-                    "message": "Por favor indícame tu número de pedido (por ejemplo: pedido #ME-12345)."}
-
-        con = sqlite3.connect(self.db_path)
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        rows = list(cur.execute("SELECT * FROM orders WHERE order_number = ?", (order_id,)))
-        con.close()
-
-        if not rows:
-            return {"ok": False, "message": f"No encontré el pedido {order_id}. Verifica el número e inténtalo de nuevo."}
-
-        # Agregar por pedido
-        items = []
-        total_qty = 0
-        total_amt = 0.0
-        start_date = None
-        status = None
-        carrier = None
-        ship_date = None
-        delivery = None
-
-        for r in rows:
-            items.append({
-                "sku": r["sku"],
-                "qty": int(r["qty"] or 0),
-                "unit_price": float(r["unit_price"] or 0),
-                "line_total": float(r["total_price"] or 0),
-            })
-            total_qty += int(r["qty"] or 0)
-            total_amt += float(r["total_price"] or 0)
-            if (r["start_date"] or "") and not start_date:   start_date = r["start_date"]
-            if (r["status"] or "") and not status:           status = r["status"]
-            if (r["carrier"] or "") and not carrier:         carrier = r["carrier"]
-            if (r["ship_date"] or "") and not ship_date:     ship_date = r["ship_date"]
-            if (r["delivery_date"] or "") and not delivery:  delivery = r["delivery_date"]
-
-        summary = {
-            "lines": len(items),
-            "total_qty": total_qty,
-            "total_amount": round(total_amt, 2),
-            "currency": "MXN",
-        }
-
-        # Mensaje armado con todos los campos solicitados
-        head = f"Pedido **{order_id}**"
-        parts = []
-        if start_date:
-            parts.append(f"Fecha Inicio: { _fmt_ddmmyyyy(start_date) }")
-        if status:
-            parts.append(f"EN PROCESO: { status }")
-        if carrier:
-            parts.append(f"Paquetería: { carrier }")
-        if ship_date:
-            parts.append(f"Fecha envío: { _fmt_ddmmyyyy(ship_date) }")
-        if delivery:
-            parts.append(f"Fecha Entrega: { _fmt_ddmmyyyy(delivery) }")
-        head += " — " + " | ".join(parts) if parts else ""
-
-        msg_lines = [head + ".", f"Resumen: {summary['lines']} renglones / **{summary['total_qty']} pzas**. Total: **{money(summary['total_amount'])}**."]
-        for it in items:
-            msg_lines.append(f"- SKU {it['sku']} — {it['qty']} pzas — {money(it['unit_price'])} c/u — Subtotal {money(it['line_total'])}")
-
-        return {
-            "ok": True,
-            "order_id": order_id,
-            "fields": {
-                "numero_orden": order_id,
-                "fecha_inicio": start_date,
-                "en_proceso": status,
-                "paqueteria": carrier,
-                "fecha_envio": ship_date,
-                "fecha_entrega": delivery
-            },
-            "summary": summary,
-            "items": items,
-            "message": "\n".join(msg_lines),
-        }
-
-# --------------------------------------------------------------------------------------
-# App original (catálogo) + integración de pedidos (sin romper nada)
-# --------------------------------------------------------------------------------------
 load_dotenv()
 app = Flask(__name__)
 
@@ -308,9 +26,6 @@ CORS(app, resources={r"/*": {"origins": _allowed,
 # ---- Servicios (ShopifyClient lee envs internamente)
 shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
-
-# ---- Servicio de pedidos (nuevo)
-orders = OrderService()
 
 CHAT_WRITER = (os.getenv("CHAT_WRITER") or "none").strip().lower()
 deeps = None
@@ -335,8 +50,6 @@ def home():
             "<p>OK ✅. Endpoints: "
             '<a href="/health">/health</a>, '
             '<code>POST /api/chat</code>, '
-            '<code>POST /api/orders/lookup</code>, '                  # NUEVO
-            '<code>POST /admin/orders/reload</code>, '                # NUEVO
             '<code>POST /api/admin/reindex</code>, '
             '<code>GET /api/admin/stats</code>, '
             '<code>GET /api/admin/search?q=...</code>, '
@@ -372,16 +85,22 @@ def _detect_patterns(q: str) -> dict:
     return pat
 
 def _generate_contextual_answer(query: str, items: list, total_count: int, page: int, per_page: int) -> str:
-    """(sin cambios) — genera respuesta contextual para catálogo"""
+    """Genera respuestas más contextuales y naturales basadas en la consulta"""
     ql = (query or "").lower()
     p = _detect_patterns(query)
+    
+    # Detectar tipo de producto buscado
     product_type = None
     brands = []
     size_mentioned = None
+    
+    # Detectar marcas mencionadas
     known_brands = ["sony", "samsung", "lg", "panasonic", "tcl", "hisense", "roku", "apple", "xiaomi"]
     for brand in known_brands:
         if brand in ql:
             brands.append(brand.capitalize())
+    
+    # Detectar tipos de productos específicos
     if any(w in ql for w in ["sensor", "detector", "medidor"]):
         if p.get("water"):
             product_type = "sensores de agua"
@@ -403,14 +122,23 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
         product_type = "cámaras"
     elif any(w in ql for w in ["bocina", "altavoz", "speaker"]):
         product_type = "bocinas"
+    
+    # Detectar tamaños mencionados
     sizes = re.findall(r'\b(\d{1,3})\s*["\'"pulgadas]?\b', ql)
     if sizes:
         size_mentioned = sizes[0]
+    
+    # Construir respuesta contextual
     response_parts = []
+    
+    # Saludo contextual específico para sensores de gas
     if product_type == "sensores de gas":
         response_parts.append("¡Perfecto! Tenemos una excelente selección de sensores de gas")
+        
+        # Analizar qué productos específicos están realmente en los resultados
         found_products = []
         product_titles = [item.get("title", "").lower() for item in items]
+        
         for title in product_titles:
             if "electroválvula" in title or "válvula" in title:
                 found_products.append("con válvula electrónica")
@@ -420,10 +148,15 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
                 found_products.append("con monitoreo remoto")
             elif "iot" in title and "gas" in title:
                 found_products.append("con WiFi y app Master IOT")
+        
+        # Solo mencionar características de productos que realmente están en los resultados
         if found_products:
             response_parts.append(" " + ", ".join(list(set(found_products))))
         else:
+            # Respuesta genérica si no se identifican productos específicos
             response_parts.append(" para tanques estacionarios con diferentes características")
+        
+        # Información específica basada en la consulta
         additional_specs = []
         if p.get("valve") or any(w in ql for w in ["valvula", "válvula", "electrovalvula"]):
             additional_specs.append("priorizando modelos con válvula electrónica automática")
@@ -433,8 +166,10 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
             additional_specs.append("con pantalla integrada para lectura directa")
         if "alexa" in ql:
             additional_specs.append("compatibles con Alexa")
+        
         if additional_specs:
             response_parts.append(", " + ", ".join(additional_specs))
+    
     elif product_type == "sensores de agua":
         response_parts.append("¡Claro! Tenemos excelentes opciones en sensores de agua")
         specifics = []
@@ -445,6 +180,7 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
         if not specifics:
             specifics.append("de nuestras líneas IOT Water, Easy Water y Connect")
         response_parts.append(" " + ", ".join(specifics))
+    
     elif product_type:
         if brands:
             response_parts.append(f"¡Perfecto! Para {product_type} de {', '.join(brands)}")
@@ -452,6 +188,8 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
             response_parts.append(f"¡Claro! Tenemos excelentes opciones en {product_type}")
     else:
         response_parts.append("¡Hola! He encontrado estas opciones para ti")
+    
+    # Información específica basada en patrones adicionales
     additional_specs = []
     if p.get("matrix"):
         additional_specs.append(f"con matriz {p['matrix']}")
@@ -459,13 +197,18 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
         additional_specs.append(f"compatibles con pantallas de {size_mentioned}\"")
     elif p.get("inches"):
         additional_specs.append(f"para pantallas de {', '.join(p['inches'])}\"")
+    
     if additional_specs:
         response_parts.append(" " + ", ".join(additional_specs))
+    
+    # Información de resultados
     if total_count > per_page:
         showing = min(per_page, len(items))
         response_parts.append(f". Mostrando {showing} de {total_count} productos disponibles")
     else:
         response_parts.append(f". Encontré {len(items)} productos que coinciden perfectamente")
+    
+    # Sugerencias adicionales para sensores
     if product_type in ["sensores de gas", "sensores de agua", "sensores"]:
         suggestions = []
         if p.get("valve"):
@@ -478,11 +221,16 @@ def _generate_contextual_answer(query: str, items: list, total_count: int, page:
             suggestions.append("con pantalla")
         if p.get("alarm"):
             suggestions.append("con sistema de alertas")
+        
         if suggestions:
             response_parts.append(f", incluyendo opciones {', '.join(suggestions)}")
+    
     base_response = "".join(response_parts) + "."
+    
+    # Agregar call-to-action si hay más resultados
     if total_count > per_page:
         base_response += f" ¿Te gustaría ver más opciones o prefieres que filtre por alguna característica específica?"
+    
     return base_response
 
 def _cards_from_items(items):
@@ -508,35 +256,356 @@ def _plain_items(items):
                     "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
     return out
 
-# ---------- Señales/filtros y endpoints de catálogo (TUS FUNCIONES ORIGINALES) ----------
-# (todo lo que sigue en /api/chat y /api/admin/* quedó intacto)
+# ---------- Señales / familias ULTRA PERMISIVAS ----------
+_WATER_ALLOW_FAMILIES = [
+    "iot-waterv","iot-waterultra","iot-waterp","iot-water",
+    "easy-waterultra","easy-water","iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water",
+    "connect-water","connect water"
+]
+_WATER_ALLOW_KEYWORDS = ["tinaco","cisterna","nivel","agua","water","inundacion","inundación","flotador","boya"]
 
-# ... (todo el contenido original de indexación, intent/rerank, etc. permanece igual) ...
-# Para ahorrar espacio en este mensaje, se mantiene idéntico al archivo de origen que me compartiste.
-# (en el código real que pegas, ya van incluidas todas esas funciones — no eliminé nada)
+# FAMILIAS DE GAS ULTRA PERMISIVAS - TODOS LOS HANDLES ENCONTRADOS
+_GAS_ALLOW_FAMILIES = [
+    # Handles reales encontrados en la web
+    "modulo-sensor-inteligente-de-nivel-de-gas",
+    "sensor-de-gas-inteligente-con-electrovalvula-y-alertas-en-tiempo-real",
+    "modulo-de-nivel-de-volumen-y-cierre-para-tanques-estacionarios-de-gas-iot-gassensor-presentacion-sin-valvula",
+    "modulo-digital-de-nivel-de-gas-con-alcance-inalambrico-de-500-metros",
+    
+    # SKUs y nombres de productos
+    "iot-gassensorv","iot-gassensor","easy-gas","connect-gas",
+    "iot gassensorv","iot gassensor","easy gas","connect gas",
+    
+    # Variaciones adicionales ultra permisivas
+    "sensor-inteligente-de-nivel-de-gas", "dispositivo-inteligente-sensor-gas",
+    "modulo-sensor-gas", "sensor-gas-tanque-estacionario",
+    "gassensorv","gassensor","gas-sensor", "gasensor",
+    "sensor-gas", "medidor-gas", "detector-gas",
+    "nivel-gas", "tanque-gas", "estacionario-gas"
+]
+
+_GAS_ALLOW_KEYWORDS = [
+    # Keywords principales ULTRA PERMISIVOS
+    "gas","tanque","estacionario","estacionaria","lp","propano","butano",
+    "nivel","medidor","porcentaje","volumen","gassensor","gasensor",
+    
+    # Variaciones específicas TODAS las posibles
+    "gas-sensor","sensor de gas","medidor de gas","detector de gas",
+    "modulo sensor inteligente","dispositivo inteligente sensor",
+    "sensor inteligente nivel gas","medidor inteligente gas",
+    "nivel de gas","monitoreo gas","alertas gas",
+    "app master iot","compatible alexa gas",
+    "tanques estacionarios","sensor gas wifi",
+    "iot gas", "easy gas", "connect gas",
+    "electrovalvula gas", "valvula gas"
+]
+
+# Blocklist GAS MÍNIMA - Solo lo absolutamente necesario
+_GAS_BLOCK = [
+    # Solo productos evidentemente no relacionados
+    "ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo",
+    # Solo medidores eléctricos específicos
+    "kwh","kw/h","consumo electrico","tarifa electrica","electric meter"
+]
+
+# FAMILIAS DE AGUA - Mínima también
+_WATER_BLOCK = [
+    # Solo productos evidentemente de gas
+    "propano","butano","lp gas","tanque estacionario gas"
+]
+
+def _concat_fields(it) -> str:
+    """
+    IMPORTANTE: incluye 'body' (descripción) para capturar señales como Alexa, IP67, válvula, alarma, WiFi, etc.
+    """
+    v = it.get("variant", {})
+    body = (it.get("body") or "").lower()
+    if len(body) > 1500:
+        body = body[:1500]
+    parts = [
+        it.get("title") or "",
+        it.get("handle") or "",
+        it.get("tags") or "",
+        it.get("vendor") or "",
+        it.get("product_type") or "",
+        v.get("sku") or "",
+        body,
+    ]
+    if isinstance(it.get("skus"), (list, tuple)):
+        parts.extend([x for x in it["skus"] if x])
+    return " ".join(parts).lower()
+
+# ---------- INTENCIÓN ULTRA PERMISIVA para gas ----------
+def _intent_from_query(q: str):
+    """Regla mejorada para detectar gas con máxima sensibilidad."""
+    ql = (q or "").lower()
+
+    # Señales de gas ULTRA PERMISIVAS
+    gas_signals = [
+        "gas", "tanque", "estacionario", "estacionaria", "lp", "propano", "butano",
+        "gassensor", "gas-sensor", "iot-gassensor", "easy-gas", "connect-gas",
+        "gasensor", "sensor gas", "medidor gas", "detector gas", "nivel gas"
+    ]
+    if any(w in ql for w in gas_signals):
+        return "gas"
+
+    # Señales fuertes de agua
+    water_hard = ["agua", "tinaco", "cisterna", "inundacion", "inundación", "boya", "flotador"]
+    if any(w in ql for w in water_hard):
+        return "water"
+
+    return None
+
+def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple[int, bool]:
+    """Scoring ULTRA PERMISIVO para gas."""
+    s=0
+    has_family = any(fam in st for fam in allow_fams)
+    
+    # Scoring permisivo por keywords
+    if any(w in st for w in allow_keywords): 
+        s += 50  # Aumentado masivamente
+    
+    # Scoring masivo por pertenencia a familia
+    if has_family: 
+        s += 200  # Aumentado a 200 para gas
+    
+    # Extras específicos
+    if extras.get("want_valve"):
+        for key in extras.get("valve_fams", []):
+            if key in st: s += extras.get("valve_bonus", 95)
+    if extras.get("want_ultra"):
+        for key in extras.get("ultra_fams", []):
+            if key in st: s += 55
+    if extras.get("want_pressure"):
+        for key in extras.get("pressure_fams", []):
+            if key in st: s += 55
+    if extras.get("want_bt"):
+        for key in extras.get("bt_fams", []):
+            if key in st: s += 45
+    if extras.get("want_wifi"):
+        for key in extras.get("wifi_fams", []):
+            if key in st: s += 45
+    if extras.get("want_display"):
+        for key in extras.get("display_fams", []):
+            if key in st: s += 40
+    if extras.get("want_alarm"):
+        for key in extras.get("alarm_words", []):
+            if key in st: s += 25
+    
+    # Penalizaciones mínimas
+    for neg in extras.get("neg_words", []):
+        if neg in st: 
+            s -= 30  # Reducido drásticamente
+    
+    return s, has_family
+
+# --------- Rerank ULTRA PERMISIVO para Gas ----------
+def _rerank_for_gas(query: str, items: list):
+    ql=(query or "").lower()
+    if _intent_from_query(query)!="gas" or not items: return items
+    
+    want_valve=("valvula" in ql) or ("válvula" in ql) or ("electrovalvula" in ql)
+    want_wifi=("wifi" in ql) or ("app" in ql) or ("inteligente" in ql) or ("iot" in ql)
+    want_display=any(w in ql for w in ["pantalla","display","screen"])
+    want_alexa="alexa" in ql
+    
+    extras={
+        "want_valve": want_valve, 
+        "want_bt": "bluetooth" in ql,
+        "want_wifi": want_wifi,
+        "want_display": want_display,
+        "want_alarm": "alarma" in ql,
+        "want_alexa": want_alexa,
+        # Familias ULTRA PERMISIVAS
+        "valve_fams":["gassensorv", "electrovalvula", "valvula", "valve"],
+        "bt_fams":["easy-gas","easy gas"],
+        "wifi_fams":["iot", "inteligente", "smart", "wifi", "app"],
+        "display_fams":["easy", "pantalla", "display"],
+        "alarm_words":["alarma","alerta","alert"],
+        "alexa_fams":["alexa", "iot"],
+        "neg_words":[]  # Sin palabras negativas para gas
+    }
+    
+    rescored=[]; positives=[]
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        blocked=any(b in st for b in _GAS_BLOCK)
+        base=max(0,30-idx)
+        score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
+        
+        # BOOST MASIVO para productos que contengan "gas" pero NO "agua"
+        if "gas" in st and not any(water_word in st for water_word in ["agua", "tinaco", "cisterna", "water"]):
+            score += 300  # Boost masivo solo para productos genuinos de gas
+        
+        # Boost adicional para handles específicos encontrados
+        gas_handles = [
+            "modulo-sensor-inteligente-de-nivel-de-gas",
+            "sensor-de-gas-inteligente-con-electrovalvula-y-alertas-en-tiempo-real",
+            "modulo-de-nivel-de-volumen-y-cierre-para-tanques-estacionarios-de-gas",
+            "modulo-digital-de-nivel-de-gas-con-alcance-inalambrico-de-500-metros"
+        ]
+        if any(handle in st for handle in gas_handles):
+            score += 500  # Boost ultra masivo
+        
+        total=score+base-(50 if blocked else 0)  # Penalización mínima por bloqueo
+        is_valve=("valvula" in st) or ("válvula" in st) or ("electrovalvula" in st)
+        rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
+        
+        # Threshold ULTRA BAJO para inclusión
+        if score >= 20:  # Threshold bajísimo
+            positives.append(rec)
+
+    # Si hay productos con "gas", priorizar esos
+    if positives:
+        positives.sort(key=lambda x:x[0], reverse=True)
+        if want_valve:
+            vs=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
+            ordered=vs+others
+        else:
+            ordered=positives
+        return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
+
+    # Fallback super permisivo - CUALQUIER cosa con "gas"
+    soft = []
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        if "gas" in st:  # Sin más filtros
+            soft.append((max(0,30-idx), it))
+    if soft:
+        soft.sort(key=lambda x:x[0], reverse=True)
+        return [it for (_score, it) in soft]
+
+    # Último recurso - devolver todos
+    rescored.sort(key=lambda x:x[0], reverse=True)
+    return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
+
+# --------- Rerank/filtrado Agua (sin cambios) ----------
+def _rerank_for_water(query: str, items: list):
+    ql=(query or "").lower()
+    if _intent_from_query(query)!="water" or not items: return items
+    want_valve=("valvula" in ql) or ("válvula" in ql)
+    extras={"want_valve": want_valve,
+            "want_ultra": any(w in ql for w in ["ultra","ultrason","ultrasónico","ultrasonico"]),
+            "want_pressure": any(w in ql for w in ["presion","presión"]),
+            "want_bt": "bluetooth" in ql,
+            "want_wifi": ("wifi" in ql) or ("app" in ql),
+            "valve_fams":["iot-waterv","iot waterv"],
+            "ultra_fams":["waterultra","easy-waterultra","easy waterultra"],
+            "pressure_fams":["iot-waterp","iot waterp"],
+            "bt_fams":["easy-water","easy water","easy-waterultra","easy waterultra"],
+            "wifi_fams":["iot-water","iot water","iot-waterv","iot waterv","iot-waterultra","iot waterultra"]}
+    rescored=[]; positives=[]
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        blocked=any(b in st for b in _WATER_BLOCK)
+        base=max(0,30-idx)
+        score, has_fam = _score_family(st, ql, _WATER_ALLOW_KEYWORDS, _WATER_ALLOW_FAMILIES, extras)
+        total=score+base-(120 if blocked else 0)
+        is_wv=("iot-waterv" in st) or ("iot waterv" in st)
+        rec=(total,score,blocked,has_fam,is_wv,it); rescored.append(rec)
+        if has_fam and score>=60 and not blocked: positives.append(rec)
+
+    if positives:
+        positives.sort(key=lambda x:x[0], reverse=True)
+        if want_valve:
+            wv=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
+            ordered=wv+others
+        else:
+            ordered=positives
+        return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
+
+    soft = []
+    water_words = ["agua","tinaco","cisterna","nivel","water"]
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        if any(w in st for w in water_words) and not any(b in st for b in _WATER_BLOCK):
+            soft.append((max(0,30-idx), it))
+    if soft:
+        soft.sort(key=lambda x:x[0], reverse=True)
+        return [it for (_score, it) in soft]
+
+    rescored.sort(key=lambda x:x[0], reverse=True)
+    return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
+
+def _apply_intent_rerank(query: str, items: list):
+    intent=_intent_from_query(query)
+    if intent=="water": return _rerank_for_water(query, items)
+    if intent=="gas":   return _rerank_for_gas(query, items)
+    return items
+
+# --------- PUERTA FINAL MEJORADA (QUIRÚRGICA) ----------
+def _enforce_intent_gate(query: str, items: list):
+    """Filtra productos de categorías incorrectas con precisión quirúrgica."""
+    intent=_intent_from_query(query)
+    if not intent or not items:
+        return items
+
+    filtered=[]
+    for it in items:
+        st=_concat_fields(it)
+        title = (it.get("title") or "").lower()
+        handle = (it.get("handle") or "").lower()
+        
+        if intent=="gas":
+            # FILTRAR productos evidentemente de AGUA cuando se busca GAS
+            water_indicators = [
+                "tinaco", "cisterna", "inundacion", "inundación", "flotador", "boya",
+                "nivel de agua", "agua para", "water para", "tinacos y cisternas",
+                "iot-waterv", "iot-waterp", "iot-water", "easy-water", "connect-water"
+            ]
+            
+            # Si es claramente un producto de agua, filtrar
+            if any(indicator in st for indicator in water_indicators):
+                # Excepción: si también menciona gas explícitamente, mantener
+                if not any(gas_word in st for gas_word in ["gas", "propano", "butano", "lp", "estacionario"]):
+                    continue
+            
+        elif intent=="water":
+            # FILTRAR productos evidentemente de GAS cuando se busca AGUA
+            gas_indicators = [
+                "gas", "propano", "butano", "lp", "estacionario", "estacionaria",
+                "gassensor", "gas-sensor", "tanque estacionario",
+                "iot-gassensor", "easy-gas", "connect-gas"
+            ]
+            
+            # Si es claramente un producto de gas, filtrar
+            if any(indicator in st for indicator in gas_indicators):
+                continue
+        
+        filtered.append(it)
+
+    return filtered or items
 
 # ----------------- Endpoints -----------------
 @app.post("/api/chat")
 def chat():
-    # (idéntico a tu implementación actual)
     data=request.get_json(force=True) or {}
     query=(data.get("message") or "").strip()
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
+    
     if not query:
         return jsonify({
             "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores de agua, sensores de gas y mucho más.",
             "products":[],
-            "pagination": {"page": 1,"per_page": per_page,"total": 0,"total_pages": 0,"has_next": False,"has_prev": False}
+            "pagination": {
+                "page": 1,
+                "per_page": per_page,
+                "total": 0,
+                "total_pages": 0,
+                "has_next": False,
+                "has_prev": False
+            }
         })
+
+    # Buscar muchos más candidatos para poder paginar
     max_search = 200
     all_items=indexer.search(query, k=max_search)
-    # (enforcing y rerank idénticos a tu versión actual)
-    from .app import _apply_intent_rerank as _apply_intent_rerank  # no-op si ya está en este scope
-    from .app import _enforce_intent_gate as _enforce_intent_gate  # no-op si ya está en este scope
     all_items=_apply_intent_rerank(query, all_items)
     all_items=_enforce_intent_gate(query, all_items)
+    
     total_count = len(all_items)
+    
     if not all_items:
         fallback_msg = "No encontré resultados directos para tu búsqueda. "
         if any(w in query.lower() for w in ["gas", "tanque", "estacionario", "gassensor"]):
@@ -545,18 +614,46 @@ def chat():
             fallback_msg += "Para sensores de agua, prueba con: 'sensor agua tinaco', 'IOT-WATER', 'sensor nivel cisterna' o 'medidor agua WiFi'."
         else:
             fallback_msg += "Prueba con palabras clave específicas como 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung', 'sensor gas tanque' o 'sensor agua tinaco'."
-        return jsonify({"answer": fallback_msg,"products":[],
-                        "pagination":{"page": 1,"per_page": per_page,"total": 0,"total_pages": 0,"has_next": False,"has_prev": False}})
+        
+        return jsonify({
+            "answer": fallback_msg,
+            "products":[],
+            "pagination": {
+                "page": 1,
+                "per_page": per_page,
+                "total": 0,
+                "total_pages": 0,
+                "has_next": False,
+                "has_prev": False
+            }
+        })
+
+    # Calcular paginación
     total_pages = (total_count + per_page - 1) // per_page
-    start_idx = (page - 1) * per_page; end_idx = start_idx + per_page
-    if page < 1: page = 1
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    
+    if page < 1:
+        page = 1
     elif page > total_pages:
-        page = total_pages; start_idx = (page - 1) * per_page; end_idx = start_idx + per_page
+        page = total_pages
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+    
     items = all_items[start_idx:end_idx]
-    pagination = {"page": page,"per_page": per_page,"total": total_count,"total_pages": total_pages,
-                  "has_next": page < total_pages,"has_prev": page > 1}
+    
+    pagination = {
+        "page": page,
+        "per_page": per_page,
+        "total": total_count,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_prev": page > 1
+    }
+
     cards=_cards_from_items(items)
     answer = _generate_contextual_answer(query, items, total_count, page, per_page)
+    
     if deeps and len(answer) > 50:
         try:
             enhanced_answer = deeps.chat(
@@ -567,9 +664,14 @@ def chat():
                 answer = enhanced_answer
         except Exception as e:
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
-    return jsonify({"answer": answer, "products": cards,"pagination": pagination})
+    
+    return jsonify({
+        "answer": answer, 
+        "products": cards,
+        "pagination": pagination
+    })
 
-# --- Reindex background (sin cambios)
+# --- Reindex background
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True); indexer.build()
@@ -590,20 +692,23 @@ def admin_stats():
 @app.get("/api/admin/diag")
 def admin_diag():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    return {"ok": True,"env": {"STORE_BASE_URL": os.getenv("STORE_BASE_URL"),
-                                "FORCE_REST": os.getenv("FORCE_REST"),
-                                "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE"),
-                                "CHAT_WRITER": (os.getenv("CHAT_WRITER") or "none")}}
+    return {
+        "ok": True,
+        "env": {
+            "STORE_BASE_URL": os.getenv("STORE_BASE_URL"),
+            "FORCE_REST": os.getenv("FORCE_REST"),
+            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE"),
+            "CHAT_WRITER": CHAT_WRITER,
+        }
+    }
 
 @app.get("/api/admin/preview")
 def admin_preview():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
     items=indexer.search(q, k=max(k,90))
-    # reutilizamos los gates
-    from .app import _apply_intent_rerank as _apply_intent_rerank
-    from .app import _enforce_intent_gate as _enforce_intent_gate
-    items=_apply_intent_rerank(q, items); items=_enforce_intent_gate(q, items)
+    items=_apply_intent_rerank(q, items)
+    items=_enforce_intent_gate(q, items)
     items=items[:k]
     return {"q": q, "k": k, "items": _plain_items(items)}
 
@@ -624,43 +729,7 @@ def admin_discards():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.discard_stats()
 
-# =================== NUEVO: endpoints de pedidos ===================
-
-@app.post("/admin/orders/reload")
-def admin_orders_reload():
-    """Recarga el cache desde tu hoja publicada (pubhtml→CSV)."""
-    if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
-    try:
-        r = orders.reload()
-        return jsonify({"ok": True, "reloaded": r["rows"]})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.post("/api/orders/lookup")
-def api_orders_lookup():
-    """
-    Body:
-    {
-      "order_id": "ME-12345"
-      // o "query": "estatus de mi pedido #ME-12345"
-    }
-    """
-    data = request.get_json(silent=True) or {}
-    order_id = (data.get("order_id") or "").strip() or None
-    query = (data.get("query") or "").strip() or None
-    try:
-        res = orders.lookup(order_id=order_id, query=query)
-        return jsonify(res), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
 # --------- MAIN: arrancar el servidor en Render ---------
 if __name__ == "__main__":
-    # Carga inicial del cache de pedidos si se habilita
-    if _env_bool("ORDERS_AUTORELOAD", True):
-        try:
-            orders.reload()
-        except Exception as e:
-            print("[WARN] No se pudo cargar pedidos al inicio:", e, flush=True)
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
