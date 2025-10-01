@@ -601,6 +601,153 @@ def _enforce_intent_gate(query: str, items: list):
 
     return filtered or items
 
+# =========================
+#  NUEVO: FUNCIÓN ADICIONAL — ESTATUS DE PEDIDOS (pubhtml)
+#  * No interfiere con la lógica de productos *
+# =========================
+import time, html
+try:
+    import requests
+    from bs4 import BeautifulSoup
+except Exception:
+    requests = None
+    BeautifulSoup = None
+
+# ENV para pedidos
+ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
+ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" lee siempre; "0" usa TTL corto
+ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
+
+# Cache simple en memoria
+_orders_cache = {"ts": 0.0, "rows": []}
+
+# Columnas objetivo (tolerantes a encabezados variables)
+_ORDER_COLS = [
+    "# de Orden", "SKU", "Pzas", "Precio Unitario", "Precio Total",
+    "Fecha Inicio", "EN PROCESO", "Paquetería", "Fecha envío", "Fecha Entrega"
+]
+
+# Mapa flexible de encabezados
+_HEADER_MAP = {
+    "# DE ORDEN": "# de Orden",
+    "NO. DE ORDEN": "# de Orden",
+    "NÚMERO DE ORDEN": "# de Orden",
+    "NÚMERO DE PEDIDO": "# de Orden",
+    "ORDEN": "# de Orden",
+    "# ORDEN": "# de Orden",
+    "#": "# de Orden",
+    "SKU": "SKU",
+    "PZAS": "Pzas",
+    "PIEZAS": "Pzas",
+    "CANTIDAD": "Pzas",
+    "PRECIO UNITARIO": "Precio Unitario",
+    "PRECIO": "Precio Unitario",
+    "PRECIO TOTAL": "Precio Total",
+    "TOTAL": "Precio Total",
+    "FECHA INICIO": "Fecha Inicio",
+    "EN PROCESO": "EN PROCESO",
+    "PAQUETERÍA": "Paquetería",
+    "PAQUETERIA": "Paquetería",
+    "FECHA ENVÍO": "Fecha envío",
+    "FECHA ENVIÓ": "Fecha envío",
+    "FECHA ENVIO": "Fecha envío",
+    "FECHA ENTREGA": "Fecha Entrega",
+}
+
+_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
+
+def _norm_header(t: str) -> str:
+    t = (t or "").strip()
+    t = html.unescape(t)
+    t = re.sub(r"\s+", " ", t)
+    u = t.upper().replace("Á","A").replace("É","E").replace("Í","I").replace("Ó","O").replace("Ú","U")
+    return _HEADER_MAP.get(u, t)
+
+def _fetch_order_rows(force: bool=False):
+    global _orders_cache
+    now = time.time()
+
+    if ORDERS_AUTORELOAD != "1":
+        if _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
+            return _orders_cache["rows"]
+
+    if not (ORDERS_PUBHTML_URL and requests and BeautifulSoup):
+        return []
+
+    try:
+        r = requests.get(ORDERS_PUBHTML_URL, timeout=20, headers={"Cache-Control":"no-cache"})
+        r.raise_for_status()
+    except Exception as e:
+        print(f"[WARN] orders pubhtml fetch error: {e}", flush=True)
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    table = soup.find("table")
+    if not table:
+        return []
+
+    # Encabezados
+    trs = table.find_all("tr")
+    if not trs:
+        return []
+
+    headers = [_norm_header(c.get_text(strip=True)) for c in trs[0].find_all(["th","td"])]
+
+    rows=[]
+    for tr in trs[1:]:
+        tds = [c.get_text(strip=True) for c in tr.find_all(["td","th"])]
+        if not any(tds):
+            continue
+        row={}
+        for i, val in enumerate(tds):
+            if i < len(headers):
+                row[headers[i]] = val
+        if row:
+            rows.append(row)
+
+    _orders_cache["rows"] = rows
+    _orders_cache["ts"] = now
+    return rows
+
+def _detect_order_number(text: str):
+    if not text: return None
+    m = _ORDER_RE.search(text)
+    return m.group(1) if m else None
+
+def _looks_like_order_intent(text: str) -> bool:
+    if not text: return False
+    t = text.lower()
+    keys = ("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
+    return any(k in t for k in keys)
+
+def _lookup_order(order_number: str):
+    rows = _fetch_order_rows(force=True)
+    if not rows:
+        return []
+    wanted=[]
+    target = re.sub(r"\D+","", str(order_number))
+    for r in rows:
+        num = r.get("# de Orden") or r.get("# Orden") or r.get("#") or ""
+        digits = re.sub(r"\D+","", str(num))
+        if digits == target:
+            item={}
+            for col in _ORDER_COLS:
+                item[col] = r.get(col, "") or "—"
+            wanted.append(item)
+    return wanted
+
+def _render_order_vertical(rows: list) -> str:
+    """Formato mobile-first (widget vertical): bloques de 'clave: valor' por ítem."""
+    if not rows:
+        return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
+    parts=[]
+    for i, r in enumerate(rows, 1):
+        blk=[f"**Artículo {i}**"]
+        for k in _ORDER_COLS:
+            blk.append(f"- **{k}:** {r.get(k,'—')}")
+        parts.append("\n".join(blk))
+    return "\n\n".join(parts)
+
 # ----------------- Endpoints -----------------
 @app.post("/api/chat")
 def chat():
@@ -622,6 +769,26 @@ def chat():
                 "has_prev": False
             }
         })
+
+    # ---------- NUEVO: Desvío quirúrgico para ESTATUS DE PEDIDO ----------
+    try:
+        if _looks_like_order_intent(query):
+            order_no = _detect_order_number(query)
+            if order_no:
+                rows = _lookup_order(order_no)  # lee siempre la publicación viva
+                answer = _render_order_vertical(rows)
+                return jsonify({
+                    "answer": answer,
+                    "products": [],
+                    "pagination": {
+                        "page": 1, "per_page": 10, "total": 0, "total_pages": 0,
+                        "has_next": False, "has_prev": False
+                    }
+                })
+    except Exception as e:
+        # Si algo falla en pedidos, continuamos con el flujo normal de productos
+        print(f"[WARN] order-status pipeline error: {e}", flush=True)
+    # ---------- FIN desvío de pedidos ------------------------------------
 
     # Buscar muchos más candidatos para poder paginar
     max_search = 200
