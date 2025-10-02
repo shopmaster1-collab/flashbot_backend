@@ -14,7 +14,7 @@ try:
 except Exception:
     DeepseekClient = None
 
-# --- HTTP libs para Google Sheet
+# --- HTTP libs para Google Sheet (estatus de pedidos)
 try:
     import requests
     from bs4 import BeautifulSoup
@@ -78,6 +78,7 @@ def home():
             "<p>OK ✅. Endpoints: "
             '<a href="/health">/health</a>, '
             '<code>POST /api/chat</code>, '
+            '<code>POST /api/orders/status</code>, '
             '<code>POST /api/admin/reindex</code>, '
             '<code>GET /api/admin/stats</code>, '
             '<code>GET /api/admin/search?q=...</code>, '
@@ -418,7 +419,7 @@ _HEADER_MAP = {
     "PRECIO TOTAL":"Precio Total","TOTAL":"Precio Total",
     "FECHA INICIO":"Fecha Inicio","EN PROCESO":"EN PROCESO",
     "PAQUETERÍA":"Paquetería","PAQUETERIA":"Paquetería",
-    "FECHA ENVÍO":"Fecha envío","FECHA ENVIO":"Fecha envío",
+    "FECHA ENVÍO":"Fecha envío","FECHA ENVIÓ":"Fecha envío","FECHA ENVIO":"Fecha envío",
     "FECHA ENTREGA":"Fecha Entrega",
 }
 _ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
@@ -454,7 +455,7 @@ def _fetch_order_rows(force: bool=False):
         print(f"[ORDERS] no table found. total_tables={len(tables)}", flush=True)
         return []
 
-    # Headers: prefer thead > tr > th/td
+    # Headers
     headers=[]
     thead=waffle.find("thead")
     if thead:
@@ -470,7 +471,6 @@ def _fetch_order_rows(force: bool=False):
         if first_th_tr:
             headers=[_norm_header(c.get_text(strip=True)) for c in first_th_tr.find_all(["th","td"])]
     if not headers:
-        # ultimate fallback: first tr
         tr=waffle.find("tr")
         if tr:
             headers=[_norm_header(c.get_text(strip=True)) for c in tr.find_all(["th","td"])]
@@ -501,10 +501,9 @@ def _detect_order_number(text: str):
     return m.group(1) if m else None
 
 def _looks_like_order_intent(text: str) -> bool:
-    """Detecta si el usuario está consultando sobre un pedido."""
     if not text: return False
     t=text.lower()
-    keys=("pedido","orden","order","estatus","status","estado","seguimiento","rastreo","mi compra","mi pedido","guia","guía","envio","envío","paquete","entrega")
+    keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
     return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
 
 def _lookup_order(order_number: str):
@@ -533,6 +532,7 @@ def _render_order_vertical(rows: list) -> str:
         parts.append("\n".join(blk))
     return "\n\n".join(parts)
 
+# --------- EXTRACTOR ROBUSTO (para /api/chat) ----------
 def _extract_text_and_all_strings(payload):
     strings=[]
     for k in ("message","q","text","query","prompt","content","user_input"):
@@ -563,6 +563,8 @@ def _extract_text_and_all_strings(payload):
     return strings[0], " ".join(strings)
 
 # ----------------- Endpoints -----------------
+
+# 1) Chat de productos (mantiene desvío si detecta pedido)
 @app.post("/api/chat")
 def chat():
     data = request.get_json(force=True) or {}
@@ -572,7 +574,7 @@ def chat():
     detected_from_all = _detect_order_number(all_text)
     order_intent = _looks_like_order_intent(query) or bool(detected_from_all)
 
-    print(f"[CHAT] query='{query}' | order_intent={order_intent} | detected_num='{detected_from_all}'", flush=True)
+    print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}' | any_order='{detected_from_all}'", flush=True)
 
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
@@ -585,54 +587,16 @@ def chat():
         })
 
     # ---------- DESVÍO: ESTATUS DE PEDIDO ----------
-    if order_intent:
-        print(f"[ORDERS] Intent detected. URL configured: {bool(ORDERS_PUBHTML_URL)}", flush=True)
-        
-        # Verificar que la funcionalidad esté configurada
-        if not ORDERS_PUBHTML_URL:
-            answer = (
-                "⚠️ La consulta de pedidos no está disponible en este momento. "
-                "Por favor contacta directamente a soporte para verificar el estatus de tu pedido."
-            )
-            return jsonify({"answer": answer, "products": [],
-                            "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
-        
-        if not (requests and BeautifulSoup):
-            answer = (
-                "⚠️ El sistema de consulta de pedidos no está completamente configurado. "
-                "Por favor contacta a soporte."
-            )
-            return jsonify({"answer": answer, "products": [],
-                            "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
-        
-        order_no = _detect_order_number(query) or detected_from_all
-        print(f"[ORDERS] Extracted order number: '{order_no}'", flush=True)
-        
-        if order_no:
-            try:
+    try:
+        if order_intent:
+            order_no = _detect_order_number(query) or detected_from_all
+            if order_no:
                 rows = _lookup_order(order_no)
-                print(f"[ORDERS] Found {len(rows)} rows for order {order_no}", flush=True)
                 answer = _render_order_vertical(rows)
                 return jsonify({"answer": answer, "products": [],
                                 "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
-            except Exception as e:
-                print(f"[ORDERS] ERROR during lookup: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
-                answer = (
-                    f"⚠️ Ocurrió un error al buscar tu pedido #{order_no}. "
-                    "Por favor intenta nuevamente o contacta a soporte."
-                )
-                return jsonify({"answer": answer, "products": [],
-                                "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
-        else:
-            answer = (
-                "Para consultar el estatus de tu pedido, por favor proporcióname el **número de orden**. "
-                "Lo encuentras en tu comprobante de compra.\n\n"
-                "Ejemplo: *Estatus de mi pedido #12345* o simplemente *12345*"
-            )
-            return jsonify({"answer": answer, "products": [],
-                            "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
+    except Exception as e:
+        print(f"[WARN] order-status pipeline error: {e}", flush=True)
     # ---------- FIN desvío de pedidos ----------
 
     # Flujo normal de productos (INTACTO)
@@ -676,6 +640,32 @@ def chat():
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
     return jsonify({"answer": answer, "products": cards, "pagination": pagination})
 
+# 2) Endpoint dedicado para estatus de pedidos (para el tab "Mi pedido")
+@app.post("/api/orders/status")
+def orders_status():
+    if not (ORDERS_PUBHTML_URL and requests and BeautifulSoup):
+        return jsonify({"ok": False, "error": "Orders module not ready (missing ORDERS_PUBHTML_URL or bs4)."}), 500
+
+    data = request.get_json(silent=True) or {}
+    raw = (data.get("order_no") or data.get("order") or data.get("pedido") or "").strip() \
+          or (request.args.get("order_no") or request.args.get("q") or "").strip()
+    order_no = _detect_order_number(raw)
+    if not order_no:
+        return jsonify({"ok": False, "error": "Número de orden inválido. Ingresa 4 a 15 dígitos."}), 400
+
+    try:
+        rows = _lookup_order(order_no)
+    except Exception as e:
+        print(f"[ORDERS] lookup error: {e}", flush=True)
+        return jsonify({"ok": False, "error": "Error consultando el reporte de pedidos."}), 500
+
+    if not rows:
+        return jsonify({"ok": True, "answer": f"No encontramos información para el pedido #{order_no}.", "rows_count": 0})
+
+    md = _render_order_vertical(rows)
+    return jsonify({"ok": True, "answer": md, "rows_count": len(rows)})
+
+# --- Endpoint de diagnóstico admin
 @app.get("/api/admin/orders-ping")
 def admin_orders_ping():
     if not _admin_ok(request):
@@ -688,6 +678,7 @@ def admin_orders_ping():
             "rows_count": len(rows),
             "sample": sample}
 
+# --- Endpoint de diagnóstico del chat (opcional)
 @app.post("/api/admin/chat-debug")
 def admin_chat_debug():
     if not _admin_ok(request):
@@ -700,6 +691,7 @@ def admin_chat_debug():
             "order_no_any": _detect_order_number(all_txt),
             "payload_keys": list(payload.keys())}
 
+# --- Reindex background
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True); indexer.build()
@@ -723,8 +715,7 @@ def admin_diag():
     return {"ok": True, "env": {"STORE_BASE_URL": os.getenv("STORE_BASE_URL"),
                                  "FORCE_REST": os.getenv("FORCE_REST"),
                                  "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE"),
-                                 "CHAT_WRITER": CHAT_WRITER,
-                                 "ORDERS_URL_CONFIGURED": bool(ORDERS_PUBHTML_URL)}}
+                                 "CHAT_WRITER": CHAT_WRITER}}
 
 @app.get("/api/admin/preview")
 def admin_preview():
@@ -753,6 +744,7 @@ def admin_discards():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.discard_stats()
 
+# --------- MAIN ---------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
