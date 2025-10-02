@@ -4,9 +4,19 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
+# --- internos
 from .shopify_client import ShopifyClient
 from .indexer import CatalogIndexer
-from .utils import money
+try:
+    from .utils import money  # si existe
+except Exception:
+    def money(x):  # fallback seguro
+        if x is None:
+            return None
+        try:
+            return f"${float(x):,.2f}"
+        except Exception:
+            return str(x)
 
 # Deepseek opcional
 try:
@@ -25,13 +35,17 @@ except Exception:
 load_dotenv()
 app = Flask(__name__)
 
-# ---- CORS
+# ---------- CORS ----------
 _allowed = [o.strip() for o in (os.getenv("ALLOWED_ORIGINS") or "*").split(",") if o.strip()]
-CORS(app, resources={r"/*": {"origins": _allowed,
-                             "allow_headers": ["Content-Type", "X-Admin-Secret"],
-                             "methods": ["GET", "POST", "OPTIONS"]}})
+CORS(app, resources={
+    r"/*": {
+        "origins": _allowed,
+        "allow_headers": ["Content-Type", "X-Admin-Secret"],
+        "methods": ["GET", "POST", "OPTIONS"]
+    }
+})
 
-# ---- Servicios (ShopifyClient lee envs internamente)
+# ---------- Servicios ----------
 shop = ShopifyClient()
 indexer = CatalogIndexer(shop, os.getenv("STORE_BASE_URL", "https://master.com.mx"))
 
@@ -53,7 +67,7 @@ def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
 # =========================
-#  Servir widget estático desde /widget/*
+#  Estáticos del widget
 # =========================
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 _WIDGET_CANDIDATES = [
@@ -94,8 +108,11 @@ def home():
 def health():
     return {"ok": True}
 
-# --------- util de patrones para la redacción ----------
+# ======================================================================
+#  Utilidades de contexto/respuesta (Productos)  — (no modifican negocio)
+# ======================================================================
 _PAT_ONE_BY_N = re.compile(r"\b(\d+)\s*[x×]\s*(\d+)\b", re.IGNORECASE)
+
 def _detect_patterns(q: str) -> dict:
     ql = (q or "").lower(); pat = {}
     m = _PAT_ONE_BY_N.search(ql)
@@ -208,7 +225,7 @@ def _plain_items(items):
                     "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
     return out
 
-# ---------- Señales / familias (sin cambios de negocio) ----------
+# ---------- Señales / familias (idéntico enfoque) ----------
 _WATER_ALLOW_FAMILIES = [
     "iot-waterv","iot-waterultra","iot-waterp","iot-water",
     "easy-waterultra","easy-water","iot waterv","iot waterultra","iot waterp","iot water","easy waterultra","easy water",
@@ -403,12 +420,13 @@ def _enforce_intent_gate(query: str, items: list):
         filtered.append(it)
     return filtered or items
 
-# =========================
-#  ESTATUS DE PEDIDOS (Google Sheets pubhtml)
-# =========================
+# ===========================================================
+#  ESTATUS DE PEDIDOS (Google Sheets "Publish to web" HTML)
+# ===========================================================
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
-ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" = siempre recargar; "0" = caché según TTL
+ORDERS_AUTORELOAD  = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" = siempre recargar; "0" = usa caché según TTL
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
+
 _orders_cache = {"ts": 0.0, "rows": [], "headers": []}
 
 # Columnas canónicas que devolveremos al usuario
@@ -452,18 +470,28 @@ def _norm_header(t: str) -> str:
     return _HEADER_MAP.get(u, t)
 
 def _orders_int(val) -> int | None:
-    """'6506'->6506, '6,506'->6506, '6506.0'/'6506,0'->6506."""
-    if val is None: return None
+    """
+    Normaliza un valor de hoja a entero de orden:
+    '6506' -> 6506, '6,506' -> 6506, '6506.0'/'6506,0' -> 6506
+    """
+    if val is None:
+        return None
     s = str(val).strip()
-    if not s: return None
+    if not s:
+        return None
     m = re.match(r"^\s*([0-9]{1,})(?:[.,]0+)\s*$", s)
     if m:
-        try: return int(m.group(1))
-        except Exception: pass
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
     digits = re.sub(r"\D+", "", s)
-    if not digits: return None
-    try: return int(digits)
-    except Exception: return None
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except Exception:
+        return None
 
 def _fetch_order_rows(force: bool=False):
     """Lee la tabla 'waffle' del pubhtml y devuelve filas normalizadas."""
@@ -478,7 +506,17 @@ def _fetch_order_rows(force: bool=False):
         return []
 
     try:
-        r=requests.get(ORDERS_PUBHTML_URL, timeout=25, headers={"Cache-Control":"no-cache", "Pragma":"no-cache"})
+        headers = {
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-MX,es;q=0.9,en;q=0.8"
+        }
+        r=requests.get(ORDERS_PUBHTML_URL, timeout=25, headers=headers)
+        sc=r.status_code
+        text_len=len(r.text or "")
+        print(f"[ORDERS] fetch status={sc} len={text_len}", flush=True)
         r.raise_for_status()
     except Exception as e:
         print(f"[ORDERS] fetch error: {e}", flush=True)
@@ -618,7 +656,7 @@ def _render_order_vertical(rows: list) -> str:
         parts.append("\n".join(blk))
     return "\n\n".join(parts)
 
-# --------- EXTRACTOR ROBUSTO ----------
+# ============== EXTRACTOR ROBUSTO (chat) ==============
 def _extract_text_and_all_strings(payload):
     strings=[]
     for k in ("message","q","text","query","prompt","content","user_input"):
@@ -648,7 +686,9 @@ def _extract_text_and_all_strings(payload):
             return s, " ".join(strings)
     return strings[0], " ".join(strings)
 
-# ----------------- Endpoints -----------------
+# =========================
+#  Endpoints
+# =========================
 @app.post("/api/chat")
 def chat():
     data = request.get_json(force=True) or {}
@@ -724,7 +764,7 @@ def chat():
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
     return jsonify({"answer": answer, "products": cards, "pagination": pagination})
 
-# --- Endpoint de diagnóstico admin
+# ---------- Admin: diagnóstico de pedidos ----------
 @app.get("/api/admin/orders-ping")
 def admin_orders_ping():
     if not _admin_ok(request):
@@ -767,20 +807,7 @@ def admin_orders_find():
     return {"ok": True, "target": target, "headers": headers, "candidate_cols": cands,
             "rows_count": len(rows), "matched_count": len(matches), "matched_samples": matches[:3]}
 
-# --- Endpoint de diagnóstico del chat (opcional)
-@app.post("/api/admin/chat-debug")
-def admin_chat_debug():
-    if not _admin_ok(request):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-    payload = request.get_json(force=True) or {}
-    txt, all_txt = _extract_text_and_all_strings(payload)
-    return {"ok": True, "extracted": txt, "all_strings": all_txt,
-            "looks_order": _looks_like_order_intent(txt) or bool(_detect_order_number(all_txt)),
-            "order_no_primary": _detect_order_number(txt),
-            "order_no_any": _detect_order_number(all_txt),
-            "payload_keys": list(payload.keys())}
-
-# --- Reindex background
+# ---------- Admin varios ----------
 def _do_reindex():
     try:
         print("[INDEX] Reindex started", flush=True); indexer.build()
@@ -833,7 +860,7 @@ def admin_discards():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.discard_stats()
 
-# --- Endpoint dedicado: /api/orders (independiente del buscador de productos)
+# ---------- Endpoint dedicado de pedidos (independiente al buscador) ----------
 @app.route("/api/orders", methods=["POST", "OPTIONS"])
 def api_orders():
     """Consulta de estatus de pedido por número (p. ej. 6506 o #6506)."""
@@ -862,7 +889,7 @@ def api_orders():
         print(f"[ORDERS] /api/orders error: {e}", flush=True)
         return jsonify({ "ok": False, "error": "internal error" }), 500
 
-# --------- MAIN ---------
+# ---------- MAIN ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
