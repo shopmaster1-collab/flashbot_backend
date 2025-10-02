@@ -299,7 +299,7 @@
     } else {
       input.placeholder = "Ingresa tu número de pedido (ej. 6506 o #6506)";
       btn.textContent = "Consultar";
-      appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus. También puedes escribir: “estatus de mi pedido 6506”.");
+      appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus.");
       updatePagination(null);
     }
   }
