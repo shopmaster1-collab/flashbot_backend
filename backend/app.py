@@ -723,3 +723,36 @@ def admin_discards():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
+
+# --- Endpoint dedicado: /api/orders (independiente del buscador de productos)
+@app.route("/api/orders", methods=["POST", "OPTIONS"])
+def api_orders():
+    """Consulta de estatus de pedido por número (p. ej. 6506 o #6506).
+    Mantiene intacto el flujo de /api/chat y reutiliza los helpers existentes:
+    _detect_order_number, _lookup_order, _render_order_vertical.
+    """
+    if request.method == "OPTIONS":
+        # Preflight CORS OK (las cabeceras las agrega Flask-CORS)
+        return ("", 204)
+
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+
+    raw = (data.get("order") or data.get("message") or data.get("q") or "").strip()
+    if not raw:
+        return jsonify({ "ok": False, "error": "missing order" }), 400
+
+    order_no = _detect_order_number(raw) or re.sub(r"\\D+", "", raw)
+    if not order_no:
+        return jsonify({ "ok": False, "error": "invalid order format" }), 400
+
+    try:
+        rows = _lookup_order(order_no)
+        answer = _render_order_vertical(rows)
+        return jsonify({ "ok": True, "order": str(order_no), "items": rows, "answer": answer })
+    except Exception as e:
+        print(f"[ORDERS] /api/orders error: {e}", flush=True)
+        return jsonify({ "ok": False, "error": "internal error" }), 500
