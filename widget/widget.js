@@ -1,337 +1,246 @@
-/* MAXTER widget (dos modos: Productos / Mi pedido)
-   - Panel se muestra oculto y aparece mediante un botón flotante (launcher)
-   - Posicionado en el extremo izquierdo para no chocar con WhatsApp
-   - Flujo Productos (POST `${BACKEND}/api/chat`) + Pedidos (POST `${BACKEND}/api/orders/status`)
-   - Puedes override backend con: <script src=".../widget.js" data-backend="https://tu-backend">
+/* MAXTER widget (1 columna + mensaje corto + paginación)
+   Backend por defecto: flashbot-backend en Render.
+   Puedes override con <script data-backend="https://tu-backend" ...>
 */
 (function(){
   const DEFAULT_BACKEND = "https://flashbot-backend-25b6.onrender.com";
-
-  function detectBackend(){
+  const BACKEND = (function(){
     try{
       const s = document.currentScript;
-      if (s && s.dataset && s.dataset.backend) return s.dataset.backend;
-      const scripts = document.getElementsByTagName('script');
-      for (let i=0;i<scripts.length;i++){
-        const el = scripts[i];
-        if (el.dataset && el.dataset.backend) return el.dataset.backend;
-        const src = el.getAttribute('src') || '';
-        if (src.indexOf('widget.js') !== -1 && el.dataset && el.dataset.backend) return el.dataset.backend;
-      }
-    }catch(e){}
-    return DEFAULT_BACKEND;
-  }
-  const BACKEND = detectBackend();
+      return (s && s.dataset && s.dataset.backend) ? s.dataset.backend : DEFAULT_BACKEND;
+    }catch(e){ return DEFAULT_BACKEND; }
+  })();
   const TITLE = "MAXTER, Tu Asistente Inteligente";
 
-  // ======= Estado global =======
-  const state = { isOpen: false };
+  // Estado global del chat
   const chatState = {
-    isLoading: false,
     currentQuery: "",
     currentPage: 1,
-    pagination: null,  // { has_next, has_prev, total_pages }
-    lastResponse: null
+    pagination: null,
+    isLoading: false
   };
 
-  // ======= Helpers =======
-  function isNode(x){
-    return x && typeof x === 'object' && typeof x.nodeType === 'number' && typeof x.nodeName === 'string';
+  // ====== FAB ======
+  const fab = document.createElement('button');
+  fab.className = 'mx-fab';
+  fab.setAttribute('aria-label','Abrir chat MAXTER, Tu Asesor de Compras');
+  fab.setAttribute('title','MAXTER, Tu Asesor de Compras');
+  fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19l1.7-3.4A8 8 0 1112 20H6l-2 1z" stroke="currentColor" stroke-width="1.5"/></svg><span>MAXTER, Tu Asesor de Compras</span>';
+
+  // ====== Panel ======
+  const panel = document.createElement('section');
+  panel.className = 'mx-panel';
+  panel.innerHTML = `
+    <div class="mx-head">${TITLE} <small style="margin-left:.5rem; font-weight:500;">Asesor de compras</small></div>
+    <div class="mx-body" id="mxBody">
+      <div class="mx-msg">¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍</div>
+    </div>
+    <div id="mxPagination" class="mx-pagination" style="display:none;">
+      <div class="mx-pagination-controls" id="mxPaginationControls">
+        <button class="mx-pagination-btn" id="mxPrevBtn">‹ Anterior</button>
+        <span class="mx-pagination-info" id="mxPaginationInfo">Página 1 de 1</span>
+        <button class="mx-pagination-btn" id="mxNextBtn">Siguiente ›</button>
+      </div>
+    </div>
+    <form class="mx-form" id="mxForm">
+      <input id="mxInput" type="text" placeholder="Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas" required />
+      <button type="submit" id="mxSubmitBtn">Enviar</button>
+    </form>
+  `;
+
+  document.addEventListener('DOMContentLoaded', function(){
+    document.body.appendChild(fab);
+    document.body.appendChild(panel);
+  });
+
+  fab.addEventListener('click', function(){
+    panel.classList.toggle('mx-open');
+  });
+
+  // ====== Helpers ======
+  function money(val){
+    try{
+      if(val===null||val===undefined) return null;
+      const n = Number(val);
+      return n.toLocaleString('es-MX',{style:'currency', currency:'MXN'});
+    }catch(e){ return val; }
   }
-  function el(tag, attrs={}, children=[]){
-    const n = document.createElement(tag);
-    for (const [k,v] of Object.entries(attrs || {})){
-      if (k === "className") n.className = v;
-      else if (k === "html") n.innerHTML = v;
-      else if (k === "style") n.setAttribute("style", v);
-      else n.setAttribute(k, v);
+
+  function cardHTML(p){
+    let inv = '';
+    if (Array.isArray(p.inventory) && p.inventory.length){
+      const tot = p.inventory.reduce((s,x)=>s + (Number(x.available)||0), 0);
+      const branches = p.inventory.map(x=>`${x.name}: ${x.available}`).join(' · ');
+      inv = `<div class="mx-inv">Existencias (${tot}): ${branches}</div>`;
     }
-    const arr = Array.isArray(children) ? children : [children];
-    arr
-      .filter(c => c !== null && c !== undefined && c !== false)
-      .forEach(c => {
-        if (isNode(c)) n.appendChild(c);
-        else n.appendChild(document.createTextNode(String(c)));
-      });
-    return n;
-  }
-  function appendMsg(container, htmlStr, role="bot"){
-    const b = el("div", {className: role === "bot" ? "mx-msg" : "mx-msg user", html: htmlStr});
-    container.appendChild(b);
-    container.scrollTop = container.scrollHeight;
-  }
-  function setLoading(form, on){
-    chatState.isLoading = !!on;
-    const btn = form.querySelector("button[type=submit]");
-    if(btn){ btn.disabled = !!on; btn.innerText = on ? "Consultando..." : "Enviar"; }
-  }
-  function setLoadingOrders(form, on){
-    const btn = form.querySelector("button[type=submit]");
-    if(btn){ btn.disabled = !!on; btn.innerText = on ? "Consultando..." : "Consultar"; }
-  }
-  function htmlEscape(s){
-    return String(s).replace(/[&<>"']/g, (m)=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]));
-  }
-  function safeUrl(u){
-    try { return String(u || "").trim(); } catch(_){ return "#"; }
-  }
-
-  // Construye tarjetas HTML a partir de `products` (array)
-  function renderCardsHTML(products){
-    if (!Array.isArray(products) || products.length === 0) return "";
-    let out = '<div class="cards-grid">';
-    for (const p of products){
-      const title = htmlEscape(p.title || "");
-      const img = safeUrl(p.image || "");
-      const buy = safeUrl(p.buy_url || p.product_url || "#");
-      const view = safeUrl(p.product_url || p.buy_url || "#");
-      const price = p.price ? htmlEscape(p.price) : "";
-      const cmp = p.compare_at_price ? `<span class="cmp">${htmlEscape(p.compare_at_price)}</span>` : "";
-      const inv = (typeof p.inventory === "number") ? `<small class="muted">Stock: ${p.inventory}</small>` : "";
-
-      out += `
-        <div class="card">
-          <div class="card-media">
-            ${img ? `<img src="${img}" alt="${title}">` : ""}
+    return `
+      <article class="mx-card">
+        <img src="${p.image||''}" alt="">
+        <div>
+          <h4>${p.title||''}</h4>
+          ${p.compare_at_price
+            ? `<div class="mx-price"><s style="color:#64748b;font-weight:600;margin-right:.35rem">${p.compare_at_price}</s> ${p.price||''}</div>`
+            : `<div class="mx-price">${p.price||''}</div>`}
+          <div class="mx-actions">
+            <a class="mx-btn mx-buy" href="${p.buy_url||'#'}">Comprar ahora</a>
+            <a class="mx-link" href="${p.product_url||'#'}">Ver producto</a>
           </div>
-          <div class="card-body">
-            <div class="card-title">${title}</div>
-            <div class="card-price">${price} ${cmp}</div>
-            ${inv}
-            <div class="card-actions">
-              <a class="btn" href="${view}" target="_blank" rel="noopener">Ver</a>
-              <a class="btn primary" href="${buy}" target="_blank" rel="noopener">Comprar</a>
-            </div>
-          </div>
-        </div>`;
-    }
-    out += '</div>';
-    return out;
+          ${inv}
+        </div>
+      </article>`;
   }
 
-  // ======= App =======
-  function initWidget(){
-    if (document.querySelector(".mx-root")) return;
+  function appendMsg(text){
+    const body=document.getElementById('mxBody');
+    const div=document.createElement('div'); div.className='mx-msg'; div.textContent=text; body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  }
 
-    // --- Contenedor raíz a la izquierda ---
-    const root = el("div", {className: "mx-root mx-left"});
+  function showLoading(){
+    const body=document.getElementById('mxBody');
+    const div=document.createElement('div'); div.className='mx-loading'; div.id='mxLoadingMsg'; div.textContent='Buscando productos'; body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  }
 
-    // --- Botón flotante (launcher) ---
-    const launcher = el("button", {className: "mx-launcher", title: "Chatea con Maxter"}, [
-      el("span", {className:"mx-launcher-icon", html:"🤖"}),
-      el("span", {className:"mx-launcher-label"}, "Maxter")
-    ]);
+  function hideLoading(){
+    const loading = document.getElementById('mxLoadingMsg');
+    if(loading) loading.remove();
+  }
 
-    // --- Panel principal (inicia oculto) ---
-    const btnClose = el("button", {className:"mx-close", title:"Cerrar"}, "×");
-    const head = el("div", {className: "mx-head"}, [
-      el("div", {className:"mx-title"}, [
-        document.createTextNode(TITLE),
-        el("small", {html: "&nbsp;Asesor de compras"})
-      ]),
-      btnClose
-    ]);
-    const tabs = el("div", {className: "mx-tabs"}, [
-      el("button", {className: "mx-tab active", "data-tab":"products"}, "Productos"),
-      el("button", {className: "mx-tab", "data-tab":"orders"}, "Mi pedido"),
-    ]);
+  function appendProducts(list, isNewSearch){
+    if(!Array.isArray(list) || !list.length) return;
+    const body=document.getElementById('mxBody');
 
-    // ======= Vista Productos =======
-    const bodyProducts = el("div", {className:"mx-body", id:"mxBody"}, [
-      el("div", {className:"mx-msg", html:"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍"})
-    ]);
-    const pagi = el("div", {className:"mx-pagination", id:"mxPagination", style:"display:none;"}, [
-      el("div", {className:"mx-pagination-controls", id:"mxPaginationControls"}, [
-        el("button", {className:"mx-pagination-btn", id:"mxPrevBtn"}, "‹ Anterior"),
-        el("span", {className:"mx-pagination-info", id:"mxPaginationInfo"}, "Página 1 de 1"),
-        el("button", {className:"mx-pagination-btn", id:"mxNextBtn"}, "Siguiente ›"),
-      ])
-    ]);
-    const formProducts = el("form", {className:"mx-form", id:"mxForm"}, [
-      el("textarea", {id:"mxInput", rows:"1", placeholder:"Escribe tu búsqueda (ej. 'soporte de monitor 22 pulgadas')"}),
-      el("button", {type:"submit"}, "Enviar")
-    ]);
-    const panelProducts = el("div", {className:"mx-panel", id:"mxPanelProducts"}, [
-      head, tabs, bodyProducts, pagi, formProducts
-    ]);
-
-    // ======= Vista Pedidos =======
-    const bodyOrders = el("div", {className:"mx-body", id:"mxOrderBody"}, [
-      el("div", {className:"mx-msg", html:"Consulta el <b>estatus</b> de tu compra. Ingresa tu número de orden (4–15 dígitos)."})
-    ]);
-    const formOrders = el("form", {className:"mx-form", id:"mxOrderForm"}, [
-      el("input", {id:"mxOrderInput", type:"text", placeholder:"Ejemplo: 12345678 o #12345678"}),
-      el("button", {type:"submit"}, "Consultar")
-    ]);
-    const panelOrders = el("div", {className:"mx-panel", id:"mxPanelOrders", style:"display:none;"}, [
-      head.cloneNode(true), tabs.cloneNode(true), bodyOrders, formOrders
-    ]);
-
-    // --- Contenedor del panel (para poder ocultar/mostrar) ---
-    const shell = el("div", {className:"mx-shell", style:"display:none;"}, [
-      panelProducts, panelOrders
-    ]);
-
-    // --- Montaje en DOM ---
-    root.appendChild(shell);
-    root.appendChild(launcher);
-    document.body.appendChild(root);
-
-    // ======= Abrir / Cerrar =======
-    function openPanel(){
-      state.isOpen = true;
-      shell.style.display = "block";
-      launcher.style.display = "none";
-      const tx = shell.querySelector("#mxInput");
-      if (tx) setTimeout(()=>tx.focus(), 50);
-    }
-    function closePanel(){
-      state.isOpen = false;
-      shell.style.display = "none";
-      launcher.style.display = "inline-flex";
-    }
-    launcher.addEventListener("click", openPanel);
-    document.addEventListener("keydown", function(ev){
-      if (ev.key === "Escape" && state.isOpen) closePanel();
-    });
-    btnClose.addEventListener("click", closePanel);
-
-    // ======= Tabs =======
-    function switchTab(name){
-      const isProducts = name === "products";
-      panelProducts.style.display = isProducts ? "block" : "none";
-      panelOrders.style.display   = isProducts ? "none"  : "block";
-      document.querySelectorAll(".mx-tab").forEach(b=>{
-        b.classList.toggle("active", b.dataset.tab === name);
-      });
-    }
-    document.addEventListener("click", function(ev){
-      const b = ev.target.closest(".mx-tab");
-      if(!b) return;
-      switchTab(b.dataset.tab);
-    });
-
-    // ======= Flujo Productos =======
-    const input = formProducts.querySelector("#mxInput");
-    const mxPrevBtn = pagi.querySelector("#mxPrevBtn");
-    const mxNextBtn = pagi.querySelector("#mxNextBtn");
-    const mxPaginationInfo = pagi.querySelector("#mxPaginationInfo");
-
-    function updatePaginationUI(){
-      if(!chatState.pagination){ pagi.style.display = "none"; return; }
-      const p = chatState.pagination;
-      pagi.style.display = "block";
-      mxPrevBtn.disabled = !p.has_prev || chatState.isLoading;
-      mxNextBtn.disabled = !p.has_next || chatState.isLoading;
-      mxPaginationInfo.textContent = `Página ${chatState.currentPage} de ${p.total_pages}`;
+    if(isNewSearch){
+      const oldList = body.querySelector('.mx-list');
+      if(oldList) oldList.remove();
     }
 
-    function paintProductsAnswer(ans){
-      if (ans.answer_html)      appendMsg(bodyProducts, ans.answer_html, "bot");
-      else if (ans.answer)      appendMsg(bodyProducts, htmlEscape(ans.answer), "bot");
+    const wrap=document.createElement('div'); wrap.className='mx-list'; wrap.id='mxProductList';
+    list.forEach(p=> wrap.insertAdjacentHTML('beforeend', cardHTML(p)));
+    body.appendChild(wrap);
+    body.scrollTop = body.scrollHeight;
+  }
 
-      // NUEVO: renderizar array de productos si viene en la respuesta
-      if (Array.isArray(ans.products) && ans.products.length){
-        const html = renderCardsHTML(ans.products);
-        if (html) appendMsg(bodyProducts, html, "bot");
-      }
+  function updatePagination(pagination){
+    const paginationDiv = document.getElementById('mxPagination');
+    const paginationInfo = document.getElementById('mxPaginationInfo');
+    const prevBtn = document.getElementById('mxPrevBtn');
+    const nextBtn = document.getElementById('mxNextBtn');
 
-      // (opcional) si backend también trae cards_html, lo pintamos
-      if (ans.cards_html) appendMsg(bodyProducts, ans.cards_html, "bot");
-
-      chatState.pagination = ans.pagination || null;
-      updatePaginationUI();
+    if(!pagination || pagination.total_pages <= 1){
+      paginationDiv.style.display = 'none';
+      return;
     }
 
-    async function performSearch(q, page=1, fromUser=true){
-      if(!q || !q.trim()) return;
-      if(fromUser) appendMsg(bodyProducts, htmlEscape(q), "user");
-      setLoading(formProducts, true);
-      try{
-        const resp = await fetch(`${BACKEND}/api/chat`, {
-          method: "POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({ query: q, page })
-        });
-        const data = await resp.json();
-        if(!resp.ok){
-          appendMsg(bodyProducts, "Hubo un error realizando la búsqueda.", "bot");
-          return;
+    paginationDiv.style.display = 'flex';
+    paginationInfo.textContent = `Página ${pagination.page} de ${pagination.total_pages} (${pagination.total} productos)`;
+
+    prevBtn.disabled = !pagination.has_prev;
+    nextBtn.disabled = !pagination.has_next;
+
+    chatState.pagination = pagination;
+  }
+
+  function performSearch(query, page, isNewSearch){
+    if(chatState.isLoading) return;
+
+    chatState.isLoading = true;
+    const submitBtn = document.getElementById('mxSubmitBtn');
+    const input = document.getElementById('mxInput');
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Buscando...';
+
+    if(isNewSearch){
+      showLoading();
+      chatState.currentQuery = query;
+      chatState.currentPage = 1;
+    } else {
+      chatState.currentPage = page;
+    }
+
+    fetch(BACKEND + "/api/chat", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        message: chatState.currentQuery,
+        page: page,
+        per_page: 10
+      })
+    })
+    .then(r=>r.json())
+    .then(res=>{
+      hideLoading();
+      chatState.isLoading = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Enviar';
+
+      if(res && Array.isArray(res.products)){
+        const n = res.products.length;
+
+        if(n > 0){
+          if(isNewSearch && res.answer){ appendMsg(res.answer); }
+          appendProducts(res.products, isNewSearch);
+          updatePagination(res.pagination);
+        } else {
+          if(isNewSearch){
+            appendMsg("No encontré resultados para tu búsqueda. Intenta con palabras clave más específicas como 'sensor agua tinaco', 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung' o 'cable RCA audio video'.");
+          }
+          updatePagination(null);
         }
-        chatState.currentQuery = q; chatState.currentPage = page;
-        paintProductsAnswer(data);
-      }catch(e){
-        appendMsg(bodyProducts, "Error de red consultando el backend.", "bot");
-      }finally{
-        setLoading(formProducts, false);
+      } else {
+        if(isNewSearch){
+          appendMsg(res?.answer || "No encontré productos que coincidan con tu búsqueda.");
+        }
+        updatePagination(null);
       }
-    }
+    })
+    .catch(err=>{
+      hideLoading();
+      chatState.isLoading = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Enviar';
+      console.error('Error en búsqueda:', err);
+      appendMsg("Hubo un problema al buscar productos. Intenta de nuevo.");
+      updatePagination(null);
+    });
+  }
 
-    formProducts.addEventListener("submit", function(e){
+  // ====== Event Listeners ======
+  document.addEventListener('DOMContentLoaded', function(){
+    const form = document.getElementById('mxForm');
+    const input = document.getElementById('mxInput');
+    const prevBtn = document.getElementById('mxPrevBtn');
+    const nextBtn = document.getElementById('mxNextBtn');
+
+    form.addEventListener('submit', function(e){
       e.preventDefault();
-      performSearch(input.value, 1, true);
-      input.value = "";
+      const q = input.value.trim();
+      if(!q || chatState.isLoading) return;
+      performSearch(q, 1, true);
+      input.value="";
     });
 
-    mxPrevBtn.addEventListener("click", function(){
+    prevBtn.addEventListener('click', function(){
       if(chatState.pagination && chatState.pagination.has_prev && !chatState.isLoading){
-        performSearch(chatState.currentQuery, chatState.currentPage - 1, false);
-      }
-    });
-    mxNextBtn.addEventListener("click", function(){
-      if(chatState.pagination && chatState.pagination.has_next && !chatState.isLoading){
-        performSearch(chatState.currentQuery, chatState.currentPage + 1, false);
+        const prevPage = chatState.currentPage - 1;
+        performSearch(chatState.currentQuery, prevPage, false);
       }
     });
 
-    input.addEventListener("keypress", function(e){
+    nextBtn.addEventListener('click', function(){
+      if(chatState.pagination && chatState.pagination.has_next && !chatState.isLoading){
+        const nextPage = chatState.currentPage + 1;
+        performSearch(chatState.currentQuery, nextPage, false);
+      }
+    });
+
+    input.addEventListener('keypress', function(e){
       if(e.key === 'Enter' && !e.shiftKey){
         e.preventDefault();
-        formProducts.dispatchEvent(new Event('submit'));
+        form.dispatchEvent(new Event('submit'));
       }
     });
-
-    // ======= Flujo Pedidos =======
-    const orderInput = formOrders.querySelector("#mxOrderInput");
-
-    function paintOrderAnswer(md){
-      appendMsg(bodyOrders, md, "bot");
-    }
-
-    async function performOrderLookup(orderRaw){
-      if(!orderRaw || !orderRaw.trim()) return;
-      appendMsg(bodyOrders, `Consultar pedido: ${htmlEscape(orderRaw)}`, "user");
-      setLoadingOrders(formOrders, true);
-      try{
-        const resp = await fetch(`${BACKEND}/api/orders/status`, {
-          method: "POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({ order_no: orderRaw })
-        });
-        const data = await resp.json();
-        if(!resp.ok || !data.ok){
-          paintOrderAnswer("No fue posible consultar el estatus en este momento.");
-          return;
-        }
-        paintOrderAnswer(data.answer || "Sin datos.");
-      }catch(e){
-        paintOrderAnswer("Error de red consultando el estatus.");
-      }finally{
-        setLoadingOrders(formOrders, false);
-      }
-    }
-
-    formOrders.addEventListener("submit", function(e){
-      e.preventDefault();
-      performOrderLookup(orderInput.value);
-      orderInput.value = "";
-    });
-  }
-
-  // Montaje seguro
-  if (document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', initWidget, { once: true });
-  } else {
-    initWidget();
-  }
+  });
 })();
