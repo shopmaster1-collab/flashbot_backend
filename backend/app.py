@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, threading, time, html
+import os, re, threading, time, html, io, csv
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -421,13 +421,13 @@ def _enforce_intent_gate(query: str, items: list):
     return filtered or items
 
 # ===========================================================
-#  ESTATUS DE PEDIDOS (Google Sheets "Publish to web" HTML)
+#  ESTATUS DE PEDIDOS (Google Sheets "Publish to web" HTML/CSV)
 # ===========================================================
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
 ORDERS_AUTORELOAD  = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" = siempre recargar; "0" = usa caché según TTL
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 
-_orders_cache = {"ts": 0.0, "rows": [], "headers": []}
+_orders_cache = {"ts": 0.0, "rows": [], "headers": [], "mode": None, "source_url": ""}
 
 # Columnas canónicas que devolveremos al usuario
 _ORDER_COLS = [
@@ -493,41 +493,43 @@ def _orders_int(val) -> int | None:
     except Exception:
         return None
 
-def _fetch_order_rows(force: bool=False):
-    """Lee la tabla 'waffle' del pubhtml y devuelve filas normalizadas."""
-    global _orders_cache
-    now=time.time()
+def _csv_url_from_pubhtml(url: str) -> str:
+    # soporta: .../pubhtml?gid=0&single=true  -> .../pub?gid=0&single=true&output=csv
+    if not url:
+        return ""
+    if "/pubhtml" in url:
+        base = url.replace("/pubhtml", "/pub")
+        if "output=csv" not in base:
+            sep = "&" if "?" in base else "?"
+            base = f"{base}{sep}output=csv"
+        return base
+    # si ya es /pub sin output, añadirlo
+    if "/pub" in url and "output=csv" not in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}output=csv"
+    return url
 
-    if ORDERS_AUTORELOAD!="1" and _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
-        return _orders_cache["rows"]
-
-    if not (ORDERS_PUBHTML_URL and requests and BeautifulSoup):
-        print("[ORDERS] missing deps or URL", flush=True)
-        return []
-
-    try:
-        headers = {
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "es-MX,es;q=0.9,en;q=0.8"
-        }
-        r=requests.get(ORDERS_PUBHTML_URL, timeout=25, headers=headers)
-        sc=r.status_code
-        text_len=len(r.text or "")
-        print(f"[ORDERS] fetch status={sc} len={text_len}", flush=True)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[ORDERS] fetch error: {e}", flush=True)
-        return []
+def _fetch_orders_html(url: str):
+    """Devuelve (headers, rows) desde HTML tipo 'waffle'."""
+    if not (url and requests and BeautifulSoup):
+        return [], []
+    headers_req = {
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8"
+    }
+    r = requests.get(url, timeout=25, headers=headers_req)
+    print(f"[ORDERS][HTML] fetch status={r.status_code} len={len(r.text or '')}", flush=True)
+    r.raise_for_status()
 
     soup=BeautifulSoup(r.text, "html.parser")
     tables=soup.find_all("table")
     waffle=soup.find("table", {"class":"waffle"}) or (tables[-1] if tables else None)
     if not waffle:
-        print(f"[ORDERS] no table found. total_tables={len(tables)}", flush=True)
-        return []
+        print(f"[ORDERS][HTML] no 'waffle' table. total_tables={len(tables)}", flush=True)
+        return [], []
 
     # Headers
     headers=[]
@@ -554,7 +556,6 @@ def _fetch_order_rows(force: bool=False):
     rows=[]
     tbody=waffle.find("tbody")
     body_trs=tbody.find_all("tr") if tbody else [tr for tr in waffle.find_all("tr")]
-    # si usamos thead, saltar la primera fila (encabezados)
     skip_first = bool(thead)
     for i, tr in enumerate(body_trs):
         if skip_first and i == 0:
@@ -562,7 +563,6 @@ def _fetch_order_rows(force: bool=False):
         tds=[c.get_text(strip=True) for c in tr.find_all(["td","th"])]
         if not tds:
             continue
-        # saltar filas idénticas a headers
         if headers and all(_norm_header(v) == headers[j] if j < len(headers) else False for j,v in enumerate(tds)):
             continue
         row={}
@@ -572,8 +572,85 @@ def _fetch_order_rows(force: bool=False):
         if row and any(v for v in row.values()):
             rows.append(row)
 
-    _orders_cache.update({"ts": now, "rows": rows, "headers": headers})
-    print(f"[ORDERS] parsed headers={headers} rows={len(rows)}", flush=True)
+    return headers, rows
+
+def _fetch_orders_csv(url: str):
+    """Devuelve (headers, rows) leyendo CSV publicado."""
+    if not (url and requests):
+        return [], []
+    headers_req = {
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,*/*;q=0.8",
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8"
+    }
+    r = requests.get(url, timeout=25, headers=headers_req)
+    print(f"[ORDERS][CSV]  fetch status={r.status_code} len={len(r.text or '')}", flush=True)
+    r.raise_for_status()
+
+    text = r.text or ""
+    if not text.strip():
+        return [], []
+
+    reader = csv.reader(io.StringIO(text))
+    rows_raw = list(reader)
+    if not rows_raw:
+        return [], []
+
+    raw_headers = [h.strip() for h in rows_raw[0]]
+    headers = [_norm_header(h) for h in raw_headers]
+    rows=[]
+    for arr in rows_raw[1:]:
+        if not any(arr):
+            continue
+        row={}
+        for j, val in enumerate(arr):
+            if j < len(headers):
+                row[headers[j]] = (val or "").strip()
+        if row and any(v for v in row.values()):
+            rows.append(row)
+    return headers, rows
+
+def _fetch_order_rows(force: bool=False):
+    """Lee la tabla publicada (HTML 'waffle'). Si no hay filas, intenta CSV publicado."""
+    global _orders_cache
+    now=time.time()
+
+    if ORDERS_AUTORELOAD!="1" and _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
+        return _orders_cache["rows"]
+
+    url = ORDERS_PUBHTML_URL
+    if not url:
+        print("[ORDERS] missing ORDERS_PUBHTML_URL", flush=True)
+        _orders_cache.update({"ts": now, "rows": [], "headers": [], "mode": None, "source_url": ""})
+        return []
+
+    # 1) Intentar HTML
+    try:
+        headers, rows = _fetch_orders_html(url)
+    except Exception as e:
+        print(f"[ORDERS] HTML error: {e}", flush=True)
+        headers, rows = [], []
+
+    mode = None; source_url = url
+    if rows:
+        mode = "html"
+    else:
+        # 2) Fallback CSV
+        csv_url = _csv_url_from_pubhtml(url)
+        try:
+            h2, r2 = _fetch_orders_csv(csv_url)
+        except Exception as e:
+            print(f"[ORDERS] CSV error: {e}", flush=True)
+            h2, r2 = [], []
+        if r2:
+            headers, rows = h2, r2
+            mode = "csv"
+            source_url = csv_url
+
+    _orders_cache.update({"ts": now, "rows": rows, "headers": headers, "mode": mode, "source_url": source_url})
+    print(f"[ORDERS] parsed mode={mode} headers={headers} rows={len(rows)}", flush=True)
     return rows
 
 def _detect_order_number(text: str):
@@ -773,6 +850,8 @@ def admin_orders_ping():
     sample = rows[:2] if rows else []
     return {"ok": True,
             "url": ORDERS_PUBHTML_URL,
+            "mode": _orders_cache.get("mode"),
+            "source_url": _orders_cache.get("source_url"),
             "headers": _orders_cache.get("headers", []),
             "rows_count": len(rows),
             "sample": sample}
@@ -804,7 +883,8 @@ def admin_orders_find():
                 vi = _orders_int(v)
                 if vi and vi == target:
                     matches.append(r); break
-    return {"ok": True, "target": target, "headers": headers, "candidate_cols": cands,
+    return {"ok": True, "target": target, "mode": _orders_cache.get("mode"),
+            "headers": headers, "candidate_cols": cands,
             "rows_count": len(rows), "matched_count": len(matches), "matched_samples": matches[:3]}
 
 # ---------- Admin varios ----------
