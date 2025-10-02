@@ -86,7 +86,8 @@ def home():
             '<code>GET /api/admin/products</code>, '
             '<code>GET /api/admin/diag</code>, '
             '<code>GET /api/admin/preview?q=...</code>, '
-            '<code>GET /api/admin/orders-ping</code>'
+            '<code>GET /api/admin/orders-ping</code>, '
+            '<code>GET /api/admin/orders-find?order=####</code>'
             "</p>")
 
 @app.get("/health")
@@ -451,32 +452,18 @@ def _norm_header(t: str) -> str:
     return _HEADER_MAP.get(u, t)
 
 def _orders_int(val) -> int | None:
-    """
-    Normaliza un valor de hoja a entero de orden:
-    '6506' -> 6506
-    '6,506' -> 6506
-    '6506.0' / '6506,0' -> 6506
-    """
-    if val is None:
-        return None
+    """'6506'->6506, '6,506'->6506, '6506.0'/'6506,0'->6506."""
+    if val is None: return None
     s = str(val).strip()
-    if not s:
-        return None
-    # Si parece decimal con .0 o ,0 => quedarse con la parte entera
+    if not s: return None
     m = re.match(r"^\s*([0-9]{1,})(?:[.,]0+)\s*$", s)
     if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    # Quitar todo lo que no sea dígito y convertir
+        try: return int(m.group(1))
+        except Exception: pass
     digits = re.sub(r"\D+", "", s)
-    if not digits:
-        return None
-    try:
-        return int(digits)
-    except Exception:
-        return None
+    if not digits: return None
+    try: return int(digits)
+    except Exception: return None
 
 def _fetch_order_rows(force: bool=False):
     """Lee la tabla 'waffle' del pubhtml y devuelve filas normalizadas."""
@@ -529,7 +516,7 @@ def _fetch_order_rows(force: bool=False):
     rows=[]
     tbody=waffle.find("tbody")
     body_trs=tbody.find_all("tr") if tbody else [tr for tr in waffle.find_all("tr")]
-    # si usamos thead, saltar el primer tr (header)
+    # si usamos thead, saltar la primera fila (encabezados)
     skip_first = bool(thead)
     for i, tr in enumerate(body_trs):
         if skip_first and i == 0:
@@ -562,39 +549,62 @@ def _looks_like_order_intent(text: str) -> bool:
     keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido","envio","envío","paqueteria","paquetería","guia","guía")
     return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
 
-def _find_order_column(row: dict) -> str | None:
-    """Devuelve el nombre de la columna que contiene el número de orden en la fila dada."""
-    # 1) preferimos canónico
-    for k in ["# de Orden"]:
-        if k in row: return k
-    # 2) heurística por nombre
-    for k in row.keys():
-        uk = k.upper()
-        if ("ORDEN" in uk) or ("PEDIDO" in uk) or ("ORDER" in uk):
-            return k
-    return None
+def _order_candidate_columns(headers: list[str]) -> list[str]:
+    """Prioriza '# de Orden' y luego cualquier columna cuyo nombre sugiera 'orden/pedido/order'."""
+    cands=[]
+    if "# de Orden" in headers: cands.append("# de Orden")
+    for h in headers:
+        u=h.upper()
+        if h in cands: 
+            continue
+        if ("ORDEN" in u) or ("PEDIDO" in u) or ("ORDER" in u):
+            cands.append(h)
+    return cands or headers  # como último recurso, todas
 
 def _lookup_order(order_number: str):
     rows=_fetch_order_rows(force=True)
     if not rows: 
         print("[ORDERS] no rows loaded", flush=True)
         return []
-    wanted=[]
     target_int = _orders_int(order_number)
     if target_int is None:
         return []
+
+    headers = _orders_cache.get("headers", [])
+    cands = _order_candidate_columns(headers)
+    skip_cols = set(["SKU","Precio Unitario","Precio Total","Pzas","Plataforma","Envio","Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria","Guia","Fecha envió","Fecha Entrega"])
+
+    # 1) Intento principal: solo columnas candidatas
+    wanted=[]
     for r in rows:
-        key = _find_order_column(r)
-        if not key:
-            continue
-        row_int = _orders_int(r.get(key))
-        if row_int is None:
-            continue
-        if row_int == target_int:
-            # construir solo columnas canónicas
-            item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
-            wanted.append(item)
-    print(f"[ORDERS] lookup order={target_int} matches={len(wanted)}", flush=True)
+        for key in cands:
+            val = r.get(key)
+            if val is None: 
+                continue
+            row_int = _orders_int(val)
+            if row_int is None: 
+                continue
+            if row_int == target_int:
+                item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
+                wanted.append(item)
+                break
+    if wanted:
+        print(f"[ORDERS] lookup (candidates) order={target_int} matches={len(wanted)}", flush=True)
+        return wanted
+
+    # 2) Fallback: escaneo controlado por todas las columnas (evitando precios/SKU)
+    for r in rows:
+        for key, val in r.items():
+            if key in skip_cols: 
+                continue
+            row_int = _orders_int(val)
+            if row_int is None: 
+                continue
+            if row_int == target_int:
+                item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
+                wanted.append(item)
+                break
+    print(f"[ORDERS] lookup (fallback) order={target_int} matches={len(wanted)}", flush=True)
     return wanted
 
 def _render_order_vertical(rows: list) -> str:
@@ -705,7 +715,7 @@ def chat():
     if deeps and len(answer) > 50:
         try:
             enhanced_answer = deeps.chat(
-                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén toda la información técnica y de productos, pero hazla más conversacional y amigable. No inventes datos. Si se mencionan sensores de gas, mantén las características específicas encontradas:",
+                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén toda la información técnica y de productos, pero hazla más conversacional y amigable. No inventes datos.",
                 answer
             )
             if enhanced_answer and len(enhanced_answer) > 40:
@@ -726,6 +736,36 @@ def admin_orders_ping():
             "headers": _orders_cache.get("headers", []),
             "rows_count": len(rows),
             "sample": sample}
+
+@app.get("/api/admin/orders-find")
+def admin_orders_find():
+    if not _admin_ok(request):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    raw = (request.args.get("order") or "").strip()
+    target = _orders_int(raw)
+    if not target:
+        return {"ok": False, "error": "bad order"}, 400
+    rows = _fetch_order_rows(force=True)
+    headers = _orders_cache.get("headers", [])
+    cands = _order_candidate_columns(headers)
+    matches = []
+    for r in rows:
+        for k in cands:
+            vi = _orders_int(r.get(k))
+            if vi and vi == target:
+                matches.append(r); break
+    # fallback
+    if not matches:
+        skip_cols = set(["SKU","Precio Unitario","Precio Total","Pzas","Plataforma","Envio","Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria","Guia","Fecha envió","Fecha Entrega"])
+        for r in rows:
+            for k,v in r.items():
+                if k in skip_cols: 
+                    continue
+                vi = _orders_int(v)
+                if vi and vi == target:
+                    matches.append(r); break
+    return {"ok": True, "target": target, "headers": headers, "candidate_cols": cands,
+            "rows_count": len(rows), "matched_count": len(matches), "matched_samples": matches[:3]}
 
 # --- Endpoint de diagnóstico del chat (opcional)
 @app.post("/api/admin/chat-debug")
@@ -809,7 +849,6 @@ def api_orders():
     if not raw:
         return jsonify({ "ok": False, "error": "missing order" }), 400
 
-    # NORMALIZA: solo dígitos / enteros tolerando comas/decimales
     order_no = _detect_order_number(raw) or raw
     try_int = _orders_int(order_no)
     if try_int is None:
