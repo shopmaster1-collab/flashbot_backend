@@ -1,6 +1,7 @@
-/* MAXTER widget (1 columna + mensaje corto + paginación)
-   Backend por defecto: flashbot-backend en Render.
-   Puedes override con <script data-backend="https://tu-backend" ...>
+/* MAXTER widget (dos modos: Productos / Mi pedido)
+   - Conserva tu flujo actual de Productos (POST /api/chat)
+   - Añade flujo de Pedidos (POST /api/orders/status)
+   - Puedes override backend con: <script data-backend="https://tu-backend" ...>
 */
 (function(){
   const DEFAULT_BACKEND = "https://flashbot-backend-25b6.onrender.com";
@@ -12,235 +13,216 @@
   })();
   const TITLE = "MAXTER, Tu Asistente Inteligente";
 
-  // Estado global del chat
+  // ======= Estado global (Productos) =======
   const chatState = {
+    isLoading: false,
     currentQuery: "",
     currentPage: 1,
-    pagination: null,
-    isLoading: false
+    pagination: null,  // { has_next, has_prev, total_pages }
+    lastResponse: null
   };
 
-  // ====== FAB ======
-  const fab = document.createElement('button');
-  fab.className = 'mx-fab';
-  fab.setAttribute('aria-label','Abrir chat MAXTER, Tu Asesor de Compras');
-  fab.setAttribute('title','MAXTER, Tu Asesor de Compras');
-  fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19l1.7-3.4A8 8 0 1112 20H6l-2 1z" stroke="currentColor" stroke-width="1.5"/></svg><span>MAXTER, Tu Asesor de Compras</span>';
-
-  // ====== Panel ======
-  const panel = document.createElement('section');
-  panel.className = 'mx-panel';
-  panel.innerHTML = `
-    <div class="mx-head">${TITLE} <small style="margin-left:.5rem; font-weight:500;">Asesor de compras</small></div>
-    <div class="mx-body" id="mxBody">
-      <div class="mx-msg">¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍</div>
-    </div>
-    <div id="mxPagination" class="mx-pagination" style="display:none;">
-      <div class="mx-pagination-controls" id="mxPaginationControls">
-        <button class="mx-pagination-btn" id="mxPrevBtn">‹ Anterior</button>
-        <span class="mx-pagination-info" id="mxPaginationInfo">Página 1 de 1</span>
-        <button class="mx-pagination-btn" id="mxNextBtn">Siguiente ›</button>
-      </div>
-    </div>
-    <form class="mx-form" id="mxForm">
-      <input id="mxInput" type="text" placeholder="Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas" required />
-      <button type="submit" id="mxSubmitBtn">Enviar</button>
-    </form>
-  `;
-
-  document.addEventListener('DOMContentLoaded', function(){
-    document.body.appendChild(fab);
-    document.body.appendChild(panel);
-  });
-
-  fab.addEventListener('click', function(){
-    panel.classList.toggle('mx-open');
-  });
-
-  // ====== Helpers ======
-  function money(val){
-    try{
-      if(val===null||val===undefined) return null;
-      const n = Number(val);
-      return n.toLocaleString('es-MX',{style:'currency', currency:'MXN'});
-    }catch(e){ return val; }
-  }
-
-  function cardHTML(p){
-    let inv = '';
-    if (Array.isArray(p.inventory) && p.inventory.length){
-      const tot = p.inventory.reduce((s,x)=>s + (Number(x.available)||0), 0);
-      const branches = p.inventory.map(x=>`${x.name}: ${x.available}`).join(' · ');
-      inv = `<div class="mx-inv">Existencias (${tot}): ${branches}</div>`;
-    }
-    return `
-      <article class="mx-card">
-        <img src="${p.image||''}" alt="">
-        <div>
-          <h4>${p.title||''}</h4>
-          ${p.compare_at_price
-            ? `<div class="mx-price"><s style="color:#64748b;font-weight:600;margin-right:.35rem">${p.compare_at_price}</s> ${p.price||''}</div>`
-            : `<div class="mx-price">${p.price||''}</div>`}
-          <div class="mx-actions">
-            <a class="mx-btn mx-buy" href="${p.buy_url||'#'}">Comprar ahora</a>
-            <a class="mx-link" href="${p.product_url||'#'}">Ver producto</a>
-          </div>
-          ${inv}
-        </div>
-      </article>`;
-  }
-
-  function appendMsg(text){
-    const body=document.getElementById('mxBody');
-    const div=document.createElement('div'); div.className='mx-msg'; div.textContent=text; body.appendChild(div);
-    body.scrollTop = body.scrollHeight;
-  }
-
-  function showLoading(){
-    const body=document.getElementById('mxBody');
-    const div=document.createElement('div'); div.className='mx-loading'; div.id='mxLoadingMsg'; div.textContent='Buscando productos'; body.appendChild(div);
-    body.scrollTop = body.scrollHeight;
-  }
-
-  function hideLoading(){
-    const loading = document.getElementById('mxLoadingMsg');
-    if(loading) loading.remove();
-  }
-
-  function appendProducts(list, isNewSearch){
-    if(!Array.isArray(list) || !list.length) return;
-    const body=document.getElementById('mxBody');
-
-    if(isNewSearch){
-      const oldList = body.querySelector('.mx-list');
-      if(oldList) oldList.remove();
-    }
-
-    const wrap=document.createElement('div'); wrap.className='mx-list'; wrap.id='mxProductList';
-    list.forEach(p=> wrap.insertAdjacentHTML('beforeend', cardHTML(p)));
-    body.appendChild(wrap);
-    body.scrollTop = body.scrollHeight;
-  }
-
-  function updatePagination(pagination){
-    const paginationDiv = document.getElementById('mxPagination');
-    const paginationInfo = document.getElementById('mxPaginationInfo');
-    const prevBtn = document.getElementById('mxPrevBtn');
-    const nextBtn = document.getElementById('mxNextBtn');
-
-    if(!pagination || pagination.total_pages <= 1){
-      paginationDiv.style.display = 'none';
-      return;
-    }
-
-    paginationDiv.style.display = 'flex';
-    paginationInfo.textContent = `Página ${pagination.page} de ${pagination.total_pages} (${pagination.total} productos)`;
-
-    prevBtn.disabled = !pagination.has_prev;
-    nextBtn.disabled = !pagination.has_next;
-
-    chatState.pagination = pagination;
-  }
-
-  function performSearch(query, page, isNewSearch){
-    if(chatState.isLoading) return;
-
-    chatState.isLoading = true;
-    const submitBtn = document.getElementById('mxSubmitBtn');
-    const input = document.getElementById('mxInput');
-
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Buscando...';
-
-    if(isNewSearch){
-      showLoading();
-      chatState.currentQuery = query;
-      chatState.currentPage = 1;
-    } else {
-      chatState.currentPage = page;
-    }
-
-    fetch(BACKEND + "/api/chat", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        message: chatState.currentQuery,
-        page: page,
-        per_page: 10
-      })
-    })
-    .then(r=>r.json())
-    .then(res=>{
-      hideLoading();
-      chatState.isLoading = false;
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Enviar';
-
-      if(res && Array.isArray(res.products)){
-        const n = res.products.length;
-
-        if(n > 0){
-          if(isNewSearch && res.answer){ appendMsg(res.answer); }
-          appendProducts(res.products, isNewSearch);
-          updatePagination(res.pagination);
-        } else {
-          if(isNewSearch){
-            appendMsg("No encontré resultados para tu búsqueda. Intenta con palabras clave más específicas como 'sensor agua tinaco', 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung' o 'cable RCA audio video'.");
-          }
-          updatePagination(null);
-        }
-      } else {
-        if(isNewSearch){
-          appendMsg(res?.answer || "No encontré productos que coincidan con tu búsqueda.");
-        }
-        updatePagination(null);
-      }
-    })
-    .catch(err=>{
-      hideLoading();
-      chatState.isLoading = false;
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Enviar';
-      console.error('Error en búsqueda:', err);
-      appendMsg("Hubo un problema al buscar productos. Intenta de nuevo.");
-      updatePagination(null);
+  // ======= Helpers =======
+  function el(tag, attrs={}, children=[]) {
+    const n = document.createElement(tag);
+    Object.entries(attrs).forEach(([k,v])=>{
+      if(k === "className") n.className = v;
+      else if(k === "html") n.innerHTML = v;
+      else n.setAttribute(k, v);
     });
+    (Array.isArray(children)?children:[children]).filter(Boolean).forEach(c=>n.appendChild(c));
+    return n;
   }
+  function appendMsg(container, htmlStr, role="bot"){
+    const b = el("div", {className: role === "bot" ? "mx-msg" : "mx-msg user", html: htmlStr});
+    container.appendChild(b);
+    container.scrollTop = container.scrollHeight;
+  }
+  function setLoading(form, on){
+    chatState.isLoading = !!on;
+    const btn = form.querySelector("button[type=submit]");
+    if(btn){ btn.disabled = !!on; btn.innerText = on ? "Consultando..." : "Enviar"; }
+  }
+  function setLoadingOrders(form, on){
+    const btn = form.querySelector("button[type=submit]");
+    if(btn){ btn.disabled = !!on; btn.innerText = on ? "Consultando..." : "Consultar"; }
+  }
+  function asSafeHTML(s){ return s; } // backend devuelve markdown->HTML ya saneado en tu flujo
 
-  // ====== Event Listeners ======
-  document.addEventListener('DOMContentLoaded', function(){
-    const form = document.getElementById('mxForm');
-    const input = document.getElementById('mxInput');
-    const prevBtn = document.getElementById('mxPrevBtn');
-    const nextBtn = document.getElementById('mxNextBtn');
+  // ======= Render principal =======
+  document.addEventListener("DOMContentLoaded", function(){
+    const root = el("div", {className: "mx-root"});
 
-    form.addEventListener('submit', function(e){
+    // Head / Tabs
+    const head = el("div", {className: "mx-head"}, [
+      document.createTextNode(TITLE),
+      el("small", {html: "&nbsp;Asesor de compras"})
+    ]);
+    const tabs = el("div", {className: "mx-tabs"}, [
+      el("button", {className: "mx-tab active", "data-tab":"products"}, "Productos"),
+      el("button", {className: "mx-tab", "data-tab":"orders"}, "Mi pedido"),
+    ]);
+
+    // ======= Vista Productos (lo existente) =======
+    const bodyProducts = el("div", {className:"mx-body", id:"mxBody"}, [
+      el("div", {className:"mx-msg", html:"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍"})
+    ]);
+    const pagi = el("div", {className:"mx-pagination", id:"mxPagination", style:"display:none;"}, [
+      el("div", {className:"mx-pagination-controls", id:"mxPaginationControls"}, [
+        el("button", {className:"mx-pagination-btn", id:"mxPrevBtn"}, "‹ Anterior"),
+        el("span", {className:"mx-pagination-info", id:"mxPaginationInfo"}, "Página 1 de 1"),
+        el("button", {className:"mx-pagination-btn", id:"mxNextBtn"}, "Siguiente ›"),
+      ])
+    ]);
+    const formProducts = el("form", {className:"mx-form", id:"mxForm"}, [
+      el("textarea", {id:"mxInput", rows:"1", placeholder:"Escribe tu búsqueda (ej. 'soporte de monitor 22 pulgadas')"}),
+      el("button", {type:"submit"}, "Enviar")
+    ]);
+    const panelProducts = el("div", {className:"mx-panel", id:"mxPanelProducts"}, [
+      head, tabs, bodyProducts, pagi, formProducts
+    ]);
+
+    // ======= Vista Pedidos (nueva) =======
+    const bodyOrders = el("div", {className:"mx-body", id:"mxOrderBody"}, [
+      el("div", {className:"mx-msg", html:"Consulta el <b>estatus</b> de tu compra. Ingresa tu número de orden (4–15 dígitos)."})
+    ]);
+    const formOrders = el("form", {className:"mx-form", id:"mxOrderForm"}, [
+      el("input", {id:"mxOrderInput", type:"text", placeholder:"Ejemplo: 12345678 o #12345678"}),
+      el("button", {type:"submit"}, "Consultar")
+    ]);
+    const panelOrders = el("div", {className:"mx-panel", id:"mxPanelOrders", style:"display:none;"}, [
+      head.cloneNode(true), tabs.cloneNode(true), bodyOrders, formOrders
+    ]);
+
+    // Contenedor raíz
+    root.appendChild(panelProducts);
+    root.appendChild(panelOrders);
+    document.body.appendChild(root);
+
+    // ======= Lógica de Tabs =======
+    function switchTab(name){
+      const isProducts = name === "products";
+      panelProducts.style.display = isProducts ? "block" : "none";
+      panelOrders.style.display   = isProducts ? "none"  : "block";
+      // Marca activa
+      [...document.querySelectorAll(".mx-tab")].forEach(b=>{
+        b.classList.toggle("active", b.dataset.tab === name);
+      });
+    }
+    document.addEventListener("click", function(ev){
+      const b = ev.target.closest(".mx-tab");
+      if(!b) return;
+      switchTab(b.dataset.tab);
+    });
+
+    // ======= Flujo Productos (conservado) =======
+    const input = formProducts.querySelector("#mxInput");
+    const mxPrevBtn = pagi.querySelector("#mxPrevBtn");
+    const mxNextBtn = pagi.querySelector("#mxNextBtn");
+    const mxPaginationInfo = pagi.querySelector("#mxPaginationInfo");
+
+    function updatePaginationUI(){
+      if(!chatState.pagination){ pagi.style.display = "none"; return; }
+      const p = chatState.pagination;
+      pagi.style.display = "block";
+      mxPrevBtn.disabled = !p.has_prev || chatState.isLoading;
+      mxNextBtn.disabled = !p.has_next || chatState.isLoading;
+      mxPaginationInfo.textContent = `Página ${chatState.currentPage} de ${p.total_pages}`;
+    }
+
+    function paintProductsAnswer(ans){
+      // ans: { answer_html, cards_html, pagination }
+      if(ans.answer_html) appendMsg(bodyProducts, ans.answer_html, "bot");
+      if(ans.cards_html)  appendMsg(bodyProducts, ans.cards_html, "bot");
+      chatState.pagination = ans.pagination || null;
+      updatePaginationUI();
+    }
+
+    async function performSearch(q, page=1, fromUser=true){
+      if(!q || !q.trim()) return;
+      if(fromUser) appendMsg(bodyProducts, htmlEscape(q), "user");
+      setLoading(formProducts, true);
+      try{
+        const resp = await fetch(`${BACKEND}/api/chat`, {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ query: q, page })
+        });
+        const data = await resp.json();
+        if(!resp.ok){ appendMsg(bodyProducts, "Hubo un error realizando la búsqueda.", "bot"); return; }
+        chatState.currentQuery = q; chatState.currentPage = page;
+        paintProductsAnswer(data);
+      }catch(e){
+        appendMsg(bodyProducts, "Error de red consultando el backend.", "bot");
+      }finally{
+        setLoading(formProducts, false);
+      }
+    }
+
+    function htmlEscape(s){
+      return s.replace(/[&<>"']/g, (m)=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]));
+    }
+
+    formProducts.addEventListener("submit", function(e){
       e.preventDefault();
-      const q = input.value.trim();
-      if(!q || chatState.isLoading) return;
-      performSearch(q, 1, true);
-      input.value="";
+      performSearch(input.value, 1, true);
+      input.value = "";
     });
 
-    prevBtn.addEventListener('click', function(){
+    mxPrevBtn.addEventListener("click", function(){
       if(chatState.pagination && chatState.pagination.has_prev && !chatState.isLoading){
-        const prevPage = chatState.currentPage - 1;
-        performSearch(chatState.currentQuery, prevPage, false);
+        performSearch(chatState.currentQuery, chatState.currentPage - 1, false);
       }
     });
-
-    nextBtn.addEventListener('click', function(){
+    mxNextBtn.addEventListener("click", function(){
       if(chatState.pagination && chatState.pagination.has_next && !chatState.isLoading){
-        const nextPage = chatState.currentPage + 1;
-        performSearch(chatState.currentQuery, nextPage, false);
+        performSearch(chatState.currentQuery, chatState.currentPage + 1, false);
       }
     });
 
-    input.addEventListener('keypress', function(e){
+    input.addEventListener("keypress", function(e){
       if(e.key === 'Enter' && !e.shiftKey){
         e.preventDefault();
-        form.dispatchEvent(new Event('submit'));
+        formProducts.dispatchEvent(new Event('submit'));
       }
+    });
+
+    // ======= Flujo Pedidos (nuevo) =======
+    const orderInput = formOrders.querySelector("#mxOrderInput");
+
+    function paintOrderAnswer(md){
+      // Render simple: tu backend devuelve markdown; aquí lo inyectamos como texto preformateado simple.
+      // Si lo prefieres con algún mini markdown renderer del lado del widget, lo integramos luego.
+      appendMsg(bodyOrders, md, "bot");
+    }
+
+    async function performOrderLookup(orderRaw){
+      if(!orderRaw || !orderRaw.trim()) return;
+      appendMsg(bodyOrders, `Consultar pedido: ${htmlEscape(orderRaw)}`, "user");
+      setLoadingOrders(formOrders, true);
+      try{
+        const resp = await fetch(`${BACKEND}/api/orders/status`, {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ order_no: orderRaw })
+        });
+        const data = await resp.json();
+        if(!resp.ok || !data.ok){
+          paintOrderAnswer("No fue posible consultar el estatus en este momento.");
+          return;
+        }
+        paintOrderAnswer(data.answer || "Sin datos.");
+      }catch(e){
+        paintOrderAnswer("Error de red consultando el estatus.");
+      }finally{
+        setLoadingOrders(formOrders, false);
+      }
+    }
+
+    formOrders.addEventListener("submit", function(e){
+      e.preventDefault();
+      performOrderLookup(orderInput.value);
+      orderInput.value = "";
     });
   });
 })();
