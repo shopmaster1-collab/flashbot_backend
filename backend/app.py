@@ -418,7 +418,7 @@ _HEADER_MAP = {
     "PRECIO TOTAL":"Precio Total","TOTAL":"Precio Total",
     "FECHA INICIO":"Fecha Inicio","EN PROCESO":"EN PROCESO",
     "PAQUETERÍA":"Paquetería","PAQUETERIA":"Paquetería",
-    "FECHA ENVÍO":"Fecha envío","FECHA ENVIÓ":"Fecha envío","FECHA ENVIO":"Fecha envío",
+    "FECHA ENVÍO":"Fecha envío","FECHA ENVIO":"Fecha envío",
     "FECHA ENTREGA":"Fecha Entrega",
 }
 _ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
@@ -503,9 +503,11 @@ def _detect_order_number(text: str):
     return m.group(1) if m else None
 
 def _looks_like_order_intent(text: str) -> bool:
+    """Detecta si el usuario está consultando sobre un pedido."""
     if not text: return False
     t=text.lower()
-    keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
+    # AMPLIADAS las palabras clave para incluir: estado, guía, envío
+    keys=("pedido","orden","order","estatus","status","estado","seguimiento","rastreo","mi compra","mi pedido","guia","guía","envio","envío","paquete","entrega")
     return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
 
 def _lookup_order(order_number: str):
@@ -574,7 +576,7 @@ def chat():
     detected_from_all = _detect_order_number(all_text)
     order_intent = _looks_like_order_intent(query) or bool(detected_from_all)
 
-    print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}' | any_order='{detected_from_all}'", flush=True)
+    print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}' | order_intent={order_intent} | any_order='{detected_from_all}'", flush=True)
 
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
@@ -591,8 +593,18 @@ def chat():
         if order_intent:
             order_no = _detect_order_number(query) or detected_from_all
             if order_no:
+                # Usuario proporcionó número de pedido - buscar y mostrar
                 rows = _lookup_order(order_no)
                 answer = _render_order_vertical(rows)
+                return jsonify({"answer": answer, "products": [],
+                                "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
+            else:
+                # Usuario pregunta por pedido PERO no dio número - solicitar número
+                answer = (
+                    "Para consultar el estatus de tu pedido, por favor proporcióname el **número de orden**. "
+                    "Lo encuentras en tu comprobante de compra.\n\n"
+                    "Ejemplo: *#12345* o simplemente *12345*"
+                )
                 return jsonify({"answer": answer, "products": [],
                                 "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
     except Exception as e:
