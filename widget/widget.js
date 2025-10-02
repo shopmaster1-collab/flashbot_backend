@@ -1,6 +1,7 @@
 /* MAXTER widget (dos modos: Productos / Mi pedido)
-   - Conserva flujo Productos (POST `${BACKEND}/api/chat`)
-   - Añade flujo Pedidos (POST `${BACKEND}/api/orders/status`)
+   - Panel se muestra oculto y aparece mediante un botón flotante (launcher)
+   - Posicionado en el extremo izquierdo para no chocar con WhatsApp
+   - Flujo Productos (POST `${BACKEND}/api/chat`) + Pedidos (POST `${BACKEND}/api/orders/status`)
    - Puedes override backend con: <script src=".../widget.js" data-backend="https://tu-backend">
 */
 (function(){
@@ -8,10 +9,8 @@
 
   function detectBackend(){
     try{
-      // 1) data-backend en el <script> actual
       const s = document.currentScript;
       if (s && s.dataset && s.dataset.backend) return s.dataset.backend;
-      // 2) Buscar por nombre de archivo “widget.js”
       const scripts = document.getElementsByTagName('script');
       for (let i=0;i<scripts.length;i++){
         const el = scripts[i];
@@ -25,7 +24,10 @@
   const BACKEND = detectBackend();
   const TITLE = "MAXTER, Tu Asistente Inteligente";
 
-  // ======= Estado global (Productos) =======
+  // ======= Estado global =======
+  const state = {
+    isOpen: false,
+  };
   const chatState = {
     isLoading: false,
     currentQuery: "",
@@ -38,16 +40,14 @@
   function isNode(x){
     return x && typeof x === 'object' && typeof x.nodeType === 'number' && typeof x.nodeName === 'string';
   }
-
   function el(tag, attrs={}, children=[]){
     const n = document.createElement(tag);
-    // Atributos
     for (const [k,v] of Object.entries(attrs || {})){
       if (k === "className") n.className = v;
       else if (k === "html") n.innerHTML = v;
+      else if (k === "style") n.setAttribute("style", v);
       else n.setAttribute(k, v);
     }
-    // Hijos (Node/string/number/array)
     const arr = Array.isArray(children) ? children : [children];
     arr
       .filter(c => c !== null && c !== undefined && c !== false)
@@ -57,7 +57,6 @@
       });
     return n;
   }
-
   function appendMsg(container, htmlStr, role="bot"){
     const b = el("div", {className: role === "bot" ? "mx-msg" : "mx-msg user", html: htmlStr});
     container.appendChild(b);
@@ -81,19 +80,30 @@
     // Evitar doble-montaje
     if (document.querySelector(".mx-root")) return;
 
-    const root = el("div", {className: "mx-root"});
+    // --- Contenedor raíz a la izquierda ---
+    const root = el("div", {className: "mx-root mx-left"});
 
-    // Head / Tabs
+    // --- Botón flotante (launcher) ---
+    const launcher = el("button", {className: "mx-launcher", title: "Chatea con Maxter"}, [
+      el("span", {className:"mx-launcher-icon", html:"🤖"}),
+      el("span", {className:"mx-launcher-label"}, "Maxter")
+    ]);
+
+    // --- Panel principal (inicia oculto) ---
+    const btnClose = el("button", {className:"mx-close", title:"Cerrar"}, "×");
     const head = el("div", {className: "mx-head"}, [
-      document.createTextNode(TITLE),
-      el("small", {html: "&nbsp;Asesor de compras"})
+      el("div", {className:"mx-title"}, [
+        document.createTextNode(TITLE),
+        el("small", {html: "&nbsp;Asesor de compras"})
+      ]),
+      btnClose
     ]);
     const tabs = el("div", {className: "mx-tabs"}, [
       el("button", {className: "mx-tab active", "data-tab":"products"}, "Productos"),
       el("button", {className: "mx-tab", "data-tab":"orders"}, "Mi pedido"),
     ]);
 
-    // ======= Vista Productos (lo existente) =======
+    // ======= Vista Productos =======
     const bodyProducts = el("div", {className:"mx-body", id:"mxBody"}, [
       el("div", {className:"mx-msg", html:"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍"})
     ]);
@@ -112,7 +122,7 @@
       head, tabs, bodyProducts, pagi, formProducts
     ]);
 
-    // ======= Vista Pedidos (nueva) =======
+    // ======= Vista Pedidos =======
     const bodyOrders = el("div", {className:"mx-body", id:"mxOrderBody"}, [
       el("div", {className:"mx-msg", html:"Consulta el <b>estatus</b> de tu compra. Ingresa tu número de orden (4–15 dígitos)."})
     ]);
@@ -124,17 +134,42 @@
       head.cloneNode(true), tabs.cloneNode(true), bodyOrders, formOrders
     ]);
 
-    // Contenedor raíz
-    root.appendChild(panelProducts);
-    root.appendChild(panelOrders);
+    // --- Contenedor del panel (para poder ocultar/mostrar) ---
+    const shell = el("div", {className:"mx-shell", style:"display:none;"}, [
+      panelProducts, panelOrders
+    ]);
+
+    // --- Montaje en DOM ---
+    root.appendChild(shell);
+    root.appendChild(launcher);
     document.body.appendChild(root);
 
-    // ======= Lógica de Tabs (delegada en document) =======
+    // ======= Abrir / Cerrar =======
+    function openPanel(){
+      state.isOpen = true;
+      shell.style.display = "block";
+      launcher.style.display = "none";
+      // foco en el input de productos
+      const tx = shell.querySelector("#mxInput");
+      if (tx) setTimeout(()=>tx.focus(), 50);
+    }
+    function closePanel(){
+      state.isOpen = false;
+      shell.style.display = "none";
+      launcher.style.display = "inline-flex";
+    }
+    launcher.addEventListener("click", openPanel);
+    document.addEventListener("keydown", function(ev){
+      if (ev.key === "Escape" && state.isOpen) closePanel();
+    });
+    // Cierre con la X (ojo: hay dos heads; el primero tiene el botón real)
+    btnClose.addEventListener("click", closePanel);
+
+    // ======= Tabs =======
     function switchTab(name){
       const isProducts = name === "products";
       panelProducts.style.display = isProducts ? "block" : "none";
       panelOrders.style.display   = isProducts ? "none"  : "block";
-      // Marca activa en ambos headers
       document.querySelectorAll(".mx-tab").forEach(b=>{
         b.classList.toggle("active", b.dataset.tab === name);
       });
@@ -145,7 +180,7 @@
       switchTab(b.dataset.tab);
     });
 
-    // ======= Flujo Productos (conservado) =======
+    // ======= Flujo Productos =======
     const input = formProducts.querySelector("#mxInput");
     const mxPrevBtn = pagi.querySelector("#mxPrevBtn");
     const mxNextBtn = pagi.querySelector("#mxNextBtn");
@@ -161,7 +196,6 @@
     }
 
     function paintProductsAnswer(ans){
-      // ans: { answer_html, cards_html, pagination } — backend puede devolver 'answer' simple; lo mostramos igual
       if (ans.answer_html)      appendMsg(bodyProducts, ans.answer_html, "bot");
       else if (ans.answer)      appendMsg(bodyProducts, htmlEscape(ans.answer), "bot");
       if (ans.cards_html)       appendMsg(bodyProducts, ans.cards_html, "bot");
@@ -217,11 +251,10 @@
       }
     });
 
-    // ======= Flujo Pedidos (nuevo) =======
+    // ======= Flujo Pedidos =======
     const orderInput = formOrders.querySelector("#mxOrderInput");
 
     function paintOrderAnswer(md){
-      // El backend devuelve markdown; aquí lo mostramos como texto simple (o HTML si ya viene con tags)
       appendMsg(bodyOrders, md, "bot");
     }
 
@@ -255,7 +288,7 @@
     });
   }
 
-  // Montaje seguro (evita problemas en sandbox Shopify)
+  // Montaje seguro
   if (document.readyState === 'loading'){
     document.addEventListener('DOMContentLoaded', initWidget, { once: true });
   } else {
