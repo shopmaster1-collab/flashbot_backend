@@ -1,29 +1,299 @@
-/* Contenedor y panel */
-.mx-root { position: fixed; bottom: 24px; right: 24px; width: 360px; max-height: 80vh; z-index: 999999; font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans"; }
-.mx-panel { background: #111; color: #f1f1f1; border-radius: 12px; box-shadow: 0 12px 30px rgba(0,0,0,.35); overflow: hidden; display: block; }
-.mx-head { padding: 12px 16px; font-weight: 700; background: #181818; border-bottom: 1px solid #232323; display: flex; align-items: center; justify-content: space-between; }
-.mx-head small { font-weight: 500; opacity: .8; }
+/************************************
+ * MAXTER Widget – Estilos completos
+ * Modo: Productos / Mi pedido
+ * Fondo oscuro, layout compacto
+ ************************************/
 
-/* Tabs */
-.mx-tabs { display: flex; gap: 6px; padding: 8px 8px 0; background: #181818; border-bottom: 1px solid #232323; }
-.mx-tab { flex: 1; background: #1f1f1f; border: 1px solid #2a2a2a; color: #ddd; padding: 8px 10px; border-radius: 8px 8px 0 0; cursor: pointer; font-weight: 600; }
-.mx-tab.active { background: #2a2a2a; color: #fff; border-bottom-color: #2a2a2a; }
+/* --- Contenedor principal flotante --- */
+.mx-root{
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 360px;
+  max-height: 80vh;
+  z-index: 999999;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans";
+  color-scheme: dark;
+}
 
-/* Body y mensajes */
-.mx-body { padding: 12px; height: 340px; overflow-y: auto; background: #121212; }
-.mx-msg { background: #1e1e1e; border: 1px solid #2a2a2a; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; line-height: 1.35; }
-.mx-msg.user { background: #0e2238; border-color: #153a5e; }
+/* Panel y encabezado */
+.mx-panel{
+  background:#111;
+  color:#f1f1f1;
+  border-radius:12px;
+  box-shadow:0 12px 30px rgba(0,0,0,.35);
+  overflow:hidden;
+  display:block;
+  border:1px solid #1f1f1f;
+}
 
-/* Paginación productos */
-.mx-pagination { background: #121212; padding: 8px 12px; border-top: 1px solid #232323; }
-.mx-pagination-controls { display: flex; align-items: center; justify-content: space-between; }
-.mx-pagination-btn { background: #1e1e1e; color: #eee; border: 1px solid #2a2a2a; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
-.mx-pagination-btn:disabled { opacity: .5; cursor: not-allowed; }
-.mx-pagination-info { opacity: .8; }
+.mx-head{
+  padding:12px 16px;
+  font-weight:700;
+  background:#181818;
+  border-bottom:1px solid #232323;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  letter-spacing:.2px;
+}
+.mx-head small{
+  font-weight:500;
+  opacity:.8;
+}
 
-/* Formularios */
-.mx-form { display: flex; gap: 8px; padding: 10px; background: #181818; border-top: 1px solid #232323; }
-.mx-form textarea { resize: none; flex: 1; min-height: 38px; max-height: 120px; border-radius: 8px; padding: 8px; border: 1px solid #2a2a2a; background: #0f0f0f; color: #eee; }
-.mx-form input[type=text] { flex: 1; height: 38px; border-radius: 8px; padding: 8px 10px; border: 1px solid #2a2a2a; background: #0f0f0f; color: #eee; }
-.mx-form button { background: #005eff; color: #fff; border: none; border-radius: 8px; padding: 8px 12px; font-weight: 700; cursor: pointer; }
-.mx-form button:disabled { opacity: .6; cursor: not-allowed; }
+/* --- Tabs --- */
+.mx-tabs{
+  display:flex;
+  gap:6px;
+  padding:8px 8px 0;
+  background:#181818;
+  border-bottom:1px solid #232323;
+}
+.mx-tab{
+  flex:1;
+  background:#1f1f1f;
+  border:1px solid #2a2a2a;
+  color:#ddd;
+  padding:8px 10px;
+  border-radius:8px 8px 0 0;
+  cursor:pointer;
+  font-weight:600;
+  text-align:center;
+  user-select:none;
+  transition:background .15s ease,border-color .15s ease, color .15s ease;
+}
+.mx-tab:hover{ background:#252525; }
+.mx-tab.active{
+  background:#2a2a2a;
+  color:#fff;
+  border-bottom-color:#2a2a2a;
+}
+
+/* --- Área de mensajes/scroll --- */
+.mx-body{
+  padding:12px;
+  height:340px;
+  overflow-y:auto;
+  background:#121212;
+}
+
+/* Scrollbar sutil (WebKit) */
+.mx-body::-webkit-scrollbar{ width:10px; }
+.mx-body::-webkit-scrollbar-thumb{ background:#2a2a2a; border-radius:8px; }
+.mx-body::-webkit-scrollbar-track{ background:#141414; }
+
+/* --- Burbujas de mensaje --- */
+.mx-msg{
+  background:#1e1e1e;
+  border:1px solid #2a2a2a;
+  padding:10px 12px;
+  border-radius:10px;
+  margin-bottom:8px;
+  line-height:1.35;
+  word-wrap:break-word;
+}
+.mx-msg.user{
+  background:#0e2238;
+  border-color:#153a5e;
+}
+.mx-msg a{
+  color:#68a8ff;
+  text-decoration:none;
+}
+.mx-msg a:hover{ text-decoration:underline; }
+
+/* --- Paginación (modo Productos) --- */
+.mx-pagination{
+  background:#121212;
+  padding:8px 12px;
+  border-top:1px solid #232323;
+}
+.mx-pagination-controls{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+}
+.mx-pagination-btn{
+  background:#1e1e1e;
+  color:#eee;
+  border:1px solid #2a2a2a;
+  border-radius:8px;
+  padding:6px 10px;
+  cursor:pointer;
+  font-weight:600;
+}
+.mx-pagination-btn:hover{ background:#242424; }
+.mx-pagination-btn:disabled{
+  opacity:.5;
+  cursor:not-allowed;
+}
+.mx-pagination-info{ opacity:.85; }
+
+/* --- Formularios (Productos / Mi pedido) --- */
+.mx-form{
+  display:flex;
+  gap:8px;
+  padding:10px;
+  background:#181818;
+  border-top:1px solid #232323;
+}
+.mx-form textarea{
+  resize:none;
+  flex:1;
+  min-height:38px;
+  max-height:120px;
+  border-radius:8px;
+  padding:8px;
+  border:1px solid #2a2a2a;
+  background:#0f0f0f;
+  color:#eee;
+  outline:none;
+}
+.mx-form input[type=text]{
+  flex:1;
+  height:38px;
+  border-radius:8px;
+  padding:8px 10px;
+  border:1px solid #2a2a2a;
+  background:#0f0f0f;
+  color:#eee;
+  outline:none;
+}
+.mx-form button{
+  background:#005eff;
+  color:#fff;
+  border:none;
+  border-radius:8px;
+  padding:8px 12px;
+  font-weight:700;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.mx-form button:hover{ filter:brightness(1.05); }
+.mx-form button:disabled{ opacity:.6; cursor:not-allowed; }
+
+/* --- Estilos para contenido HTML dentro de mensajes (cards_html) --- */
+.mx-msg .cards-grid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:10px;
+}
+@media (min-width:420px){
+  .mx-msg .cards-grid{
+    grid-template-columns:1fr 1fr; /* 2 columnas si cabe */
+  }
+}
+.mx-msg .card{
+  background:#171717;
+  border:1px solid #2a2a2a;
+  border-radius:10px;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+.mx-msg .card-media{
+  background:#101010;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  aspect-ratio: 4 / 3;
+}
+.mx-msg .card-media img{
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain;
+  display:block;
+}
+.mx-msg .card-body{
+  padding:10px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.mx-msg .card-title{
+  font-weight:700;
+  line-height:1.25;
+}
+.mx-msg .card-price{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-weight:800;
+}
+.mx-msg .card-price .cmp{
+  text-decoration:line-through;
+  opacity:.6;
+  font-weight:600;
+}
+.mx-msg .card-actions{
+  display:flex;
+  gap:8px;
+  margin-top:6px;
+}
+.mx-msg .btn{
+  appearance:none;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:8px 10px;
+  border-radius:8px;
+  border:1px solid #2a2a2a;
+  background:#222;
+  color:#fff;
+  text-decoration:none;
+  font-weight:700;
+  cursor:pointer;
+  flex:1;
+}
+.mx-msg .btn:hover{ background:#262626; }
+.mx-msg .btn.primary{
+  background:#0d5fff;
+  border-color:#0d5fff;
+}
+.mx-msg .btn.primary:hover{ filter:brightness(1.05); }
+
+/* --- Tipografía general dentro de mensajes --- */
+.mx-msg h1,.mx-msg h2,.mx-msg h3{ margin:.3em 0; line-height:1.2; }
+.mx-msg p{ margin:.4em 0; }
+.mx-msg ul{ margin:.35em 0 .35em 1.1em; }
+.mx-msg li{ margin:.2em 0; }
+.mx-msg code{
+  background:#202020;
+  border:1px solid #2a2a2a;
+  padding:.1em .35em;
+  border-radius:6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size:.95em;
+}
+
+/* --- Links globales --- */
+a{ color:#68a8ff; }
+
+/* --- Estados y utilidades --- */
+.hidden{ display:none!important; }
+.center{ text-align:center; }
+.muted{ opacity:.8; }
+
+/* --- Micro-ajustes para móviles muy estrechos --- */
+@media (max-width:360px){
+  .mx-root{ width: 94vw; right:3vw; }
+  .mx-body{ height: 320px; }
+}
+
+/* --- Safe-area padding en iOS --- */
+@supports (padding:max(0px)){
+  .mx-root{ margin-bottom: max(24px, env(safe-area-inset-bottom)); }
+}
+
+/* --- Animación sutil al aparecer --- */
+.mx-panel{
+  transform: translateY(8px);
+  opacity: .98;
+  animation: mxFadeIn .18s ease-out;
+}
+@keyframes mxFadeIn{
+  from{ transform: translateY(16px); opacity:.0; }
+  to{ transform: translateY(8px); opacity:.98; }
+}
