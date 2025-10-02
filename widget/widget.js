@@ -67,14 +67,6 @@
   });
 
   // ====== Helpers ======
-  function money(val){
-    try{
-      if(val===null||val===undefined) return null;
-      const n = Number(val);
-      return n.toLocaleString('es-MX',{style:'currency', currency:'MXN'});
-    }catch(e){ return val; }
-  }
-
   function clearBody(){
     const body=document.getElementById('mxBody');
     body.innerHTML = '';
@@ -231,7 +223,7 @@
     });
   }
 
-  // ====== SEARCH: Mi Pedido (etapa 1: usa /api/chat; luego podremos cambiar la ruta sin tocar el resto) ======
+  // ====== SEARCH: Mi Pedido — usa endpoint dedicado /api/orders ======
   function performOrderLookup(query){
     if(chatState.isLoading) return;
     chatState.isLoading = true;
@@ -241,13 +233,10 @@
     submitBtn.textContent = 'Consultando...';
     showLoading('Consultando pedido');
 
-    fetch(BACKEND + "/api/chat", {
+    fetch(BACKEND + "/api/orders", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        message: query,
-        mode: "order" // (futuro) si luego apuntamos a /api/orders, este campo se ignora sin romper nada
-      })
+      body: JSON.stringify({ order: query })
     })
     .then(r=>r.json())
     .then(res=>{
@@ -256,11 +245,15 @@
       submitBtn.disabled = false;
       submitBtn.textContent = 'Consultar';
 
-      // Render sencillo: respuesta textual (el backend ya devuelve un bloque legible)
-      const answer = res?.answer || "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.";
+      let answer = res?.answer;
+      if(res && res.ok === false && res.error){
+        answer = "No pudimos consultar ese pedido. " + res.error;
+      }
+      if(!answer){
+        answer = "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.";
+      }
       appendMsg(answer);
-      // Forzamos ocultar paginación en modo pedidos
-      updatePagination(null);
+      updatePagination(null); // Nunca mostramos paginación en pedidos
     })
     .catch(err=>{
       hideLoading();
@@ -302,13 +295,11 @@
       input.placeholder = "Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas";
       btn.textContent = "Enviar";
       appendMsg("¿Qué producto estás buscando? 🔍");
-      // La paginación se resetea y queda oculta hasta que haya resultados
       updatePagination(null);
     } else {
       input.placeholder = "Ingresa tu número de pedido (ej. 6506 o #6506)";
       btn.textContent = "Consultar";
       appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus. También puedes escribir: “estatus de mi pedido 6506”.");
-      // En modo pedidos nunca mostramos paginación
       updatePagination(null);
     }
   }
