@@ -297,7 +297,7 @@
       appendMsg("¿Qué producto estás buscando? 🔍");
       updatePagination(null);
     } else {
-      input.placeholder = "Ingresa tu número de pedido (ej. 6506 o #6506)";
+      input.placeholder = "Ingresa tu número de pedido (ej. 0000 o #0000)";
       btn.textContent = "Consultar";
       appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus.");
       updatePagination(null);
