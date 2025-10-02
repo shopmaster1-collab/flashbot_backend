@@ -25,9 +25,7 @@
   const TITLE = "MAXTER, Tu Asistente Inteligente";
 
   // ======= Estado global =======
-  const state = {
-    isOpen: false,
-  };
+  const state = { isOpen: false };
   const chatState = {
     isLoading: false,
     currentQuery: "",
@@ -74,10 +72,45 @@
   function htmlEscape(s){
     return String(s).replace(/[&<>"']/g, (m)=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]));
   }
+  function safeUrl(u){
+    try { return String(u || "").trim(); } catch(_){ return "#"; }
+  }
+
+  // Construye tarjetas HTML a partir de `products` (array)
+  function renderCardsHTML(products){
+    if (!Array.isArray(products) || products.length === 0) return "";
+    let out = '<div class="cards-grid">';
+    for (const p of products){
+      const title = htmlEscape(p.title || "");
+      const img = safeUrl(p.image || "");
+      const buy = safeUrl(p.buy_url || p.product_url || "#");
+      const view = safeUrl(p.product_url || p.buy_url || "#");
+      const price = p.price ? htmlEscape(p.price) : "";
+      const cmp = p.compare_at_price ? `<span class="cmp">${htmlEscape(p.compare_at_price)}</span>` : "";
+      const inv = (typeof p.inventory === "number") ? `<small class="muted">Stock: ${p.inventory}</small>` : "";
+
+      out += `
+        <div class="card">
+          <div class="card-media">
+            ${img ? `<img src="${img}" alt="${title}">` : ""}
+          </div>
+          <div class="card-body">
+            <div class="card-title">${title}</div>
+            <div class="card-price">${price} ${cmp}</div>
+            ${inv}
+            <div class="card-actions">
+              <a class="btn" href="${view}" target="_blank" rel="noopener">Ver</a>
+              <a class="btn primary" href="${buy}" target="_blank" rel="noopener">Comprar</a>
+            </div>
+          </div>
+        </div>`;
+    }
+    out += '</div>';
+    return out;
+  }
 
   // ======= App =======
   function initWidget(){
-    // Evitar doble-montaje
     if (document.querySelector(".mx-root")) return;
 
     // --- Contenedor raíz a la izquierda ---
@@ -149,7 +182,6 @@
       state.isOpen = true;
       shell.style.display = "block";
       launcher.style.display = "none";
-      // foco en el input de productos
       const tx = shell.querySelector("#mxInput");
       if (tx) setTimeout(()=>tx.focus(), 50);
     }
@@ -162,7 +194,6 @@
     document.addEventListener("keydown", function(ev){
       if (ev.key === "Escape" && state.isOpen) closePanel();
     });
-    // Cierre con la X (ojo: hay dos heads; el primero tiene el botón real)
     btnClose.addEventListener("click", closePanel);
 
     // ======= Tabs =======
@@ -198,7 +229,16 @@
     function paintProductsAnswer(ans){
       if (ans.answer_html)      appendMsg(bodyProducts, ans.answer_html, "bot");
       else if (ans.answer)      appendMsg(bodyProducts, htmlEscape(ans.answer), "bot");
-      if (ans.cards_html)       appendMsg(bodyProducts, ans.cards_html, "bot");
+
+      // NUEVO: renderizar array de productos si viene en la respuesta
+      if (Array.isArray(ans.products) && ans.products.length){
+        const html = renderCardsHTML(ans.products);
+        if (html) appendMsg(bodyProducts, html, "bot");
+      }
+
+      // (opcional) si backend también trae cards_html, lo pintamos
+      if (ans.cards_html) appendMsg(bodyProducts, ans.cards_html, "bot");
+
       chatState.pagination = ans.pagination || null;
       updatePaginationUI();
     }
