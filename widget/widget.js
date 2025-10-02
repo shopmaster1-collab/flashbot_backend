@@ -157,6 +157,82 @@
     chatState.pagination = pagination;
   }
 
+  // =========================
+  //  NUEVO: Render Mi Pedido
+  // =========================
+  const ORDER_FIELDS = [
+    "Plataforma","SKU","Pzas","Precio Unitario","Precio Total","Envio",
+    "Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria",
+    "Guia","Fecha envió","Fecha Entrega"
+  ];
+
+  function renderOrders(orderNo, items, fallbackAnswer){
+    const body=document.getElementById('mxBody');
+
+    // Mensaje de resumen
+    if(orderNo){
+      const head=`Resumen del pedido #${orderNo}`;
+      const msg=document.createElement('div');
+      msg.className='mx-msg';
+      msg.textContent=head;
+      body.appendChild(msg);
+    }
+
+    if(!Array.isArray(items) || !items.length){
+      // Sin items: mostramos respuesta del backend (texto)
+      if(fallbackAnswer){
+        appendMsg(fallbackAnswer);
+      }else{
+        appendMsg("No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.");
+      }
+      return;
+    }
+
+    // Contenedor de tarjetas
+    const wrap=document.createElement('div');
+    wrap.className='mx-orders';
+
+    items.forEach((r,i)=>{
+      const card=document.createElement('article');
+      card.className='mx-order';
+
+      // Header de la tarjeta
+      const hd=document.createElement('div');
+      hd.className='mx-order-hd';
+      hd.innerHTML = `
+        <div class="mx-order-title">Artículo ${i+1}</div>
+        <span class="mx-chip">${(r["EN PROCESO"]||"").toString().trim() || "—"}</span>
+      `;
+      card.appendChild(hd);
+
+      // Tabla de datos
+      const bd=document.createElement('div');
+      bd.className='mx-order-body';
+
+      let rowsHTML = ORDER_FIELDS.map(label=>{
+        const val = (r[label] ?? "—").toString().trim() || "—";
+        const isMoney = (label === "Precio Unitario" || label === "Precio Total");
+        const isQty = (label === "Pzas");
+        const pretty = (isMoney || isQty) ? `<span class="mx-kpi">${val}</span>` : val;
+        return `<tr><th scope="row">${label}</th><td>${pretty}</td></tr>`;
+      }).join("");
+
+      bd.innerHTML = `
+        <table class="mx-order-table" role="table" aria-label="Detalle de artículo del pedido">
+          <tbody>
+            ${rowsHTML}
+          </tbody>
+        </table>
+      `;
+
+      card.appendChild(bd);
+      wrap.appendChild(card);
+    });
+
+    body.appendChild(wrap);
+    body.scrollTop = body.scrollHeight;
+  }
+
   // ====== SEARCH: Productos ======
   function performSearch(query, page, isNewSearch){
     if(chatState.isLoading) return;
@@ -245,14 +321,13 @@
       submitBtn.disabled = false;
       submitBtn.textContent = 'Consultar';
 
-      let answer = res?.answer;
-      if(res && res.ok === false && res.error){
-        answer = "No pudimos consultar ese pedido. " + res.error;
+      const orderNo = res?.order || query;
+      // Si hay items del backend, renderizamos tabla; si no, usamos el texto answer
+      if(Array.isArray(res?.items) && res.items.length){
+        renderOrders(orderNo, res.items, res?.answer);
+      }else{
+        renderOrders(orderNo, [], res?.answer);
       }
-      if(!answer){
-        answer = "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.";
-      }
-      appendMsg(answer);
       updatePagination(null); // Nunca mostramos paginación en pedidos
     })
     .catch(err=>{
