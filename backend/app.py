@@ -410,7 +410,7 @@ ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" = siempre recarga
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 _orders_cache = {"ts": 0.0, "rows": [], "headers": []}
 
-# Columnas canónicas que devolveremos al usuario (alineadas a tu solicitud)
+# Columnas canónicas que devolveremos al usuario
 _ORDER_COLS = [
     "Plataforma","SKU","Pzas","Precio Unitario","Precio Total","Envio",
     "Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria",
@@ -419,34 +419,64 @@ _ORDER_COLS = [
 
 # Normalización de encabezados (acentos/variantes -> canónico)
 _HEADER_MAP = {
+    # Nº de orden (muchas variantes)
     "# DE ORDEN":"# de Orden","NO. DE ORDEN":"# de Orden","NÚMERO DE ORDEN":"# de Orden",
-    "NÚMERO DE PEDIDO":"# de Orden","ORDEN":"# de Orden","# ORDEN":"# de Orden","#":"# de Orden",
-    # Platform
+    "NUMERO DE ORDEN":"# de Orden","Nº DE ORDEN":"# de Orden","N° DE ORDEN":"# de Orden",
+    "NÚM. DE ORDEN":"# de Orden","NUM. DE ORDEN":"# de Orden","NO DE ORDEN":"# de Orden",
+    "NRO DE ORDEN":"# de Orden","ID DE ORDEN":"# de Orden","ORDEN":"# de Orden",
+    "NÚMERO DE PEDIDO":"# de Orden","NUMERO DE PEDIDO":"# de Orden","PEDIDO":"# de Orden",
+    "# ORDEN":"# de Orden","#":"# de Orden","ORDER ID":"# de Orden","ORDER":"# de Orden",
+
+    # Otras columnas
     "PLATAFORMA":"Plataforma",
-    # SKU / piezas
     "SKU":"SKU","PZAS":"Pzas","PIEZAS":"Pzas","CANTIDAD":"Pzas",
-    # Precios
     "PRECIO UNITARIO":"Precio Unitario","PRECIO":"Precio Unitario",
     "PRECIO TOTAL":"Precio Total","TOTAL":"Precio Total",
-    # Envío
     "ENVÍO":"Envio","ENVIO":"Envio",
-    # Fechas / estatus
     "FECHA INICIO":"Fecha Inicio","EN PROCESO":"EN PROCESO",
     "FECHA TÉRMINO":"Fecha Termino","FECHA TERMINO":"Fecha Termino",
     "FECHA ENTREGA":"Fecha Entrega",
-    # Almacén / Paquetería / Guía
     "ALMACÉN":"Almacen","ALMACEN":"Almacen",
     "PAQUETERÍA":"Paqueteria","PAQUETERIA":"Paqueteria",
     "GUÍA":"Guia","GUIA":"Guia",
-    # Envío (fecha)
     "FECHA ENVÍO":"Fecha envió","FECHA ENVIÓ":"Fecha envió","FECHA ENVIO":"Fecha envió",
 }
-_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
+_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{3,15})\b")
 
 def _norm_header(t: str) -> str:
-    t=(t or "").strip(); t=html.unescape(t); t=re.sub(r"\s+"," ", t)
-    u=t.upper().replace("Á","A").replace("É","E").replace("Í","I").replace("Ó","O").replace("Ú","U")
+    t=(t or "").strip()
+    t=html.unescape(t)
+    t=re.sub(r"\s+"," ", t)
+    u=t.upper().replace("Á","A").replace("É","E").replace("Í","I").replace("Ó","O").replace("Ú","U").replace("Ñ","N")
     return _HEADER_MAP.get(u, t)
+
+def _orders_int(val) -> int | None:
+    """
+    Normaliza un valor de hoja a entero de orden:
+    '6506' -> 6506
+    '6,506' -> 6506
+    '6506.0' / '6506,0' -> 6506
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    # Si parece decimal con .0 o ,0 => quedarse con la parte entera
+    m = re.match(r"^\s*([0-9]{1,})(?:[.,]0+)\s*$", s)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
+    # Quitar todo lo que no sea dígito y convertir
+    digits = re.sub(r"\D+", "", s)
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except Exception:
+        return None
 
 def _fetch_order_rows(force: bool=False):
     """Lee la tabla 'waffle' del pubhtml y devuelve filas normalizadas."""
@@ -461,7 +491,7 @@ def _fetch_order_rows(force: bool=False):
         return []
 
     try:
-        r=requests.get(ORDERS_PUBHTML_URL, timeout=20, headers={"Cache-Control":"no-cache"})
+        r=requests.get(ORDERS_PUBHTML_URL, timeout=25, headers={"Cache-Control":"no-cache", "Pragma":"no-cache"})
         r.raise_for_status()
     except Exception as e:
         print(f"[ORDERS] fetch error: {e}", flush=True)
@@ -474,7 +504,7 @@ def _fetch_order_rows(force: bool=False):
         print(f"[ORDERS] no table found. total_tables={len(tables)}", flush=True)
         return []
 
-    # Headers: prefer thead > tr > th/td
+    # Headers
     headers=[]
     thead=waffle.find("thead")
     if thead:
@@ -482,7 +512,7 @@ def _fetch_order_rows(force: bool=False):
         if thr:
             headers=[_norm_header(c.get_text(strip=True)) for c in thr.find_all(["th","td"])]
     if not headers:
-        # fallback: first tr having th
+        # fallback: primer tr con th
         first_th_tr=None
         for tr in waffle.find_all("tr"):
             if tr.find("th"):
@@ -490,7 +520,7 @@ def _fetch_order_rows(force: bool=False):
         if first_th_tr:
             headers=[_norm_header(c.get_text(strip=True)) for c in first_th_tr.find_all(["th","td"])]
     if not headers:
-        # ultimate fallback: first tr
+        # último fallback: primer tr
         tr=waffle.find("tr")
         if tr:
             headers=[_norm_header(c.get_text(strip=True)) for c in tr.find_all(["th","td"])]
@@ -500,16 +530,20 @@ def _fetch_order_rows(force: bool=False):
     tbody=waffle.find("tbody")
     body_trs=tbody.find_all("tr") if tbody else [tr for tr in waffle.find_all("tr")]
     # si usamos thead, saltar el primer tr (header)
-    for tr in body_trs:
+    skip_first = bool(thead)
+    for i, tr in enumerate(body_trs):
+        if skip_first and i == 0:
+            continue
         tds=[c.get_text(strip=True) for c in tr.find_all(["td","th"])]
-        if not tds: continue
-        # saltar filas que son exactamente el header
-        if headers and all(_norm_header(v) == headers[i] if i < len(headers) else False for i,v in enumerate(tds)):
+        if not tds:
+            continue
+        # saltar filas idénticas a headers
+        if headers and all(_norm_header(v) == headers[j] if j < len(headers) else False for j,v in enumerate(tds)):
             continue
         row={}
-        for i,val in enumerate(tds):
-            if i < len(headers):
-                row[headers[i]] = val
+        for j,val in enumerate(tds):
+            if j < len(headers):
+                row[headers[j]] = val
         if row and any(v for v in row.values()):
             rows.append(row)
 
@@ -528,19 +562,39 @@ def _looks_like_order_intent(text: str) -> bool:
     keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido","envio","envío","paqueteria","paquetería","guia","guía")
     return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
 
+def _find_order_column(row: dict) -> str | None:
+    """Devuelve el nombre de la columna que contiene el número de orden en la fila dada."""
+    # 1) preferimos canónico
+    for k in ["# de Orden"]:
+        if k in row: return k
+    # 2) heurística por nombre
+    for k in row.keys():
+        uk = k.upper()
+        if ("ORDEN" in uk) or ("PEDIDO" in uk) or ("ORDER" in uk):
+            return k
+    return None
+
 def _lookup_order(order_number: str):
     rows=_fetch_order_rows(force=True)
     if not rows: 
         print("[ORDERS] no rows loaded", flush=True)
         return []
-    wanted=[]; target=re.sub(r"\D+","", str(order_number))
+    wanted=[]
+    target_int = _orders_int(order_number)
+    if target_int is None:
+        return []
     for r in rows:
-        num=r.get("# de Orden") or r.get("# Orden") or r.get("#") or r.get("ORDEN") or ""
-        digits=re.sub(r"\D+","", str(num))
-        if digits == target:
+        key = _find_order_column(r)
+        if not key:
+            continue
+        row_int = _orders_int(r.get(key))
+        if row_int is None:
+            continue
+        if row_int == target_int:
+            # construir solo columnas canónicas
             item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
             wanted.append(item)
-    print(f"[ORDERS] lookup order={target} matches={len(wanted)}", flush=True)
+    print(f"[ORDERS] lookup order={target_int} matches={len(wanted)}", flush=True)
     return wanted
 
 def _render_order_vertical(rows: list) -> str:
@@ -742,13 +796,9 @@ def admin_discards():
 # --- Endpoint dedicado: /api/orders (independiente del buscador de productos)
 @app.route("/api/orders", methods=["POST", "OPTIONS"])
 def api_orders():
-    """Consulta de estatus de pedido por número (p. ej. 6506 o #6506).
-    Mantiene intacto el flujo de /api/chat y reutiliza los helpers existentes:
-    _detect_order_number, _lookup_order, _render_order_vertical.
-    """
+    """Consulta de estatus de pedido por número (p. ej. 6506 o #6506)."""
     if request.method == "OPTIONS":
-        # Preflight CORS OK (las cabeceras las agrega Flask-CORS)
-        return ("", 204)
+        return ("", 204)  # preflight OK
 
     try:
         data = request.get_json(force=True) or {}
@@ -759,15 +809,16 @@ def api_orders():
     if not raw:
         return jsonify({ "ok": False, "error": "missing order" }), 400
 
-    # NORMALIZA: solo dígitos
-    order_no = _detect_order_number(raw) or re.sub(r"\D+", "", raw)
-    if not order_no:
+    # NORMALIZA: solo dígitos / enteros tolerando comas/decimales
+    order_no = _detect_order_number(raw) or raw
+    try_int = _orders_int(order_no)
+    if try_int is None:
         return jsonify({ "ok": False, "error": "invalid order format" }), 400
 
     try:
-        rows = _lookup_order(order_no)
+        rows = _lookup_order(str(try_int))
         answer = _render_order_vertical(rows)
-        return jsonify({ "ok": True, "order": str(order_no), "items": rows, "answer": answer })
+        return jsonify({ "ok": True, "order": str(try_int), "items": rows, "answer": answer })
     except Exception as e:
         print(f"[ORDERS] /api/orders error: {e}", flush=True)
         return jsonify({ "ok": False, "error": "internal error" }), 500
