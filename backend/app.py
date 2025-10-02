@@ -14,7 +14,7 @@ try:
 except Exception:
     DeepseekClient = None
 
-# --- HTTP libs para Google Sheet (estatus de pedidos)
+# --- HTTP libs para Google Sheet
 try:
     import requests
     from bs4 import BeautifulSoup
@@ -78,7 +78,6 @@ def home():
             "<p>OK ✅. Endpoints: "
             '<a href="/health">/health</a>, '
             '<code>POST /api/chat</code>, '
-            '<code>POST /api/orders/status</code>, '
             '<code>POST /api/admin/reindex</code>, '
             '<code>GET /api/admin/stats</code>, '
             '<code>GET /api/admin/search?q=...</code>, '
@@ -455,7 +454,7 @@ def _fetch_order_rows(force: bool=False):
         print(f"[ORDERS] no table found. total_tables={len(tables)}", flush=True)
         return []
 
-    # Headers
+    # Headers: prefer thead > tr > th/td
     headers=[]
     thead=waffle.find("thead")
     if thead:
@@ -471,6 +470,7 @@ def _fetch_order_rows(force: bool=False):
         if first_th_tr:
             headers=[_norm_header(c.get_text(strip=True)) for c in first_th_tr.find_all(["th","td"])]
     if not headers:
+        # ultimate fallback: first tr
         tr=waffle.find("tr")
         if tr:
             headers=[_norm_header(c.get_text(strip=True)) for c in tr.find_all(["th","td"])]
@@ -479,9 +479,11 @@ def _fetch_order_rows(force: bool=False):
     rows=[]
     tbody=waffle.find("tbody")
     body_trs=tbody.find_all("tr") if tbody else [tr for tr in waffle.find_all("tr")]
+    # si usamos thead, saltar el primer tr (header)
     for tr in body_trs:
         tds=[c.get_text(strip=True) for c in tr.find_all(["td","th"])]
         if not tds: continue
+        # saltar filas que son exactamente el header
         if headers and all(_norm_header(v) == headers[i] if i < len(headers) else False for i,v in enumerate(tds)):
             continue
         row={}
@@ -532,7 +534,7 @@ def _render_order_vertical(rows: list) -> str:
         parts.append("\n".join(blk))
     return "\n\n".join(parts)
 
-# --------- EXTRACTOR ROBUSTO (para /api/chat) ----------
+# --------- EXTRACTOR ROBUSTO ----------
 def _extract_text_and_all_strings(payload):
     strings=[]
     for k in ("message","q","text","query","prompt","content","user_input"):
@@ -563,8 +565,6 @@ def _extract_text_and_all_strings(payload):
     return strings[0], " ".join(strings)
 
 # ----------------- Endpoints -----------------
-
-# 1) Chat de productos (mantiene desvío si detecta pedido)
 @app.post("/api/chat")
 def chat():
     data = request.get_json(force=True) or {}
@@ -639,31 +639,6 @@ def chat():
         except Exception as e:
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
     return jsonify({"answer": answer, "products": cards, "pagination": pagination})
-
-# 2) Endpoint dedicado para estatus de pedidos (para el tab "Mi pedido")
-@app.post("/api/orders/status")
-def orders_status():
-    if not (ORDERS_PUBHTML_URL and requests and BeautifulSoup):
-        return jsonify({"ok": False, "error": "Orders module not ready (missing ORDERS_PUBHTML_URL or bs4)."}), 500
-
-    data = request.get_json(silent=True) or {}
-    raw = (data.get("order_no") or data.get("order") or data.get("pedido") or "").strip() \
-          or (request.args.get("order_no") or request.args.get("q") or "").strip()
-    order_no = _detect_order_number(raw)
-    if not order_no:
-        return jsonify({"ok": False, "error": "Número de orden inválido. Ingresa 4 a 15 dígitos."}), 400
-
-    try:
-        rows = _lookup_order(order_no)
-    except Exception as e:
-        print(f"[ORDERS] lookup error: {e}", flush=True)
-        return jsonify({"ok": False, "error": "Error consultando el reporte de pedidos."}), 500
-
-    if not rows:
-        return jsonify({"ok": True, "answer": f"No encontramos información para el pedido #{order_no}.", "rows_count": 0})
-
-    md = _render_order_vertical(rows)
-    return jsonify({"ok": True, "answer": md, "rows_count": len(rows)})
 
 # --- Endpoint de diagnóstico admin
 @app.get("/api/admin/orders-ping")
