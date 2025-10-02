@@ -4,3 +4,4 @@ requests==2.32.3
 python-dotenv==1.0.1
 beautifulsoup4==4.12.3
 rapidfuzz==3.9.4
+gunicorn==21.2.0
