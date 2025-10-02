@@ -1,4 +1,4 @@
-/* MAXTER widget (1 columna + mensaje corto + paginación)
+/* MAXTER widget (2 modos: Productos / Mi Pedido)
    Backend por defecto: flashbot-backend en Render.
    Puedes override con <script data-backend="https://tu-backend" ...>
 */
@@ -14,6 +14,7 @@
 
   // Estado global del chat
   const chatState = {
+    mode: "products", // "products" | "orders"
     currentQuery: "",
     currentPage: 1,
     pagination: null,
@@ -25,16 +26,23 @@
   fab.className = 'mx-fab';
   fab.setAttribute('aria-label','Abrir chat MAXTER, Tu Asesor de Compras');
   fab.setAttribute('title','MAXTER, Tu Asesor de Compras');
-  fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19l1.7-3.4A8 8 0 1112 20H6l-2 1z" stroke="currentColor" stroke-width="1.5"/></svg><span>MAXTER, Tu Asesor de Compras</span>';
+  fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19l1.7-3.4A8 8 0 1112 20H6l-2 1z" stroke="currentColor" stroke-width="1.5"/></svg><span>MAXTER · Productos / Mi Pedido</span>';
 
   // ====== Panel ======
   const panel = document.createElement('section');
   panel.className = 'mx-panel';
   panel.innerHTML = `
     <div class="mx-head">${TITLE} <small style="margin-left:.5rem; font-weight:500;">Asesor de compras</small></div>
+
+    <div class="mx-switch" role="tablist" aria-label="Cambiar modo">
+      <button class="mx-tab mx-tab-active" id="mxTabProducts" role="tab" aria-selected="true">Productos</button>
+      <button class="mx-tab" id="mxTabOrders" role="tab" aria-selected="false">Mi Pedido</button>
+    </div>
+
     <div class="mx-body" id="mxBody">
       <div class="mx-msg">¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍</div>
     </div>
+
     <div id="mxPagination" class="mx-pagination" style="display:none;">
       <div class="mx-pagination-controls" id="mxPaginationControls">
         <button class="mx-pagination-btn" id="mxPrevBtn">‹ Anterior</button>
@@ -42,6 +50,7 @@
         <button class="mx-pagination-btn" id="mxNextBtn">Siguiente ›</button>
       </div>
     </div>
+
     <form class="mx-form" id="mxForm">
       <input id="mxInput" type="text" placeholder="Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas" required />
       <button type="submit" id="mxSubmitBtn">Enviar</button>
@@ -64,6 +73,35 @@
       const n = Number(val);
       return n.toLocaleString('es-MX',{style:'currency', currency:'MXN'});
     }catch(e){ return val; }
+  }
+
+  function clearBody(){
+    const body=document.getElementById('mxBody');
+    body.innerHTML = '';
+  }
+
+  function appendMsg(text){
+    const body=document.getElementById('mxBody');
+    const div=document.createElement('div');
+    div.className='mx-msg';
+    div.textContent=text;
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function showLoading(text){
+    const body=document.getElementById('mxBody');
+    const div=document.createElement('div');
+    div.className='mx-loading';
+    div.id='mxLoadingMsg';
+    div.textContent = text || (chatState.mode === 'orders' ? 'Consultando pedido' : 'Buscando productos');
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function hideLoading(){
+    const loading = document.getElementById('mxLoadingMsg');
+    if(loading) loading.remove();
   }
 
   function cardHTML(p){
@@ -90,23 +128,6 @@
       </article>`;
   }
 
-  function appendMsg(text){
-    const body=document.getElementById('mxBody');
-    const div=document.createElement('div'); div.className='mx-msg'; div.textContent=text; body.appendChild(div);
-    body.scrollTop = body.scrollHeight;
-  }
-
-  function showLoading(){
-    const body=document.getElementById('mxBody');
-    const div=document.createElement('div'); div.className='mx-loading'; div.id='mxLoadingMsg'; div.textContent='Buscando productos'; body.appendChild(div);
-    body.scrollTop = body.scrollHeight;
-  }
-
-  function hideLoading(){
-    const loading = document.getElementById('mxLoadingMsg');
-    if(loading) loading.remove();
-  }
-
   function appendProducts(list, isNewSearch){
     if(!Array.isArray(list) || !list.length) return;
     const body=document.getElementById('mxBody');
@@ -128,8 +149,10 @@
     const prevBtn = document.getElementById('mxPrevBtn');
     const nextBtn = document.getElementById('mxNextBtn');
 
-    if(!pagination || pagination.total_pages <= 1){
+    // Paginación solo para modo productos
+    if(chatState.mode !== 'products' || !pagination || pagination.total_pages <= 1){
       paginationDiv.style.display = 'none';
+      chatState.pagination = null;
       return;
     }
 
@@ -142,10 +165,11 @@
     chatState.pagination = pagination;
   }
 
+  // ====== SEARCH: Productos ======
   function performSearch(query, page, isNewSearch){
     if(chatState.isLoading) return;
-
     chatState.isLoading = true;
+
     const submitBtn = document.getElementById('mxSubmitBtn');
     const input = document.getElementById('mxInput');
 
@@ -153,7 +177,7 @@
     submitBtn.textContent = 'Buscando...';
 
     if(isNewSearch){
-      showLoading();
+      showLoading('Buscando productos');
       chatState.currentQuery = query;
       chatState.currentPage = 1;
     } else {
@@ -174,7 +198,7 @@
       hideLoading();
       chatState.isLoading = false;
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Enviar';
+      submitBtn.textContent = (chatState.mode === 'orders' ? 'Consultar' : 'Enviar');
 
       if(res && Array.isArray(res.products)){
         const n = res.products.length;
@@ -200,11 +224,93 @@
       hideLoading();
       chatState.isLoading = false;
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Enviar';
+      submitBtn.textContent = (chatState.mode === 'orders' ? 'Consultar' : 'Enviar');
       console.error('Error en búsqueda:', err);
       appendMsg("Hubo un problema al buscar productos. Intenta de nuevo.");
       updatePagination(null);
     });
+  }
+
+  // ====== SEARCH: Mi Pedido (etapa 1: usa /api/chat; luego podremos cambiar la ruta sin tocar el resto) ======
+  function performOrderLookup(query){
+    if(chatState.isLoading) return;
+    chatState.isLoading = true;
+
+    const submitBtn = document.getElementById('mxSubmitBtn');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Consultando...';
+    showLoading('Consultando pedido');
+
+    fetch(BACKEND + "/api/chat", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        message: query,
+        mode: "order" // (futuro) si luego apuntamos a /api/orders, este campo se ignora sin romper nada
+      })
+    })
+    .then(r=>r.json())
+    .then(res=>{
+      hideLoading();
+      chatState.isLoading = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Consultar';
+
+      // Render sencillo: respuesta textual (el backend ya devuelve un bloque legible)
+      const answer = res?.answer || "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.";
+      appendMsg(answer);
+      // Forzamos ocultar paginación en modo pedidos
+      updatePagination(null);
+    })
+    .catch(err=>{
+      hideLoading();
+      chatState.isLoading = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Consultar';
+      console.error('Error en consulta de pedido:', err);
+      appendMsg("Hubo un problema al consultar tu pedido. Intenta nuevamente en unos segundos.");
+      updatePagination(null);
+    });
+  }
+
+  // ====== UI: Cambiar modo ======
+  function switchMode(mode){
+    if(mode === chatState.mode) return;
+
+    chatState.mode = mode;
+    chatState.currentQuery = "";
+    chatState.currentPage = 1;
+    chatState.pagination = null;
+
+    // Tabs
+    const tabP = document.getElementById('mxTabProducts');
+    const tabO = document.getElementById('mxTabOrders');
+    if(mode === 'products'){
+      tabP.classList.add('mx-tab-active'); tabP.setAttribute('aria-selected','true');
+      tabO.classList.remove('mx-tab-active'); tabO.setAttribute('aria-selected','false');
+    }else{
+      tabO.classList.add('mx-tab-active'); tabO.setAttribute('aria-selected','true');
+      tabP.classList.remove('mx-tab-active'); tabP.setAttribute('aria-selected','false');
+    }
+
+    // Placeholder + botón
+    const input = document.getElementById('mxInput');
+    const btn = document.getElementById('mxSubmitBtn');
+
+    clearBody();
+    if(mode === 'products'){
+      input.placeholder = "Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas";
+      btn.textContent = "Enviar";
+      appendMsg("¿Qué producto estás buscando? 🔍");
+      // La paginación se resetea y queda oculta hasta que haya resultados
+      updatePagination(null);
+    } else {
+      input.placeholder = "Ingresa tu número de pedido (ej. 6506 o #6506)";
+      btn.textContent = "Consultar";
+      appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus. También puedes escribir: “estatus de mi pedido 6506”.");
+      // En modo pedidos nunca mostramos paginación
+      updatePagination(null);
+    }
   }
 
   // ====== Event Listeners ======
@@ -214,15 +320,26 @@
     const prevBtn = document.getElementById('mxPrevBtn');
     const nextBtn = document.getElementById('mxNextBtn');
 
+    const tabP = document.getElementById('mxTabProducts');
+    const tabO = document.getElementById('mxTabOrders');
+    tabP.addEventListener('click', ()=> switchMode('products'));
+    tabO.addEventListener('click', ()=> switchMode('orders'));
+
     form.addEventListener('submit', function(e){
       e.preventDefault();
       const q = input.value.trim();
       if(!q || chatState.isLoading) return;
-      performSearch(q, 1, true);
+
+      if(chatState.mode === 'products'){
+        performSearch(q, 1, true);
+      } else {
+        performOrderLookup(q);
+      }
       input.value="";
     });
 
     prevBtn.addEventListener('click', function(){
+      if(chatState.mode !== 'products') return;
       if(chatState.pagination && chatState.pagination.has_prev && !chatState.isLoading){
         const prevPage = chatState.currentPage - 1;
         performSearch(chatState.currentQuery, prevPage, false);
@@ -230,6 +347,7 @@
     });
 
     nextBtn.addEventListener('click', function(){
+      if(chatState.mode !== 'products') return;
       if(chatState.pagination && chatState.pagination.has_next && !chatState.isLoading){
         const nextPage = chatState.currentPage + 1;
         performSearch(chatState.currentQuery, nextPage, false);
