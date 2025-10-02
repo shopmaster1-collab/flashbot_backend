@@ -1,16 +1,28 @@
 /* MAXTER widget (dos modos: Productos / Mi pedido)
-   - Conserva tu flujo actual de Productos (POST /api/chat)
-   - Añade flujo de Pedidos (POST /api/orders/status)
-   - Puedes override backend con: <script data-backend="https://tu-backend" ...>
+   - Conserva flujo Productos (POST `${BACKEND}/api/chat`)
+   - Añade flujo Pedidos (POST `${BACKEND}/api/orders/status`)
+   - Puedes override backend con: <script src=".../widget.js" data-backend="https://tu-backend">
 */
 (function(){
   const DEFAULT_BACKEND = "https://flashbot-backend-25b6.onrender.com";
-  const BACKEND = (function(){
+
+  function detectBackend(){
     try{
+      // 1) data-backend en el <script> actual
       const s = document.currentScript;
-      return (s && s.dataset && s.dataset.backend) ? s.dataset.backend : DEFAULT_BACKEND;
-    }catch(e){ return DEFAULT_BACKEND; }
-  })();
+      if (s && s.dataset && s.dataset.backend) return s.dataset.backend;
+      // 2) Buscar por nombre de archivo “widget.js”
+      const scripts = document.getElementsByTagName('script');
+      for (let i=0;i<scripts.length;i++){
+        const el = scripts[i];
+        if (el.dataset && el.dataset.backend) return el.dataset.backend;
+        const src = el.getAttribute('src') || '';
+        if (src.indexOf('widget.js') !== -1 && el.dataset && el.dataset.backend) return el.dataset.backend;
+      }
+    }catch(e){}
+    return DEFAULT_BACKEND;
+  }
+  const BACKEND = detectBackend();
   const TITLE = "MAXTER, Tu Asistente Inteligente";
 
   // ======= Estado global (Productos) =======
@@ -23,33 +35,26 @@
   };
 
   // ======= Helpers =======
-  function isDOMNode(x){
-    // Más robusto que 'instanceof Node' en sandboxes/iframes
-    return !!(x && (x.nodeType === 1 || x.nodeType === 3 || x.nodeType === 9));
+  function isNode(x){
+    return x && typeof x === 'object' && typeof x.nodeType === 'number' && typeof x.nodeName === 'string';
   }
 
-  function el(tag, attrs={}, children=[]) {
+  function el(tag, attrs={}, children=[]){
     const n = document.createElement(tag);
-
     // Atributos
-    Object.entries(attrs).forEach(([k, v]) => {
+    for (const [k,v] of Object.entries(attrs || {})){
       if (k === "className") n.className = v;
       else if (k === "html") n.innerHTML = v;
       else n.setAttribute(k, v);
-    });
-
-    // Hijos (acepta Node, string, number, arrays)
+    }
+    // Hijos (Node/string/number/array)
     const arr = Array.isArray(children) ? children : [children];
     arr
       .filter(c => c !== null && c !== undefined && c !== false)
       .forEach(c => {
-        if (isDOMNode(c)) {
-          n.appendChild(c);
-        } else {
-          n.appendChild(document.createTextNode(String(c)));
-        }
+        if (isNode(c)) n.appendChild(c);
+        else n.appendChild(document.createTextNode(String(c)));
       });
-
     return n;
   }
 
@@ -58,7 +63,6 @@
     container.appendChild(b);
     container.scrollTop = container.scrollHeight;
   }
-
   function setLoading(form, on){
     chatState.isLoading = !!on;
     const btn = form.querySelector("button[type=submit]");
@@ -72,9 +76,9 @@
     return String(s).replace(/[&<>"']/g, (m)=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]));
   }
 
-  // ======= Inicialización segura (DOM listo) =======
+  // ======= App =======
   function initWidget(){
-    // Evitar doble montaje si el script se inyecta más de una vez
+    // Evitar doble-montaje
     if (document.querySelector(".mx-root")) return;
 
     const root = el("div", {className: "mx-root"});
@@ -93,7 +97,6 @@
     const bodyProducts = el("div", {className:"mx-body", id:"mxBody"}, [
       el("div", {className:"mx-msg", html:"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍"})
     ]);
-
     const pagi = el("div", {className:"mx-pagination", id:"mxPagination", style:"display:none;"}, [
       el("div", {className:"mx-pagination-controls", id:"mxPaginationControls"}, [
         el("button", {className:"mx-pagination-btn", id:"mxPrevBtn"}, "‹ Anterior"),
@@ -101,12 +104,10 @@
         el("button", {className:"mx-pagination-btn", id:"mxNextBtn"}, "Siguiente ›"),
       ])
     ]);
-
     const formProducts = el("form", {className:"mx-form", id:"mxForm"}, [
       el("textarea", {id:"mxInput", rows:"1", placeholder:"Escribe tu búsqueda (ej. 'soporte de monitor 22 pulgadas')"}),
       el("button", {type:"submit"}, "Enviar")
     ]);
-
     const panelProducts = el("div", {className:"mx-panel", id:"mxPanelProducts"}, [
       head, tabs, bodyProducts, pagi, formProducts
     ]);
@@ -115,12 +116,10 @@
     const bodyOrders = el("div", {className:"mx-body", id:"mxOrderBody"}, [
       el("div", {className:"mx-msg", html:"Consulta el <b>estatus</b> de tu compra. Ingresa tu número de orden (4–15 dígitos)."})
     ]);
-
     const formOrders = el("form", {className:"mx-form", id:"mxOrderForm"}, [
       el("input", {id:"mxOrderInput", type:"text", placeholder:"Ejemplo: 12345678 o #12345678"}),
       el("button", {type:"submit"}, "Consultar")
     ]);
-
     const panelOrders = el("div", {className:"mx-panel", id:"mxPanelOrders", style:"display:none;"}, [
       head.cloneNode(true), tabs.cloneNode(true), bodyOrders, formOrders
     ]);
@@ -130,13 +129,13 @@
     root.appendChild(panelOrders);
     document.body.appendChild(root);
 
-    // ======= Lógica de Tabs =======
+    // ======= Lógica de Tabs (delegada en document) =======
     function switchTab(name){
       const isProducts = name === "products";
       panelProducts.style.display = isProducts ? "block" : "none";
       panelOrders.style.display   = isProducts ? "none"  : "block";
-      // Marca activa (en ambos headers, por si hay clones)
-      [...document.querySelectorAll(".mx-tab")].forEach(b=>{
+      // Marca activa en ambos headers
+      document.querySelectorAll(".mx-tab").forEach(b=>{
         b.classList.toggle("active", b.dataset.tab === name);
       });
     }
@@ -162,16 +161,10 @@
     }
 
     function paintProductsAnswer(ans){
-      // ans puede venir como { answer, products, pagination } desde /api/chat
-      // si tu backend ya devuelve 'answer_html'/'cards_html', también los pintamos
-      if(ans.answer_html) appendMsg(bodyProducts, ans.answer_html, "bot");
-      if(ans.cards_html)  appendMsg(bodyProducts, ans.cards_html, "bot");
-
-      // Compatibilidad con respuesta simple:
-      if(ans.answer && !ans.answer_html && !ans.cards_html){
-        appendMsg(bodyProducts, htmlEscape(ans.answer), "bot");
-      }
-
+      // ans: { answer_html, cards_html, pagination } — backend puede devolver 'answer' simple; lo mostramos igual
+      if (ans.answer_html)      appendMsg(bodyProducts, ans.answer_html, "bot");
+      else if (ans.answer)      appendMsg(bodyProducts, htmlEscape(ans.answer), "bot");
+      if (ans.cards_html)       appendMsg(bodyProducts, ans.cards_html, "bot");
       chatState.pagination = ans.pagination || null;
       updatePaginationUI();
     }
@@ -205,6 +198,7 @@
       performSearch(input.value, 1, true);
       input.value = "";
     });
+
     mxPrevBtn.addEventListener("click", function(){
       if(chatState.pagination && chatState.pagination.has_prev && !chatState.isLoading){
         performSearch(chatState.currentQuery, chatState.currentPage - 1, false);
@@ -215,6 +209,7 @@
         performSearch(chatState.currentQuery, chatState.currentPage + 1, false);
       }
     });
+
     input.addEventListener("keypress", function(e){
       if(e.key === 'Enter' && !e.shiftKey){
         e.preventDefault();
@@ -226,8 +221,7 @@
     const orderInput = formOrders.querySelector("#mxOrderInput");
 
     function paintOrderAnswer(md){
-      // El backend devuelve markdown plano; aquí lo mostramos sin parse (rápido).
-      // Si luego quieres un mini-renderer Markdown, lo integramos.
+      // El backend devuelve markdown; aquí lo mostramos como texto simple (o HTML si ya viene con tags)
       appendMsg(bodyOrders, md, "bot");
     }
 
@@ -261,5 +255,10 @@
     });
   }
 
-  // Cargar cuando el DOM esté listo (más robusto en sandbox)
- 
+  // Montaje seguro (evita problemas en sandbox Shopify)
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', initWidget, { once: true });
+  } else {
+    initWidget();
+  }
+})();
