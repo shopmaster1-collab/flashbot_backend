@@ -78,6 +78,7 @@ def home():
             "<p>OK ✅. Endpoints: "
             '<a href="/health">/health</a>, '
             '<code>POST /api/chat</code>, '
+            '<code>POST /api/orders</code>, '
             '<code>POST /api/admin/reindex</code>, '
             '<code>GET /api/admin/stats</code>, '
             '<code>GET /api/admin/search?q=...</code>, '
@@ -405,21 +406,40 @@ def _enforce_intent_gate(query: str, items: list):
 #  ESTATUS DE PEDIDOS (Google Sheets pubhtml)
 # =========================
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
-ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")
+ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" = siempre recargar; "0" = caché según TTL
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 _orders_cache = {"ts": 0.0, "rows": [], "headers": []}
 
-_ORDER_COLS = ["# de Orden","SKU","Pzas","Precio Unitario","Precio Total","Fecha Inicio","EN PROCESO","Paquetería","Fecha envío","Fecha Entrega"]
+# Columnas canónicas que devolveremos al usuario (alineadas a tu solicitud)
+_ORDER_COLS = [
+    "Plataforma","SKU","Pzas","Precio Unitario","Precio Total","Envio",
+    "Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria",
+    "Guia","Fecha envió","Fecha Entrega"
+]
+
+# Normalización de encabezados (acentos/variantes -> canónico)
 _HEADER_MAP = {
     "# DE ORDEN":"# de Orden","NO. DE ORDEN":"# de Orden","NÚMERO DE ORDEN":"# de Orden",
     "NÚMERO DE PEDIDO":"# de Orden","ORDEN":"# de Orden","# ORDEN":"# de Orden","#":"# de Orden",
+    # Platform
+    "PLATAFORMA":"Plataforma",
+    # SKU / piezas
     "SKU":"SKU","PZAS":"Pzas","PIEZAS":"Pzas","CANTIDAD":"Pzas",
+    # Precios
     "PRECIO UNITARIO":"Precio Unitario","PRECIO":"Precio Unitario",
     "PRECIO TOTAL":"Precio Total","TOTAL":"Precio Total",
+    # Envío
+    "ENVÍO":"Envio","ENVIO":"Envio",
+    # Fechas / estatus
     "FECHA INICIO":"Fecha Inicio","EN PROCESO":"EN PROCESO",
-    "PAQUETERÍA":"Paquetería","PAQUETERIA":"Paquetería",
-    "FECHA ENVÍO":"Fecha envío","FECHA ENVIÓ":"Fecha envío","FECHA ENVIO":"Fecha envío",
+    "FECHA TÉRMINO":"Fecha Termino","FECHA TERMINO":"Fecha Termino",
     "FECHA ENTREGA":"Fecha Entrega",
+    # Almacén / Paquetería / Guía
+    "ALMACÉN":"Almacen","ALMACEN":"Almacen",
+    "PAQUETERÍA":"Paqueteria","PAQUETERIA":"Paqueteria",
+    "GUÍA":"Guia","GUIA":"Guia",
+    # Envío (fecha)
+    "FECHA ENVÍO":"Fecha envió","FECHA ENVIÓ":"Fecha envió","FECHA ENVIO":"Fecha envió",
 }
 _ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
 
@@ -505,7 +525,7 @@ def _detect_order_number(text: str):
 def _looks_like_order_intent(text: str) -> bool:
     if not text: return False
     t=text.lower()
-    keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido")
+    keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido","envio","envío","paqueteria","paquetería","guia","guía")
     return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
 
 def _lookup_order(order_number: str):
@@ -719,12 +739,6 @@ def admin_discards():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.discard_stats()
 
-# --------- MAIN ---------
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
-
-
 # --- Endpoint dedicado: /api/orders (independiente del buscador de productos)
 @app.route("/api/orders", methods=["POST", "OPTIONS"])
 def api_orders():
@@ -745,7 +759,8 @@ def api_orders():
     if not raw:
         return jsonify({ "ok": False, "error": "missing order" }), 400
 
-    order_no = _detect_order_number(raw) or re.sub(r"\\D+", "", raw)
+    # NORMALIZA: solo dígitos
+    order_no = _detect_order_number(raw) or re.sub(r"\D+", "", raw)
     if not order_no:
         return jsonify({ "ok": False, "error": "invalid order format" }), 400
 
@@ -756,3 +771,8 @@ def api_orders():
     except Exception as e:
         print(f"[ORDERS] /api/orders error: {e}", flush=True)
         return jsonify({ "ok": False, "error": "internal error" }), 500
+
+# --------- MAIN ---------
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
