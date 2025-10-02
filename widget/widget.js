@@ -24,15 +24,30 @@
 
   // ======= Helpers =======
   function el(tag, attrs={}, children=[]) {
-    const n = document.createElement(tag);
-    Object.entries(attrs).forEach(([k,v])=>{
-      if(k === "className") n.className = v;
-      else if(k === "html") n.innerHTML = v;
-      else n.setAttribute(k, v);
+  const n = document.createElement(tag);
+
+  // Atributos
+  Object.entries(attrs).forEach(([k, v]) => {
+    if (k === "className") n.className = v;
+    else if (k === "html") n.innerHTML = v;
+    else n.setAttribute(k, v);
+  });
+
+  // Hijos (acepta Node, string, number, arrays)
+  const arr = Array.isArray(children) ? children : [children];
+  arr
+    .filter(c => c !== null && c !== undefined && c !== false)
+    .forEach(c => {
+      if (c instanceof Node) {
+        n.appendChild(c);
+      } else {
+        n.appendChild(document.createTextNode(String(c)));
+      }
     });
-    (Array.isArray(children)?children:[children]).filter(Boolean).forEach(c=>n.appendChild(c));
-    return n;
-  }
+
+  return n;
+}
+
   function appendMsg(container, htmlStr, role="bot"){
     const b = el("div", {className: role === "bot" ? "mx-msg" : "mx-msg user", html: htmlStr});
     container.appendChild(b);
