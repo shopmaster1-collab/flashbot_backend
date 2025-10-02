@@ -1,14 +1,14 @@
 /************************************
  * MAXTER Widget – Estilos completos
- * Modo: Productos / Mi pedido
- * Fondo oscuro, layout compacto
+ * Panel a la izquierda + botón flotante
  ************************************/
 
-/* --- Contenedor principal flotante --- */
+/* --- Contenedor raíz a la izquierda --- */
 .mx-root{
   position: fixed;
   bottom: 24px;
-  right: 24px;
+  left: 24px;          /* <= izquierda */
+  right: auto;
   width: 360px;
   max-height: 80vh;
   z-index: 999999;
@@ -16,7 +16,29 @@
   color-scheme: dark;
 }
 
-/* Panel y encabezado */
+/* --- Botón flotante (launcher) --- */
+.mx-launcher{
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #0aa84f;              /* estilo tipo WhatsApp pero verde propio */
+  color: #fff;
+  border: none;
+  box-shadow: 0 8px 22px rgba(0,0,0,.25);
+  padding: 12px 16px;
+  border-radius: 999px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.mx-launcher:hover{ filter: brightness(1.05); }
+.mx-launcher-icon{ font-size: 18px; line-height: 1; }
+.mx-launcher-label{ font-size: 14px; }
+
+/* --- Shell que contiene los paneles (se oculta/mostrar vía JS) --- */
+.mx-shell{}
+
+/* --- Panel y encabezado --- */
 .mx-panel{
   background:#111;
   color:#f1f1f1;
@@ -25,6 +47,7 @@
   overflow:hidden;
   display:block;
   border:1px solid #1f1f1f;
+  margin-top: 12px;    /* separarlo del botón flotante */
 }
 
 .mx-head{
@@ -37,10 +60,25 @@
   justify-content:space-between;
   letter-spacing:.2px;
 }
-.mx-head small{
+.mx-title small{
   font-weight:500;
   opacity:.8;
 }
+
+/* Botón de cierre */
+.mx-close{
+  appearance:none;
+  background: #222;
+  color: #fff;
+  border:1px solid #2a2a2a;
+  border-radius: 10px;
+  width: 34px;
+  height: 28px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mx-close:hover{ background:#262626; }
 
 /* --- Tabs --- */
 .mx-tabs{
@@ -182,7 +220,7 @@
 }
 @media (min-width:420px){
   .mx-msg .cards-grid{
-    grid-template-columns:1fr 1fr; /* 2 columnas si cabe */
+    grid-template-columns:1fr 1fr;
   }
 }
 .mx-msg .card{
@@ -212,74 +250,36 @@
   flex-direction:column;
   gap:6px;
 }
-.mx-msg .card-title{
-  font-weight:700;
-  line-height:1.25;
-}
+.mx-msg .card-title{ font-weight:700; line-height:1.25; }
 .mx-msg .card-price{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  font-weight:800;
+  display:flex; align-items:center; gap:8px; font-weight:800;
 }
 .mx-msg .card-price .cmp{
-  text-decoration:line-through;
-  opacity:.6;
-  font-weight:600;
+  text-decoration:line-through; opacity:.6; font-weight:600;
 }
 .mx-msg .card-actions{
-  display:flex;
-  gap:8px;
-  margin-top:6px;
+  display:flex; gap:8px; margin-top:6px;
 }
 .mx-msg .btn{
-  appearance:none;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  padding:8px 10px;
-  border-radius:8px;
-  border:1px solid #2a2a2a;
-  background:#222;
-  color:#fff;
-  text-decoration:none;
-  font-weight:700;
-  cursor:pointer;
-  flex:1;
+  appearance:none; display:inline-flex; align-items:center; justify-content:center;
+  padding:8px 10px; border-radius:8px; border:1px solid #2a2a2a;
+  background:#222; color:#fff; text-decoration:none; font-weight:700; cursor:pointer; flex:1;
 }
 .mx-msg .btn:hover{ background:#262626; }
 .mx-msg .btn.primary{
-  background:#0d5fff;
-  border-color:#0d5fff;
+  background:#0d5fff; border-color:#0d5fff;
 }
 .mx-msg .btn.primary:hover{ filter:brightness(1.05); }
 
-/* --- Tipografía general dentro de mensajes --- */
-.mx-msg h1,.mx-msg h2,.mx-msg h3{ margin:.3em 0; line-height:1.2; }
-.mx-msg p{ margin:.4em 0; }
-.mx-msg ul{ margin:.35em 0 .35em 1.1em; }
-.mx-msg li{ margin:.2em 0; }
-.mx-msg code{
-  background:#202020;
-  border:1px solid #2a2a2a;
-  padding:.1em .35em;
-  border-radius:6px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-size:.95em;
-}
-
-/* --- Links globales --- */
-a{ color:#68a8ff; }
-
-/* --- Estados y utilidades --- */
+/* --- Utilidades --- */
 .hidden{ display:none!important; }
 .center{ text-align:center; }
 .muted{ opacity:.8; }
 
-/* --- Micro-ajustes para móviles muy estrechos --- */
-@media (max-width:360px){
-  .mx-root{ width: 94vw; right:3vw; }
-  .mx-body{ height: 320px; }
+/* --- Ajustes móviles --- */
+@media (max-width:420px){
+  .mx-root{ width: 92vw; left: 4vw; }
+  .mx-body{ height: 60vh; }
 }
 
 /* --- Safe-area padding en iOS --- */
