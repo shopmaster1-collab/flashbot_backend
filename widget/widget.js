@@ -23,36 +23,42 @@
   };
 
   // ======= Helpers =======
+  function isDOMNode(x){
+    // Más robusto que 'instanceof Node' en sandboxes/iframes
+    return !!(x && (x.nodeType === 1 || x.nodeType === 3 || x.nodeType === 9));
+  }
+
   function el(tag, attrs={}, children=[]) {
-  const n = document.createElement(tag);
+    const n = document.createElement(tag);
 
-  // Atributos
-  Object.entries(attrs).forEach(([k, v]) => {
-    if (k === "className") n.className = v;
-    else if (k === "html") n.innerHTML = v;
-    else n.setAttribute(k, v);
-  });
-
-  // Hijos (acepta Node, string, number, arrays)
-  const arr = Array.isArray(children) ? children : [children];
-  arr
-    .filter(c => c !== null && c !== undefined && c !== false)
-    .forEach(c => {
-      if (c instanceof Node) {
-        n.appendChild(c);
-      } else {
-        n.appendChild(document.createTextNode(String(c)));
-      }
+    // Atributos
+    Object.entries(attrs).forEach(([k, v]) => {
+      if (k === "className") n.className = v;
+      else if (k === "html") n.innerHTML = v;
+      else n.setAttribute(k, v);
     });
 
-  return n;
-}
+    // Hijos (acepta Node, string, number, arrays)
+    const arr = Array.isArray(children) ? children : [children];
+    arr
+      .filter(c => c !== null && c !== undefined && c !== false)
+      .forEach(c => {
+        if (isDOMNode(c)) {
+          n.appendChild(c);
+        } else {
+          n.appendChild(document.createTextNode(String(c)));
+        }
+      });
+
+    return n;
+  }
 
   function appendMsg(container, htmlStr, role="bot"){
     const b = el("div", {className: role === "bot" ? "mx-msg" : "mx-msg user", html: htmlStr});
     container.appendChild(b);
     container.scrollTop = container.scrollHeight;
   }
+
   function setLoading(form, on){
     chatState.isLoading = !!on;
     const btn = form.querySelector("button[type=submit]");
@@ -62,10 +68,15 @@
     const btn = form.querySelector("button[type=submit]");
     if(btn){ btn.disabled = !!on; btn.innerText = on ? "Consultando..." : "Consultar"; }
   }
-  function asSafeHTML(s){ return s; } // backend devuelve markdown->HTML ya saneado en tu flujo
+  function htmlEscape(s){
+    return String(s).replace(/[&<>"']/g, (m)=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]));
+  }
 
-  // ======= Render principal =======
-  document.addEventListener("DOMContentLoaded", function(){
+  // ======= Inicialización segura (DOM listo) =======
+  function initWidget(){
+    // Evitar doble montaje si el script se inyecta más de una vez
+    if (document.querySelector(".mx-root")) return;
+
     const root = el("div", {className: "mx-root"});
 
     // Head / Tabs
@@ -82,6 +93,7 @@
     const bodyProducts = el("div", {className:"mx-body", id:"mxBody"}, [
       el("div", {className:"mx-msg", html:"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍"})
     ]);
+
     const pagi = el("div", {className:"mx-pagination", id:"mxPagination", style:"display:none;"}, [
       el("div", {className:"mx-pagination-controls", id:"mxPaginationControls"}, [
         el("button", {className:"mx-pagination-btn", id:"mxPrevBtn"}, "‹ Anterior"),
@@ -89,10 +101,12 @@
         el("button", {className:"mx-pagination-btn", id:"mxNextBtn"}, "Siguiente ›"),
       ])
     ]);
+
     const formProducts = el("form", {className:"mx-form", id:"mxForm"}, [
       el("textarea", {id:"mxInput", rows:"1", placeholder:"Escribe tu búsqueda (ej. 'soporte de monitor 22 pulgadas')"}),
       el("button", {type:"submit"}, "Enviar")
     ]);
+
     const panelProducts = el("div", {className:"mx-panel", id:"mxPanelProducts"}, [
       head, tabs, bodyProducts, pagi, formProducts
     ]);
@@ -101,10 +115,12 @@
     const bodyOrders = el("div", {className:"mx-body", id:"mxOrderBody"}, [
       el("div", {className:"mx-msg", html:"Consulta el <b>estatus</b> de tu compra. Ingresa tu número de orden (4–15 dígitos)."})
     ]);
+
     const formOrders = el("form", {className:"mx-form", id:"mxOrderForm"}, [
       el("input", {id:"mxOrderInput", type:"text", placeholder:"Ejemplo: 12345678 o #12345678"}),
       el("button", {type:"submit"}, "Consultar")
     ]);
+
     const panelOrders = el("div", {className:"mx-panel", id:"mxPanelOrders", style:"display:none;"}, [
       head.cloneNode(true), tabs.cloneNode(true), bodyOrders, formOrders
     ]);
@@ -119,7 +135,7 @@
       const isProducts = name === "products";
       panelProducts.style.display = isProducts ? "block" : "none";
       panelOrders.style.display   = isProducts ? "none"  : "block";
-      // Marca activa
+      // Marca activa (en ambos headers, por si hay clones)
       [...document.querySelectorAll(".mx-tab")].forEach(b=>{
         b.classList.toggle("active", b.dataset.tab === name);
       });
@@ -146,9 +162,16 @@
     }
 
     function paintProductsAnswer(ans){
-      // ans: { answer_html, cards_html, pagination }
+      // ans puede venir como { answer, products, pagination } desde /api/chat
+      // si tu backend ya devuelve 'answer_html'/'cards_html', también los pintamos
       if(ans.answer_html) appendMsg(bodyProducts, ans.answer_html, "bot");
       if(ans.cards_html)  appendMsg(bodyProducts, ans.cards_html, "bot");
+
+      // Compatibilidad con respuesta simple:
+      if(ans.answer && !ans.answer_html && !ans.cards_html){
+        appendMsg(bodyProducts, htmlEscape(ans.answer), "bot");
+      }
+
       chatState.pagination = ans.pagination || null;
       updatePaginationUI();
     }
@@ -164,7 +187,10 @@
           body: JSON.stringify({ query: q, page })
         });
         const data = await resp.json();
-        if(!resp.ok){ appendMsg(bodyProducts, "Hubo un error realizando la búsqueda.", "bot"); return; }
+        if(!resp.ok){
+          appendMsg(bodyProducts, "Hubo un error realizando la búsqueda.", "bot");
+          return;
+        }
         chatState.currentQuery = q; chatState.currentPage = page;
         paintProductsAnswer(data);
       }catch(e){
@@ -174,16 +200,11 @@
       }
     }
 
-    function htmlEscape(s){
-      return s.replace(/[&<>"']/g, (m)=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m]));
-    }
-
     formProducts.addEventListener("submit", function(e){
       e.preventDefault();
       performSearch(input.value, 1, true);
       input.value = "";
     });
-
     mxPrevBtn.addEventListener("click", function(){
       if(chatState.pagination && chatState.pagination.has_prev && !chatState.isLoading){
         performSearch(chatState.currentQuery, chatState.currentPage - 1, false);
@@ -194,7 +215,6 @@
         performSearch(chatState.currentQuery, chatState.currentPage + 1, false);
       }
     });
-
     input.addEventListener("keypress", function(e){
       if(e.key === 'Enter' && !e.shiftKey){
         e.preventDefault();
@@ -206,8 +226,8 @@
     const orderInput = formOrders.querySelector("#mxOrderInput");
 
     function paintOrderAnswer(md){
-      // Render simple: tu backend devuelve markdown; aquí lo inyectamos como texto preformateado simple.
-      // Si lo prefieres con algún mini markdown renderer del lado del widget, lo integramos luego.
+      // El backend devuelve markdown plano; aquí lo mostramos sin parse (rápido).
+      // Si luego quieres un mini-renderer Markdown, lo integramos.
       appendMsg(bodyOrders, md, "bot");
     }
 
@@ -239,5 +259,7 @@
       performOrderLookup(orderInput.value);
       orderInput.value = "";
     });
-  });
-})();
+  }
+
+  // Cargar cuando el DOM esté listo (más robusto en sandbox)
+ 
