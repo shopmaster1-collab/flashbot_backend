@@ -158,7 +158,13 @@ class CatalogIndexer:
         self.store_base_url = (store_base_url or "").rstrip("/") or "https://master.com.mx"
 
         # ÚNICA REGLA
-        self.rules = {"REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1"}
+        self.rules = {
+            "REQUIRE_ACTIVE": os.getenv("REQUIRE_ACTIVE", "1") == "1",
+            "REQUIRE_IMAGE": os.getenv("REQUIRE_IMAGE", "0") == "1",
+            "REQUIRE_SKU": os.getenv("REQUIRE_SKU", "0") == "1",
+            "REQUIRE_STOCK": os.getenv("REQUIRE_STOCK", "0") == "1",
+            "MIN_BODY_CHARS": int(os.getenv("MIN_BODY_CHARS", "0") or 0),
+        }
 
         self.db_path = DB_PATH
         self._fts_enabled = False
@@ -230,8 +236,17 @@ class CatalogIndexer:
             if price_f is None:
                 continue
 
+            sku_val = (v.get("sku") or "").strip() or None
+
             inv_item_id = v.get("inventory_item_id")
             inv_levels = self._inventory_map.get(int(inv_item_id), []) if inv_item_id else []
+            total_stock = sum(int(lv.get("available") or 0) for lv in inv_levels)
+
+            # Filtros opcionales por ENV
+            if self.rules.get("REQUIRE_SKU") and not sku_val:
+                continue
+            if self.rules.get("REQUIRE_STOCK") and total_stock <= 0:
+                continue
 
             cap = v.get("compare_at_price")
             try:
@@ -241,7 +256,7 @@ class CatalogIndexer:
 
             out.append({
                 "id": int(v["id"]),
-                "sku": (v.get("sku") or None),
+                "sku": sku_val,
                 "price": price_f,
                 "compare_at_price": cap_f,
                 "inventory_item_id": int(inv_item_id) if inv_item_id else None,
@@ -438,7 +453,28 @@ class CatalogIndexer:
             tags = (p.get("tags") or "").strip()
             hero_img = self._extract_hero_image(p)
 
-            cur.execute(ins_p, (
+            # Filtros opcionales por ENV a nivel producto
+            min_chars = int(self.rules.get("MIN_BODY_CHARS") or 0)
+            if self.rules.get("REQUIRE_IMAGE") and not hero_img:
+                discards_count["no_image"] = discards_count.get("no_image", 0) + 1
+                if len(discards_sample) < 20:
+                    discards_sample.append({
+                        "product_id": p.get("id"),
+                        "handle": p.get("handle"),
+                        "title": p.get("title"),
+                        "reason": "no_image"
+                    })
+                continue
+            if min_chars and len((body_text or "").strip()) < min_chars:
+                discards_count["short_body"] = discards_count.get("short_body", 0) + 1
+                if len(discards_sample) < 20:
+                    discards_sample.append({
+                        "product_id": p.get("id"),
+                        "handle": p.get("handle"),
+                        "title": p.get("title"),
+                        "reason": f"short_body<{min_chars}"
+                    })
+                continue            cur.execute(ins_p, (
                 int(p["id"]),
                 p.get("handle"),
                 p.get("title"),
@@ -697,7 +733,7 @@ class CatalogIndexer:
             fts_q = f"({or_clause}){near_clause}"
             try:
                 rows = list(cur.execute(
-                    "SELECT rowid FROM products_fts WHERE products_fts MATCH ? LIMIT ?",
+                    "SELECT rowid, bm25(products_fts, 8.0, 1.0, 4.0, 6.0, 3.0, 1.0) AS r FROM products_fts WHERE products_fts MATCH ? ORDER BY r LIMIT ?",
                     (fts_q, k * 15),  # Aumentado para más cobertura
                 ))
                 ids.extend([int(r["rowid"]) for r in rows])
