@@ -260,12 +260,6 @@ _GAS_ALLOW_KEYWORDS = [
 ]
 _GAS_BLOCK = ["ar-rain","rain","lluvia","carsensor","bm-carsensor","auto","vehiculo","vehículo","kwh","kw/h","consumo electrico","tarifa electrica","electric meter"]
 _WATER_BLOCK = ["propano","butano","lp gas","tanque estacionario gas"]
-# --- Modo de precisión de búsqueda configurable ---
-SEARCH_PRECISION_MODE = (os.getenv("SEARCH_PRECISION_MODE") or "balanced").strip().lower()
-
-# Tokens/familias para gateo duro/suave
-_WATER_FAMILY_TOKENS = list(set(_WATER_ALLOW_FAMILIES + ["tinaco","cisterna","inundacion","inundación","flotador","boya"]))
-_GAS_FAMILY_TOKENS = list(set(_GAS_ALLOW_FAMILIES + ["lp","propano","butano","estacionario","estacionaria","tanque"]))
 
 def _concat_fields(it) -> str:
     v = it.get("variant", {})
@@ -301,10 +295,22 @@ def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple
     if extras.get("want_bt"):
         for key in extras.get("bt_fams", []):
             if key in st: s += 45
-    if extras.get("wantdef _rerank_for_gas(query: str, items: list, return_debug: bool=False):
+    if extras.get("want_wifi"):
+        for key in extras.get("wifi_fams", []):
+            if key in st: s += 45
+    if extras.get("want_display"):
+        for key in extras.get("display_fams", []):
+            if key in st: s += 40
+    if extras.get("want_alarm"):
+        for key in extras.get("alarm_words", []):
+            if key in st: s += 25
+    for neg in extras.get("neg_words", []):
+        if neg in st: s -= 30
+    return s, has_family
+
+def _rerank_for_gas(query: str, items: list):
     ql=(query or "").lower()
-    if _intent_from_query(query)!="gas" or not items:
-        return (items, []) if return_debug else items
+    if _intent_from_query(query)!="gas" or not items: return items
     want_valve=("valvula" in ql) or ("válvula" in ql) or ("electrovalvula" in ql)
     want_wifi=("wifi" in ql) or ("app" in ql) or ("inteligente" in ql) or ("iot" in ql)
     want_display=any(w in ql for w in ["pantalla","display","screen"])
@@ -317,44 +323,42 @@ def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple
             "display_fams":["easy","pantalla","display"],
             "alarm_words":["alarma","alerta","alert"],
             "alexa_fams":["alexa","iot"],"neg_words":[]}
-    rescored=[]; positives=[]; debug_rows=[]
+    rescored=[]; positives=[]
     for idx,it in enumerate(items):
-        st=_concat_fields(it); base=max(0,30-idx)
-        blocked=any(b in st for b in _GAS_BLOCK)
+        st=_concat_fields(it); blocked=any(b in st for b in _GAS_BLOCK); base=max(0,30-idx)
         score, has_fam = _score_family(st, ql, _GAS_ALLOW_KEYWORDS, _GAS_ALLOW_FAMILIES, extras)
-        total=score+base-(120 if blocked else 0)
-        has_valve = any(k in st for k in extras.get("valve_fams",[]))
-        rec=(total,score,blocked,has_fam,has_valve,it); rescored.append(rec)
-        if has_fam: positives.append(it)
-        if return_debug:
-            debug_rows.append({
-                "title": it.get("title"), "handle": it.get("handle"),
-                "total": total, "score": score, "blocked": bool(blocked),
-                "has_family": bool(has_fam), "has_valve": bool(has_valve)
-            })
+        if "gas" in st and not any(w in st for w in ["agua","tinaco","cisterna","water"]): score += 300
+        if any(h in st for h in [
+            "modulo-sensor-inteligente-de-nivel-de-gas",
+            "sensor-de-gas-inteligente-con-electrovalvula-y-alertas-en-tiempo-real",
+            "modulo-de-nivel-de-volumen-y-cierre-para-tanques-estacionarios-de-gas",
+            "modulo-digital-de-nivel-de-gas-con-alcance-inalambrico-de-500-metros"
+        ]): score += 500
+        total=score+base-(50 if blocked else 0)
+        is_valve=("valvula" in st) or ("válvula" in st) or ("electrovalvula" in st)
+        rec=(total,score,blocked,has_fam,is_valve,it); rescored.append(rec)
+        if score>=20: positives.append(rec)
     if positives:
-        positives=set(id(x) for x in positives)
-        soft=[]
-        for idx,it in enumerate(items):
-            st=_concat_fields(it)
-            if id(it) in positives:
-                soft.append((max(0,30-idx)+300, it))
-            elif "gas" in st:
-                soft.append((max(0,30-idx), it))
-        soft.sort(key=lambda x:x[0], reverse=True)
-        sorted_items=[it for (_score, it) in soft]
-    else:
-        rescored.sort(key=lambda x:x[0], reverse=True)
-        sorted_items=[it for (_t,_s,_b,_hf,_valve,it) in rescored]
-    return (sorted_items, debug_rows) if return_debug else sorted_itemsed=positives
+        positives.sort(key=lambda x:x[0], reverse=True)
+        if want_valve:
+            vs=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
+            ordered=vs+others
+        else:
+            ordered=positives
         return [it for (_t,_s,_b,_hf,_valve,it) in ordered]
     soft=[]; 
     for idx,it in enumerate(items):
         st=_concat_fields(it)
-  def _rerank_for_water(query: str, items: list, return_debug: bool=False):
+        if "gas" in st: soft.append((max(0,30-idx), it))
+    if soft:
+        soft.sort(key=lambda x:x[0], reverse=True)
+        return [it for (_score, it) in soft]
+    rescored.sort(key=lambda x:x[0], reverse=True)
+    return [it for (_t,_s,_b,_hf,_valve,it) in rescored]
+
+def _rerank_for_water(query: str, items: list):
     ql=(query or "").lower()
-    if _intent_from_query(query)!="water" or not items:
-        return (items, []) if return_debug else items
+    if _intent_from_query(query)!="water" or not items: return items
     want_valve=("valvula" in ql) or ("válvula" in ql)
     extras={"want_valve": want_valve,
             "want_ultra": any(w in ql for w in ["ultra","ultrason","ultrasónico","ultrasonico"]),
@@ -366,59 +370,57 @@ def _score_family(st: str, ql: str, allow_keywords, allow_fams, extras) -> tuple
             "pressure_fams":["iot-waterp","iot waterp"],
             "bt_fams":["easy-water","easy water","easy-waterultra","easy waterultra"],
             "wifi_fams":["iot-water","iot water","iot-waterv","iot waterv","iot-waterultra","iot waterultra"]}
-    rescored=[]; positives=[]; debug_rows=[]
+    rescored=[]; positives=[]
     for idx,it in enumerate(items):
         st=_concat_fields(it); blocked=any(b in st for b in _WATER_BLOCK); base=max(0,30-idx)
         score, has_fam = _score_family(st, ql, _WATER_ALLOW_KEYWORDS, _WATER_ALLOW_FAMILIES, extras)
         total=score+base-(120 if blocked else 0)
         is_wv=("iot-waterv" in st) or ("iot waterv" in st)
         rec=(total,score,blocked,has_fam,is_wv,it); rescored.append(rec)
-        if has_fam: positives.append(it)
-        if return_debug:
-            debug_rows.append({
-                "title": it.get("title"), "handle": it.get("handle"),
-                "total": total, "score": score, "blocked": bool(blocked),
-                "has_family": bool(has_fam), "is_waterv": bool(is_wv)
-            })
+        if has_fam and score>=60 and not blocked: positives.append(rec)
     if positives:
-        positives=set(id(x) for x in positives)
-        soft=[]
-        for idx,it in enumerate(items):
-            st=_concat_fields(it)
-            if id(it) in positives:
-                soft.append((max(0,30-idx)+300, it))
-            elif any(w in st for w in ["agua","water","tinaco","cisterna"]):
-                soft.append((max(0,30-idx), it))
+        positives.sort(key=lambda x:x[0], reverse=True)
+        if want_valve:
+            wv=[r for r in positives if r[4]]; others=[r for r in positives if not r[4]]
+            ordered=wv+others
+        else:
+            ordered=positives
+        return [it for (_t,_s,_b,_hf,_wv,it) in ordered]
+    soft=[]; water_words=["agua","tinaco","cisterna","nivel","water"]
+    for idx,it in enumerate(items):
+        st=_concat_fields(it)
+        if any(w in st for w in water_words) and not any(b in st for b in _WATER_BLOCK):
+            soft.append((max(0,30-idx), it))
+    if soft:
         soft.sort(key=lambda x:x[0], reverse=True)
-        sorted_items=[it for (_score, it) idef _apply_intent_rerank(query: str, items: list, return_debug: bool=False):
+        return [it for (_score, it) in soft]
+    rescored.sort(key=lambda x:x[0], reverse=True)
+    return [it for (_t,_s,_b,_hf,_wv,it) in rescored]
+
+def _apply_intent_rerank(query: str, items: list):
     intent=_intent_from_query(query)
-    if intent=="water":
-        return _rerank_for_water(query, items, return_debug=return_debug)
-    if intent=="gadef _enforce_intent_gate(query: str, items: list):
+    if intent=="water": return _rerank_for_water(query, items)
+    if intent=="gas":   return _rerank_for_gas(query, items)
+    return items
+
+def _enforce_intent_gate(query: str, items: list):
     intent=_intent_from_query(query)
     if not intent or not items: return items
-    mode = SEARCH_PRECISION_MODE
     filtered=[]
     for it in items:
         st=_concat_fields(it)
-        has_water = any(tok in st for tok in _WATER_FAMILY_TOKENS)
-        has_gas   = any(tok in st for tok in _GAS_FAMILY_TOKENS)
         if intent=="gas":
-            if mode == "hard":
-                if has_water:
-                    continue
-            else:  # balanced / off (off behaves same as balanced here)
-                if has_water and not has_gas:
+            water_indicators=["tinaco","cisterna","inundacion","inundación","flotador","boya","nivel de agua","agua para","water para","tinacos y cisternas","iot-waterv","iot-waterp","iot-water","easy-water","connect-water"]
+            if any(ind in st for ind in water_indicators):
+                if not any(g in st for g in ["gas","propano","butano","lp","estacionario"]):
                     continue
         elif intent=="water":
-            if mode == "hard":
-                if has_gas:
-                    continue
-            else:
-                if has_gas and not has_water:
-                    continue
+            gas_indicators=["gas","propano","butano","lp","estacionario","estacionaria","gassensor","gas-sensor","tanque estacionario","iot-gassensor","easy-gas","connect-gas"]
+            if any(ind in st for ind in gas_indicators): continue
         filtered.append(it)
-    return filtered or items# ===========================================================
+    return filtered or items
+
+# ===========================================================
 #  ESTATUS DE PEDIDOS (Google Sheets "Publish to web" HTML/CSV)
 # ===========================================================
 ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
@@ -915,23 +917,13 @@ def admin_diag():
 def admin_preview():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
-    explain = str(request.args.get("explain") or "").lower() in ("1","true","yes","y")
-    base_items=indexer.search(q, k=max(k,90))
-    if explain:
-        reranked, debug_rows = _apply_intent_rerank(q, base_items, return_debug=True)
-    else:
-        reranked = _apply_intent_rerank(q, base_items)
-        debug_rows = []
-    gated = _enforce_intent_gate(q, reranked)
-    items=gated[:k]
-    resp = {"q": q, "k": k, "items": _plain_items(items)}
-    if explain:
-        resp["explain"] = {
-            "intent": _intent_from_query(q),
-            "mode": SEARCH_PRECISION_MODE,
-            "debug": debug_rows[:max(k,12)]
-        }
-    return resp@app.get("/api/admin/search")
+    items=indexer.search(q, k=max(k,90))
+    items=_apply_intent_rerank(q, items)
+    items=_enforce_intent_gate(q, items)
+    items=items[:k]
+    return {"q": q, "k": k, "items": _plain_items(items)}
+
+@app.get("/api/admin/search")
 def admin_search():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
