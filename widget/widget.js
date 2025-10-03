@@ -1,4 +1,5 @@
 /* MAXTER widget (2 modos: Productos / Mi Pedido)
+   Rediseño visual para coincidir con "bot maxter copia.png" y tarjetas "modulo_prod.jpg".
    Backend por defecto: flashbot-backend en Render.
    Puedes override con <script data-backend="https://tu-backend" ...>
 */
@@ -12,36 +13,34 @@
   })();
   const TITLE = "MAXTER, Tu Asistente Inteligente";
 
-  // Estado global del chat
+  // ===== Estado global =====
   const chatState = {
-    mode: "products", // "products" | "orders"
+    mode: "products",       // "products" | "orders"
     currentQuery: "",
     currentPage: 1,
     pagination: null,
     isLoading: false
   };
 
-  // ====== FAB ======
+  // ===== FAB =====
   const fab = document.createElement('button');
   fab.className = 'mx-fab';
   fab.setAttribute('aria-label','Abrir chat MAXTER, Tu Asesor de Compras');
   fab.setAttribute('title','MAXTER, Tu Asesor de Compras');
   fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 19l1.7-3.4A8 8 0 1112 20H6l-2 1z" stroke="currentColor" stroke-width="1.5"/></svg><span>MAXTER · Productos / Mi Pedido</span>';
 
-  // ====== Panel ======
+  // ===== Panel =====
   const panel = document.createElement('section');
   panel.className = 'mx-panel';
   panel.innerHTML = `
-    <div class="mx-head">${TITLE} <small style="margin-left:.5rem; font-weight:500;">Asesor de compras</small></div>
+    <div class="mx-head">${TITLE} <small style="margin-left:.5rem; font-weight:600;">Asesor de compras</small></div>
 
     <div class="mx-switch" role="tablist" aria-label="Cambiar modo">
       <button class="mx-tab mx-tab-active" id="mxTabProducts" role="tab" aria-selected="true">Productos</button>
       <button class="mx-tab" id="mxTabOrders" role="tab" aria-selected="false">Mi Pedido</button>
     </div>
 
-    <div class="mx-body" id="mxBody">
-      <div class="mx-msg">¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍</div>
-    </div>
+    <div class="mx-body" id="mxBody" aria-live="polite" aria-atomic="false"></div>
 
     <div id="mxPagination" class="mx-pagination" style="display:none;">
       <div class="mx-pagination-controls" id="mxPaginationControls">
@@ -52,7 +51,7 @@
     </div>
 
     <form class="mx-form" id="mxForm">
-      <input id="mxInput" type="text" placeholder="Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas" required />
+      <input id="mxInput" type="text" placeholder="Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas" aria-label="Escribe tu búsqueda" required />
       <button type="submit" id="mxSubmitBtn">Enviar</button>
     </form>
   `;
@@ -60,32 +59,36 @@
   document.addEventListener('DOMContentLoaded', function(){
     document.body.appendChild(fab);
     document.body.appendChild(panel);
+    // Mensaje de bienvenida (burbuja bot)
+    appendMsg("¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? 🔍","bot");
   });
 
   fab.addEventListener('click', function(){
     panel.classList.toggle('mx-open');
   });
 
-  // ====== Helpers ======
+  // ===== Helpers =====
+  function bodyEl(){ return document.getElementById('mxBody'); }
+
   function clearBody(){
-    const body=document.getElementById('mxBody');
-    body.innerHTML = '';
+    const body = bodyEl();
+    if(body) body.innerHTML = '';
   }
 
-  function appendMsg(text){
-    const body=document.getElementById('mxBody');
-    const div=document.createElement('div');
-    div.className='mx-msg';
-    div.textContent=text;
+  function appendMsg(text, from){
+    const body = bodyEl();
+    const div = document.createElement('div');
+    div.className = 'mx-msg ' + (from === 'user' ? 'mx-user' : 'mx-bot');
+    div.textContent = text;
     body.appendChild(div);
     body.scrollTop = body.scrollHeight;
   }
 
   function showLoading(text){
-    const body=document.getElementById('mxBody');
-    const div=document.createElement('div');
-    div.className='mx-loading';
-    div.id='mxLoadingMsg';
+    const body = bodyEl();
+    const div = document.createElement('div');
+    div.className = 'mx-loading';
+    div.id = 'mxLoadingMsg';
     div.textContent = text || (chatState.mode === 'orders' ? 'Consultando pedido' : 'Buscando productos');
     body.appendChild(div);
     body.scrollTop = body.scrollHeight;
@@ -96,24 +99,33 @@
     if(loading) loading.remove();
   }
 
+  // --- Tarjeta de producto (coincide con "modulo_prod.jpg") ---
   function cardHTML(p){
     let inv = '';
     if (Array.isArray(p.inventory) && p.inventory.length){
       const tot = p.inventory.reduce((s,x)=>s + (Number(x.available)||0), 0);
-      const branches = p.inventory.map(x=>`${x.name}: ${x.available}`).join(' · ');
-      inv = `<div class="mx-inv">Existencias (${tot}): ${branches}</div>`;
+      const parts = p.inventory.map((x, i) => {
+        const name = (x.name || '').trim();
+        const qty  = Number(x.available)||0;
+        return `${name}: ${qty} disponibles`;
+      }).join('<span class="mx-dot">·</span> ');
+      inv = `<div class="mx-inv"><b>Inventario:</b> ${parts}</div>`;
+      if(tot === 0) inv = `<div class="mx-inv"><b>Inventario:</b> Sin existencias</div>`;
     }
+    const buyHref = (p.buy_url || '#');
+    const viewHref = (p.product_url || '#');
+
     return `
       <article class="mx-card">
         <img src="${p.image||''}" alt="">
         <div>
           <h4>${p.title||''}</h4>
           ${p.compare_at_price
-            ? `<div class="mx-price"><s style="color:#64748b;font-weight:600;margin-right:.35rem">${p.compare_at_price}</s> ${p.price||''}</div>`
+            ? `<div class="mx-price"><s style="color:#64748b;font-weight:700;margin-right:.35rem">${p.compare_at_price}</s> ${p.price||''}</div>`
             : `<div class="mx-price">${p.price||''}</div>`}
           <div class="mx-actions">
-            <a class="mx-btn mx-buy" href="${p.buy_url||'#'}">Comprar ahora</a>
-            <a class="mx-link" href="${p.product_url||'#'}">Ver producto</a>
+            <a class="mx-btn mx-buy" href="${buyHref}" target="_blank" rel="noopener noreferrer">Comprar ahora</a>
+            <a class="mx-link" href="${viewHref}" target="_blank" rel="noopener noreferrer">Ver producto</a>
           </div>
           ${inv}
         </div>
@@ -122,26 +134,28 @@
 
   function appendProducts(list, isNewSearch){
     if(!Array.isArray(list) || !list.length) return;
-    const body=document.getElementById('mxBody');
+    const body = bodyEl();
 
     if(isNewSearch){
       const oldList = body.querySelector('.mx-list');
       if(oldList) oldList.remove();
     }
 
-    const wrap=document.createElement('div'); wrap.className='mx-list'; wrap.id='mxProductList';
-    list.forEach(p=> wrap.insertAdjacentHTML('beforeend', cardHTML(p)));
+    const wrap = document.createElement('div');
+    wrap.className = 'mx-list';
+    wrap.id = 'mxProductList';
+    list.forEach(p => wrap.insertAdjacentHTML('beforeend', cardHTML(p)));
     body.appendChild(wrap);
     body.scrollTop = body.scrollHeight;
   }
 
+  // --- Paginación (solo productos) ---
   function updatePagination(pagination){
-    const paginationDiv = document.getElementById('mxPagination');
+    const paginationDiv  = document.getElementById('mxPagination');
     const paginationInfo = document.getElementById('mxPaginationInfo');
     const prevBtn = document.getElementById('mxPrevBtn');
     const nextBtn = document.getElementById('mxNextBtn');
 
-    // Paginación solo para modo productos
     if(chatState.mode !== 'products' || !pagination || pagination.total_pages <= 1){
       paginationDiv.style.display = 'none';
       chatState.pagination = null;
@@ -150,7 +164,6 @@
 
     paginationDiv.style.display = 'flex';
     paginationInfo.textContent = `Página ${pagination.page} de ${pagination.total_pages} (${pagination.total} productos)`;
-
     prevBtn.disabled = !pagination.has_prev;
     nextBtn.disabled = !pagination.has_next;
 
@@ -158,7 +171,7 @@
   }
 
   // =========================
-  //  NUEVO: Render Mi Pedido
+  //  Render Mi Pedido
   // =========================
   const ORDER_FIELDS = [
     "Plataforma","SKU","Pzas","Precio Unitario","Precio Total","Envio",
@@ -167,36 +180,28 @@
   ];
 
   function renderOrders(orderNo, items, fallbackAnswer){
-    const body=document.getElementById('mxBody');
+    const body = bodyEl();
 
-    // Mensaje de resumen
     if(orderNo){
-      const head=`Resumen del pedido #${orderNo}`;
-      const msg=document.createElement('div');
-      msg.className='mx-msg';
-      msg.textContent=head;
-      body.appendChild(msg);
+      appendMsg(`Resumen del pedido #${orderNo}`, "bot");
     }
 
     if(!Array.isArray(items) || !items.length){
-      // Sin items: mostramos respuesta del backend (texto)
       if(fallbackAnswer){
-        appendMsg(fallbackAnswer);
+        appendMsg(fallbackAnswer, "bot");
       }else{
-        appendMsg("No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.");
+        appendMsg("No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante.", "bot");
       }
       return;
     }
 
-    // Contenedor de tarjetas
-    const wrap=document.createElement('div');
+    const wrap = document.createElement('div');
     wrap.className='mx-orders';
 
     items.forEach((r,i)=>{
       const card=document.createElement('article');
       card.className='mx-order';
 
-      // Header de la tarjeta
       const hd=document.createElement('div');
       hd.className='mx-order-hd';
       hd.innerHTML = `
@@ -205,7 +210,6 @@
       `;
       card.appendChild(hd);
 
-      // Tabla de datos
       const bd=document.createElement('div');
       bd.className='mx-order-body';
 
@@ -239,7 +243,6 @@
     chatState.isLoading = true;
 
     const submitBtn = document.getElementById('mxSubmitBtn');
-    const input = document.getElementById('mxInput');
 
     submitBtn.disabled = true;
     submitBtn.textContent = 'Buscando...';
@@ -271,19 +274,21 @@
       if(res && Array.isArray(res.products)){
         const n = res.products.length;
 
+        if(isNewSearch){
+          if(res.answer){ appendMsg(res.answer, "bot"); }
+          else { appendMsg("Aquí tienes lo que encontré:", "bot"); }
+        }
+
         if(n > 0){
-          if(isNewSearch && res.answer){ appendMsg(res.answer); }
           appendProducts(res.products, isNewSearch);
           updatePagination(res.pagination);
         } else {
-          if(isNewSearch){
-            appendMsg("No encontré resultados para tu búsqueda. Intenta con palabras clave más específicas como 'sensor agua tinaco', 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung' o 'cable RCA audio video'.");
-          }
+          appendMsg("No encontré resultados para tu búsqueda. Prueba con: “sensor agua tinaco”, “divisor hdmi 1×4”, “soporte pared 55\"”, “control Samsung”, “cable RCA audio video”.", "bot");
           updatePagination(null);
         }
       } else {
         if(isNewSearch){
-          appendMsg(res?.answer || "No encontré productos que coincidan con tu búsqueda.");
+          appendMsg(res?.answer || "No encontré productos que coincidan con tu búsqueda.", "bot");
         }
         updatePagination(null);
       }
@@ -294,12 +299,12 @@
       submitBtn.disabled = false;
       submitBtn.textContent = (chatState.mode === 'orders' ? 'Consultar' : 'Enviar');
       console.error('Error en búsqueda:', err);
-      appendMsg("Hubo un problema al buscar productos. Intenta de nuevo.");
+      appendMsg("Hubo un problema al buscar productos. Intenta de nuevo.", "bot");
       updatePagination(null);
     });
   }
 
-  // ====== SEARCH: Mi Pedido — usa endpoint dedicado /api/orders ======
+  // ====== SEARCH: Mi Pedido — endpoint /api/orders ======
   function performOrderLookup(query){
     if(chatState.isLoading) return;
     chatState.isLoading = true;
@@ -322,13 +327,12 @@
       submitBtn.textContent = 'Consultar';
 
       const orderNo = res?.order || query;
-      // Si hay items del backend, renderizamos tabla; si no, usamos el texto answer
       if(Array.isArray(res?.items) && res.items.length){
         renderOrders(orderNo, res.items, res?.answer);
       }else{
         renderOrders(orderNo, [], res?.answer);
       }
-      updatePagination(null); // Nunca mostramos paginación en pedidos
+      updatePagination(null); // Sin paginación en pedidos
     })
     .catch(err=>{
       hideLoading();
@@ -336,7 +340,7 @@
       submitBtn.disabled = false;
       submitBtn.textContent = 'Consultar';
       console.error('Error en consulta de pedido:', err);
-      appendMsg("Hubo un problema al consultar tu pedido. Intenta nuevamente en unos segundos.");
+      appendMsg("Hubo un problema al consultar tu pedido. Intenta nuevamente en unos segundos.", "bot");
       updatePagination(null);
     });
   }
@@ -361,7 +365,7 @@
       tabP.classList.remove('mx-tab-active'); tabP.setAttribute('aria-selected','false');
     }
 
-    // Placeholder + botón
+    // Placeholder + botón y mensaje de inicio por modo
     const input = document.getElementById('mxInput');
     const btn = document.getElementById('mxSubmitBtn');
 
@@ -369,12 +373,12 @@
     if(mode === 'products'){
       input.placeholder = "Ej. sensor agua tinaco, control Sony, soporte 55 pulgadas";
       btn.textContent = "Enviar";
-      appendMsg("¿Qué producto estás buscando? 🔍");
+      appendMsg("¿Qué producto estás buscando? 🔍","bot");
       updatePagination(null);
     } else {
       input.placeholder = "Ingresa tu número de pedido (ej. 0000 o #0000)";
       btn.textContent = "Consultar";
-      appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus.");
+      appendMsg("Ingresa aquí tu número de pedido para conocer tu estatus.","bot");
       updatePagination(null);
     }
   }
@@ -395,6 +399,9 @@
       e.preventDefault();
       const q = input.value.trim();
       if(!q || chatState.isLoading) return;
+
+      // Burbuja del usuario
+      appendMsg(q, "user");
 
       if(chatState.mode === 'products'){
         performSearch(q, 1, true);
@@ -420,6 +427,7 @@
       }
     });
 
+    // Enter para enviar (sin salto de línea)
     input.addEventListener('keypress', function(e){
       if(e.key === 'Enter' && !e.shiftKey){
         e.preventDefault();
