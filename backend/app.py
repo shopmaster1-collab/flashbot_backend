@@ -460,7 +460,7 @@ _HEADER_MAP = {
     "GUÍA":"Guia","GUIA":"Guia",
     "FECHA ENVÍO":"Fecha envió","FECHA ENVIÓ":"Fecha envió","FECHA ENVIO":"Fecha envió",
 }
-_ORDER_RE = re.compile(r"\d{3,}")#?\s*([0-9]{3,15})\b")
+_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{3,15})\b")
 
 def _norm_header(t: str) -> str:
     t=(t or "").strip()
@@ -974,13 +974,21 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
-# --- Patched: robust order detection for hyphenated/long IDs ---
+
+# === PATCH: Robust digits-only order detection (Amazon/Elektra/Coppel) ===
+# Prior patch chose the longest digit run; this version concatenates *all* digits in order.
+# Examples:
+#   "702-1217127-5967419" -> "70212171275967419"
+#   "v42705452ekt-01"     -> "4270545201"
+#   "167657658-A"         -> "167657658"
+def __digits_only__(s):
+    try:
+        import re
+        return re.sub(r"\D+", "", str(s or ""))
+    except Exception:
+        return ""  # fail-safe
+
+
 def _detect_order_number(text: str):  # type: ignore[override]
-    if not text: 
-        return None
-    runs = re.findall(r"\d{3,}", text)
-    if runs:
-        runs.sort(key=lambda x: (-len(x), text.find(x)))
-        return runs[0]
-    digits = re.sub(r"\D+", "", text)
-    return digits if len(digits) >= 3 else None
+    s = __digits_only__(text)
+    return s if len(s) >= 3 else None
