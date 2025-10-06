@@ -59,7 +59,7 @@ _WANTED_COLS = [
     "Fecha Inicio", "EN PROCESO", "Paquetería", "Fecha envío", "Fecha Entrega"
 ]
 
-_ORDER_RE = re.compile(r"\d{3,}")#?\s*([0-9]{4,15})\b")
+_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
 
 def _normalize_header(text: str) -> str:
     t = (text or "").strip()
@@ -194,13 +194,23 @@ def format_for_widget(rows: List[Dict[str, str]], prefer_vertical: bool=True) ->
         return render_vertical_md(rows)
     return render_compact_table_md(rows)
 
-# --- Patched: robust order detection for hyphenated/long IDs (Amazon/Coppel/Elektra) ---
+
+# === PATCH: Robust digits-only order detection (Amazon/Elektra/Coppel) ===
+# Prior patch chose the longest digit run; this version concatenates *all* digits in order.
+# Examples:
+#   "702-1217127-5967419" -> "70212171275967419"
+#   "v42705452ekt-01"     -> "4270545201"
+#   "167657658-A"         -> "167657658"
+def __digits_only__(s):
+    try:
+        import re
+        return re.sub(r"\D+", "", str(s or ""))
+    except Exception:
+        return ""  # fail-safe
+
+
+from typing import Optional
+
 def detect_order_number(text: str) -> Optional[str]:  # type: ignore[override]
-    if not text:
-        return None
-    runs = re.findall(r"\d{3,}", text)
-    if runs:
-        runs.sort(key=lambda x: (-len(x), text.find(x)))
-        return runs[0]
-    digits = re.sub(r"\D+", "", text)
-    return digits if len(digits) >= 3 else None
+    s = __digits_only__(text)
+    return s if len(s) >= 3 else None
