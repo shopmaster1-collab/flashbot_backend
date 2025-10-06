@@ -59,7 +59,7 @@ _WANTED_COLS = [
     "Fecha Inicio", "EN PROCESO", "Paquetería", "Fecha envío", "Fecha Entrega"
 ]
 
-_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
+_ORDER_RE = re.compile(r"\d{3,}")#?\s*([0-9]{4,15})\b")
 
 def _normalize_header(text: str) -> str:
     t = (text or "").strip()
@@ -193,3 +193,14 @@ def format_for_widget(rows: List[Dict[str, str]], prefer_vertical: bool=True) ->
     if prefer_vertical:
         return render_vertical_md(rows)
     return render_compact_table_md(rows)
+
+# --- Patched: robust order detection for hyphenated/long IDs (Amazon/Coppel/Elektra) ---
+def detect_order_number(text: str) -> Optional[str]:  # type: ignore[override]
+    if not text:
+        return None
+    runs = re.findall(r"\d{3,}", text)
+    if runs:
+        runs.sort(key=lambda x: (-len(x), text.find(x)))
+        return runs[0]
+    digits = re.sub(r"\D+", "", text)
+    return digits if len(digits) >= 3 else None
