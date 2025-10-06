@@ -25,7 +25,7 @@ if OrdersSheetReader and _ORDERS_URL:
 else:
     logging.warning("orders_endpoints: missing deps or ORDERS_PUBHTML_URL")
 
-_ORDER_RE = re.compile(r"\d{3,}")
+_ORDER_RE = re.compile(r"\d{4,15}")
 
 def _extract_order_no(raw: str) -> str:
     if not raw: return ""
@@ -77,14 +77,21 @@ def orders_ping():
         logging.exception("orders ping failed: %s", e)
         return jsonify({"ok": False, "error": repr(e)}), 500
 
-# --- Patched: robust extraction (choose longest digit run) ---
+
+# === PATCH: Robust digits-only order detection (Amazon/Elektra/Coppel) ===
+# Prior patch chose the longest digit run; this version concatenates *all* digits in order.
+# Examples:
+#   "702-1217127-5967419" -> "70212171275967419"
+#   "v42705452ekt-01"     -> "4270545201"
+#   "167657658-A"         -> "167657658"
+def __digits_only__(s):
+    try:
+        import re
+        return re.sub(r"\D+", "", str(s or ""))
+    except Exception:
+        return ""  # fail-safe
+
+
 def _extract_order_no(raw: str) -> str:  # type: ignore[override]
-    if not raw: 
-        return ""
-    s = str(raw)
-    runs = _ORDER_RE.findall(s)
-    if runs:
-        runs.sort(key=lambda x: (-len(x), s.find(x)))
-        return runs[0]
-    digits = re.sub(r"\D+", "", s)
-    return digits if len(digits) >= 3 else ""
+    s = __digits_only__(raw)
+    return s if len(s) >= 3 else ""
