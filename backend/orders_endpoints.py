@@ -25,7 +25,7 @@ if OrdersSheetReader and _ORDERS_URL:
 else:
     logging.warning("orders_endpoints: missing deps or ORDERS_PUBHTML_URL")
 
-_ORDER_RE = re.compile(r"\d{4,15}")
+_ORDER_RE = re.compile(r"\d{3,}")
 
 def _extract_order_no(raw: str) -> str:
     if not raw: return ""
@@ -76,3 +76,15 @@ def orders_ping():
     except Exception as e:
         logging.exception("orders ping failed: %s", e)
         return jsonify({"ok": False, "error": repr(e)}), 500
+
+# --- Patched: robust extraction (choose longest digit run) ---
+def _extract_order_no(raw: str) -> str:  # type: ignore[override]
+    if not raw: 
+        return ""
+    s = str(raw)
+    runs = _ORDER_RE.findall(s)
+    if runs:
+        runs.sort(key=lambda x: (-len(x), s.find(x)))
+        return runs[0]
+    digits = re.sub(r"\D+", "", s)
+    return digits if len(digits) >= 3 else ""
