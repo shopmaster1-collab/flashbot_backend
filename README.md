@@ -10,8 +10,8 @@ Proyecto actualizado para usar un chatbot flotante en `master.com.mx` con tres s
 
 - Header del widget actualizado a **Tu Asistente Maxter**.
 - Mensaje inicial actualizado a: **¡Hola! Soy tu asistente inteligente Maxter. ¿En qué puedo ayudarte hoy?**
-- La pestaña **Pedidos** ahora se muestra como una vista visualmente distinta del Chat.
-- El texto de Pedidos es: **¿Necesitas saber el estatus de tu pedido? Escribe tu Número de Pedido.**
+- La pestaña **Pedidos** ahora se muestra como una vista visualmente distinta del Chat y no comparte historial, productos, paginación ni mensajes con la sección Chat.
+- El texto de Pedidos es: **Por favor ingrese su Número de pedido para conocer el estatus.**
 - `/api/orders` ya no recorta pedidos con guiones. Conserva completos valores como:
   - `702-7300318-1033843`
   - `2000012817687573`
@@ -22,6 +22,7 @@ Proyecto actualizado para usar un chatbot flotante en `master.com.mx` con tres s
 - La lectura de Google Sheets ahora intenta varias rutas: `pubhtml`, `pub?output=csv` y `gviz/tq?tqx=out:csv`.
 - `/api/admin/orders-ping` devuelve `attempts`, `source_url`, `headers`, `rows_count` y `search_columns` para diagnóstico.
 - `widget.js` monta `<elevenlabs-convai>` únicamente cuando el usuario entra a la pestaña **Voz**.
+- La paginación del Chat sólo aparece cuando la búsqueda supera 20 productos y reemplaza tarjetas en lugar de duplicarlas.
 - Se mantiene `Cache-Control: no-store` para evitar caché agresiva en Shopify durante correcciones.
 
 ## Variables recomendadas en Render
@@ -53,7 +54,7 @@ Pegar antes del cierre de `</body>`:
 </script>
 <script
   defer
-  src="https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_3"
+  src="https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_4"
   data-backend="https://flashbot-backend-25b6.onrender.com"
   data-agent-id="agent_0801k6azj1rxe3arwjrs5y4rsrk4">
 </script>
