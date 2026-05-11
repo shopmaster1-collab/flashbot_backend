@@ -421,80 +421,146 @@ def _enforce_intent_gate(query: str, items: list):
     return filtered or items
 
 # ===========================================================
-#  ESTATUS DE PEDIDOS (Google Sheets "Publish to web" HTML/CSV)
+#  ESTATUS DE PEDIDOS (Google Sheets publicado)
+#  Búsqueda por FOLIO y respuesta normalizada para el widget.
 # ===========================================================
-ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or ""
+_DEFAULT_ORDERS_PUBHTML_URL = (
+    "https://docs.google.com/spreadsheets/d/e/"
+    "2PACX-1vS7MFutb5ikOvAvWsxuc164Txu30GeVkCGZAY3U_fUVmS_0MKMn6ta2hbbNc-hcmFbV0fyAe8A-7PGG/"
+    "pubhtml?gid=1842193501&single=true"
+)
+ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or _DEFAULT_ORDERS_PUBHTML_URL
 ORDERS_AUTORELOAD  = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" = siempre recargar; "0" = usa caché según TTL
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 
 _orders_cache = {"ts": 0.0, "rows": [], "headers": [], "mode": None, "source_url": ""}
 
-# Columnas canónicas que devolveremos al usuario
-_ORDER_COLS = [
-    "Plataforma","SKU","Pzas","Precio Unitario","Precio Total","Envio",
-    "Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria",
-    "Guia","Fecha envió","Fecha Entrega"
+# Columnas exactas solicitadas desde la hoja publicada.
+_ORDER_SOURCE_COLS = ["FOLIO", "ORDEN_COMPRA", "CLAVE_ARTICULO", "UNIDADES", "TOTAL_CON_IVA", "REM_PAQUETERIA", "REM_GUIA"]
+_ORDER_DISPLAY_FIELDS = [
+    ("Folio", "FOLIO"),
+    ("Orden de compra", "ORDEN_COMPRA"),
+    ("SKU de producto", "CLAVE_ARTICULO"),
+    ("Cantidad", "UNIDADES"),
+    ("Total", "TOTAL_CON_IVA"),
+    ("Paquetería", "REM_PAQUETERIA"),
+    ("Guía", "REM_GUIA"),
 ]
+_ORDER_TABLE_FIELDS = ["Orden de compra", "SKU de producto", "Cantidad", "Total", "Paquetería", "Guía"]
 
-# Normalización de encabezados (acentos/variantes -> canónico)
-_HEADER_MAP = {
-    # Nº de orden (muchas variantes)
-    "# DE ORDEN":"# de Orden","NO. DE ORDEN":"# de Orden","NÚMERO DE ORDEN":"# de Orden",
-    "NUMERO DE ORDEN":"# de Orden","Nº DE ORDEN":"# de Orden","N° DE ORDEN":"# de Orden",
-    "NÚM. DE ORDEN":"# de Orden","NUM. DE ORDEN":"# de Orden","NO DE ORDEN":"# de Orden",
-    "NRO DE ORDEN":"# de Orden","ID DE ORDEN":"# de Orden","ORDEN":"# de Orden",
-    "NÚMERO DE PEDIDO":"# de Orden","NUMERO DE PEDIDO":"# de Orden","PEDIDO":"# de Orden",
-    "# ORDEN":"# de Orden","#":"# de Orden","ORDER ID":"# de Orden","ORDER":"# de Orden",
+_HEADER_ALIASES = {
+    "FOLIO": "FOLIO",
+    "NO_FOLIO": "FOLIO",
+    "NUMERO_FOLIO": "FOLIO",
+    "NUMERO_DE_FOLIO": "FOLIO",
+    "FOLIO_PEDIDO": "FOLIO",
+    "FOLIO_DE_PEDIDO": "FOLIO",
 
-    # Otras columnas
-    "PLATAFORMA":"Plataforma",
-    "SKU":"SKU","PZAS":"Pzas","PIEZAS":"Pzas","CANTIDAD":"Pzas",
-    "PRECIO UNITARIO":"Precio Unitario","PRECIO":"Precio Unitario",
-    "PRECIO TOTAL":"Precio Total","TOTAL":"Precio Total",
-    "ENVÍO":"Envio","ENVIO":"Envio",
-    "FECHA INICIO":"Fecha Inicio","EN PROCESO":"EN PROCESO",
-    "FECHA TÉRMINO":"Fecha Termino","FECHA TERMINO":"Fecha Termino",
-    "FECHA ENTREGA":"Fecha Entrega",
-    "ALMACÉN":"Almacen","ALMACEN":"Almacen",
-    "PAQUETERÍA":"Paqueteria","PAQUETERIA":"Paqueteria",
-    "GUÍA":"Guia","GUIA":"Guia",
-    "FECHA ENVÍO":"Fecha envió","FECHA ENVIÓ":"Fecha envió","FECHA ENVIO":"Fecha envió",
+    "ORDEN_COMPRA": "ORDEN_COMPRA",
+    "ORDEN_DE_COMPRA": "ORDEN_COMPRA",
+    "OC": "ORDEN_COMPRA",
+    "ORDEN": "ORDEN_COMPRA",
+    "ORDER": "ORDEN_COMPRA",
+
+    "CLAVE_ARTICULO": "CLAVE_ARTICULO",
+    "CLAVE_DE_ARTICULO": "CLAVE_ARTICULO",
+    "CLAVE": "CLAVE_ARTICULO",
+    "SKU": "CLAVE_ARTICULO",
+    "SKU_PRODUCTO": "CLAVE_ARTICULO",
+    "SKU_DE_PRODUCTO": "CLAVE_ARTICULO",
+    "ARTICULO": "CLAVE_ARTICULO",
+
+    "UNIDADES": "UNIDADES",
+    "UNIDAD": "UNIDADES",
+    "CANTIDAD": "UNIDADES",
+    "PIEZAS": "UNIDADES",
+    "PZAS": "UNIDADES",
+
+    "TOTAL_CON_IVA": "TOTAL_CON_IVA",
+    "TOTAL": "TOTAL_CON_IVA",
+    "TOTAL_IVA": "TOTAL_CON_IVA",
+    "PRECIO_TOTAL": "TOTAL_CON_IVA",
+    "IMPORTE": "TOTAL_CON_IVA",
+
+    "REM_PAQUETERIA": "REM_PAQUETERIA",
+    "PAQUETERIA": "REM_PAQUETERIA",
+    "PAQUETERIA_REM": "REM_PAQUETERIA",
+    "REMISION_PAQUETERIA": "REM_PAQUETERIA",
+
+    "REM_GUIA": "REM_GUIA",
+    "GUIA": "REM_GUIA",
+    "NUMERO_GUIA": "REM_GUIA",
+    "NUMERO_DE_GUIA": "REM_GUIA",
+    "GUIA_REM": "REM_GUIA",
+    "REMISION_GUIA": "REM_GUIA",
 }
-_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{3,15})\b")
 
-def _norm_header(t: str) -> str:
-    t=(t or "").strip()
-    t=html.unescape(t)
-    t=re.sub(r"\s+"," ", t)
-    u=t.upper().replace("Á","A").replace("É","E").replace("Í","I").replace("Ó","O").replace("Ú","U").replace("Ñ","N")
-    return _HEADER_MAP.get(u, t)
+_ORDER_TOKEN_RE = re.compile(
+    r"(?:folio|pedido|orden|order|estatus|status|seguimiento|rastreo|gu[ií]a)\s*[:#\-]?\s*([A-Za-z0-9][A-Za-z0-9._\-]{2,})",
+    re.IGNORECASE,
+)
+_ORDER_NUMERIC_RE = re.compile(r"(?:^|[^A-Za-z0-9])#?([0-9]{3,24})(?:[^A-Za-z0-9]|$)")
+_ORDER_HASH_RE = re.compile(r"#\s*([A-Za-z0-9][A-Za-z0-9._\-]{2,})")
 
-def _orders_int(val) -> int | None:
-    """
-    Normaliza un valor de hoja a entero de orden:
-    '6506' -> 6506, '6,506' -> 6506, '6506.0'/'6506,0' -> 6506
-    """
-    if val is None:
-        return None
-    s = str(val).strip()
-    if not s:
-        return None
-    m = re.match(r"^\s*([0-9]{1,})(?:[.,]0+)\s*$", s)
-    if m:
+
+def _strip_accents(text: str) -> str:
+    return (text or "").translate(str.maketrans({
+        "Á":"A", "É":"E", "Í":"I", "Ó":"O", "Ú":"U", "Ü":"U", "Ñ":"N",
+        "á":"a", "é":"e", "í":"i", "ó":"o", "ú":"u", "ü":"u", "ñ":"n",
+    }))
+
+
+def _canon_header(text: str) -> str:
+    t = html.unescape(str(text or "")).strip()
+    t = _strip_accents(t).upper()
+    t = re.sub(r"[^A-Z0-9]+", "_", t).strip("_")
+    return _HEADER_ALIASES.get(t, t)
+
+
+def _norm_header(text: str) -> str:
+    return _canon_header(text)
+
+
+def _folio_key(value) -> str:
+    s = html.unescape(str(value or "")).strip().upper()
+    s = _strip_accents(s)
+    return re.sub(r"[^A-Z0-9]", "", s)
+
+
+def _folio_matches(sheet_value, requested_value) -> bool:
+    a = _folio_key(sheet_value)
+    b = _folio_key(requested_value)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Permite que el usuario capture 123 cuando en la hoja venga 00123.
+    if a.isdigit() and b.isdigit():
         try:
-            return int(m.group(1))
+            return int(a) == int(b)
         except Exception:
-            pass
-    digits = re.sub(r"\D+", "", s)
-    if not digits:
-        return None
-    try:
-        return int(digits)
-    except Exception:
-        return None
+            return False
+    return False
+
+
+def _clean_cell(value) -> str:
+    return re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip()
+
+
+def _format_order_value(key: str, value) -> str:
+    val = _clean_cell(value)
+    if not val:
+        return "—"
+    if key == "TOTAL_CON_IVA":
+        raw = val.replace("$", "").replace(",", "").strip()
+        try:
+            return f"${float(raw):,.2f}"
+        except Exception:
+            return val
+    return val
+
 
 def _csv_url_from_pubhtml(url: str) -> str:
-    # soporta: .../pubhtml?gid=0&single=true  -> .../pub?gid=0&single=true&output=csv
     if not url:
         return ""
     if "/pubhtml" in url:
@@ -503,14 +569,80 @@ def _csv_url_from_pubhtml(url: str) -> str:
             sep = "&" if "?" in base else "?"
             base = f"{base}{sep}output=csv"
         return base
-    # si ya es /pub sin output, añadirlo
     if "/pub" in url and "output=csv" not in url:
         sep = "&" if "?" in url else "?"
         return f"{url}{sep}output=csv"
     return url
 
+
+def _header_score(cells: list[str]) -> int:
+    normalized = [_canon_header(c) for c in cells]
+    return sum(1 for h in normalized if h in _ORDER_SOURCE_COLS)
+
+
+def _extract_sheet_matrix_from_html(html_text: str) -> list[list[str]]:
+    if not BeautifulSoup:
+        return []
+    soup = BeautifulSoup(html_text, "html.parser")
+    tables = soup.find_all("table")
+    table = soup.find("table", {"class": "waffle"})
+    if table is None and tables:
+        # En pubhtml de Google, la tabla útil suele ser la más grande.
+        table = max(tables, key=lambda t: len(t.find_all("tr")))
+    if table is None:
+        return []
+
+    matrix = []
+    for tr in table.find_all("tr"):
+        cells = []
+        for index, cell in enumerate(tr.find_all(["td", "th"])):
+            classes = " ".join(cell.get("class") or [])
+            text = _clean_cell(cell.get_text(" ", strip=True))
+            # Google Sheets publica encabezados visuales de columnas/filas como TH.
+            is_visual_row_header = (
+                index == 0 and cell.name == "th" and (
+                    "row-headers" in classes or
+                    re.fullmatch(r"\d+", text or "") is not None
+                )
+            )
+            if is_visual_row_header:
+                continue
+            # Evita letras A, B, C... de encabezados visuales de columna.
+            if cell.name == "th" and re.fullmatch(r"[A-Z]+", text or ""):
+                continue
+            cells.append(text)
+        if any(cells):
+            matrix.append(cells)
+    return matrix
+
+
+def _rows_from_matrix(matrix: list[list[str]]):
+    if not matrix:
+        return [], []
+    best_idx = -1
+    best_score = -1
+    for i, cells in enumerate(matrix[:25]):
+        score = _header_score(cells)
+        if score > best_score:
+            best_idx, best_score = i, score
+    if best_idx < 0 or best_score <= 0:
+        return [], []
+
+    headers = [_norm_header(h) for h in matrix[best_idx]]
+    rows = []
+    for arr in matrix[best_idx + 1:]:
+        if not any(arr):
+            continue
+        row = {}
+        for j, val in enumerate(arr):
+            if j < len(headers) and headers[j]:
+                row[headers[j]] = _clean_cell(val)
+        if row and any(v for v in row.values()):
+            rows.append(row)
+    return headers, rows
+
+
 def _fetch_orders_html(url: str):
-    """Devuelve (headers, rows) desde HTML tipo 'waffle'."""
     if not (url and requests and BeautifulSoup):
         return [], []
     headers_req = {
@@ -518,64 +650,15 @@ def _fetch_orders_html(url: str):
         "Pragma": "no-cache",
         "User-Agent": "Mozilla/5.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8"
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
     }
     r = requests.get(url, timeout=25, headers=headers_req)
     print(f"[ORDERS][HTML] fetch status={r.status_code} len={len(r.text or '')}", flush=True)
     r.raise_for_status()
+    return _rows_from_matrix(_extract_sheet_matrix_from_html(r.text or ""))
 
-    soup=BeautifulSoup(r.text, "html.parser")
-    tables=soup.find_all("table")
-    waffle=soup.find("table", {"class":"waffle"}) or (tables[-1] if tables else None)
-    if not waffle:
-        print(f"[ORDERS][HTML] no 'waffle' table. total_tables={len(tables)}", flush=True)
-        return [], []
-
-    # Headers
-    headers=[]
-    thead=waffle.find("thead")
-    if thead:
-        thr=thead.find("tr")
-        if thr:
-            headers=[_norm_header(c.get_text(strip=True)) for c in thr.find_all(["th","td"])]
-    if not headers:
-        # fallback: primer tr con th
-        first_th_tr=None
-        for tr in waffle.find_all("tr"):
-            if tr.find("th"):
-                first_th_tr=tr; break
-        if first_th_tr:
-            headers=[_norm_header(c.get_text(strip=True)) for c in first_th_tr.find_all(["th","td"])]
-    if not headers:
-        # último fallback: primer tr
-        tr=waffle.find("tr")
-        if tr:
-            headers=[_norm_header(c.get_text(strip=True)) for c in tr.find_all(["th","td"])]
-
-    # Body rows
-    rows=[]
-    tbody=waffle.find("tbody")
-    body_trs=tbody.find_all("tr") if tbody else [tr for tr in waffle.find_all("tr")]
-    skip_first = bool(thead)
-    for i, tr in enumerate(body_trs):
-        if skip_first and i == 0:
-            continue
-        tds=[c.get_text(strip=True) for c in tr.find_all(["td","th"])]
-        if not tds:
-            continue
-        if headers and all(_norm_header(v) == headers[j] if j < len(headers) else False for j,v in enumerate(tds)):
-            continue
-        row={}
-        for j,val in enumerate(tds):
-            if j < len(headers):
-                row[headers[j]] = val
-        if row and any(v for v in row.values()):
-            rows.append(row)
-
-    return headers, rows
 
 def _fetch_orders_csv(url: str):
-    """Devuelve (headers, rows) leyendo CSV publicado."""
     if not (url and requests):
         return [], []
     headers_req = {
@@ -583,7 +666,7 @@ def _fetch_orders_csv(url: str):
         "Pragma": "no-cache",
         "User-Agent": "Mozilla/5.0",
         "Accept": "text/csv,*/*;q=0.8",
-        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8"
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
     }
     r = requests.get(url, timeout=25, headers=headers_req)
     print(f"[ORDERS][CSV]  fetch status={r.status_code} len={len(r.text or '')}", flush=True)
@@ -598,26 +681,34 @@ def _fetch_orders_csv(url: str):
     if not rows_raw:
         return [], []
 
-    raw_headers = [h.strip() for h in rows_raw[0]]
-    headers = [_norm_header(h) for h in raw_headers]
-    rows=[]
-    for arr in rows_raw[1:]:
+    best_idx = 0
+    best_score = -1
+    for i, arr in enumerate(rows_raw[:25]):
+        score = _header_score(arr)
+        if score > best_score:
+            best_idx, best_score = i, score
+    if best_score <= 0:
+        return [], []
+
+    headers = [_norm_header(h) for h in rows_raw[best_idx]]
+    rows = []
+    for arr in rows_raw[best_idx + 1:]:
         if not any(arr):
             continue
-        row={}
+        row = {}
         for j, val in enumerate(arr):
-            if j < len(headers):
-                row[headers[j]] = (val or "").strip()
+            if j < len(headers) and headers[j]:
+                row[headers[j]] = _clean_cell(val)
         if row and any(v for v in row.values()):
             rows.append(row)
     return headers, rows
 
-def _fetch_order_rows(force: bool=False):
-    """Lee la tabla publicada (HTML 'waffle'). Si no hay filas, intenta CSV publicado."""
-    global _orders_cache
-    now=time.time()
 
-    if ORDERS_AUTORELOAD!="1" and _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
+def _fetch_order_rows(force: bool=False):
+    global _orders_cache
+    now = time.time()
+
+    if not force and ORDERS_AUTORELOAD != "1" and _orders_cache["rows"] and (now - _orders_cache["ts"] < ORDERS_TTL_SECONDS):
         return _orders_cache["rows"]
 
     url = ORDERS_PUBHTML_URL
@@ -626,111 +717,96 @@ def _fetch_order_rows(force: bool=False):
         _orders_cache.update({"ts": now, "rows": [], "headers": [], "mode": None, "source_url": ""})
         return []
 
-    # 1) Intentar HTML
+    headers, rows, mode, source_url = [], [], None, url
     try:
         headers, rows = _fetch_orders_html(url)
+        if rows:
+            mode = "html"
     except Exception as e:
         print(f"[ORDERS] HTML error: {e}", flush=True)
-        headers, rows = [], []
 
-    mode = None; source_url = url
-    if rows:
-        mode = "html"
-    else:
-        # 2) Fallback CSV
+    if not rows:
         csv_url = _csv_url_from_pubhtml(url)
         try:
-            h2, r2 = _fetch_orders_csv(csv_url)
+            headers, rows = _fetch_orders_csv(csv_url)
+            if rows:
+                mode = "csv"
+                source_url = csv_url
         except Exception as e:
             print(f"[ORDERS] CSV error: {e}", flush=True)
-            h2, r2 = [], []
-        if r2:
-            headers, rows = h2, r2
-            mode = "csv"
-            source_url = csv_url
 
     _orders_cache.update({"ts": now, "rows": rows, "headers": headers, "mode": mode, "source_url": source_url})
     print(f"[ORDERS] parsed mode={mode} headers={headers} rows={len(rows)}", flush=True)
     return rows
 
+
 def _detect_order_number(text: str):
-    if not text: return None
-    m=_ORDER_RE.search(text)
-    return m.group(1) if m else None
+    if not text:
+        return None
+    s = str(text).strip()
+    m = _ORDER_TOKEN_RE.search(s)
+    if m:
+        return m.group(1).strip()
+    m = _ORDER_HASH_RE.search(s)
+    if m:
+        return m.group(1).strip()
+    # En chat de texto se permite detectar folios puramente numéricos.
+    m = _ORDER_NUMERIC_RE.search(s)
+    if m:
+        return m.group(1).strip()
+    return None
+
 
 def _looks_like_order_intent(text: str) -> bool:
-    if not text: return False
-    t=text.lower()
-    keys=("pedido","orden","order","estatus","status","seguimiento","rastreo","mi compra","mi pedido","envio","envío","paqueteria","paquetería","guia","guía")
-    return any(k in t for k in keys) or bool(_ORDER_RE.search(t))
+    if not text:
+        return False
+    t = text.lower()
+    keys = (
+        "folio", "pedido", "orden", "order", "estatus", "status", "seguimiento", "rastreo",
+        "mi compra", "mi pedido", "envio", "envío", "paqueteria", "paquetería", "guia", "guía"
+    )
+    return any(k in t for k in keys) or bool(_ORDER_TOKEN_RE.search(text)) or bool(_ORDER_HASH_RE.search(text))
+
 
 def _order_candidate_columns(headers: list[str]) -> list[str]:
-    """Prioriza '# de Orden' y luego cualquier columna cuyo nombre sugiera 'orden/pedido/order'."""
-    cands=[]
-    if "# de Orden" in headers: cands.append("# de Orden")
-    for h in headers:
-        u=h.upper()
-        if h in cands: 
-            continue
-        if ("ORDEN" in u) or ("PEDIDO" in u) or ("ORDER" in u):
-            cands.append(h)
-    return cands or headers  # como último recurso, todas
+    if "FOLIO" in headers:
+        return ["FOLIO"]
+    return [h for h in headers if "FOLIO" in h] or headers
 
-def _lookup_order(order_number: str):
-    rows=_fetch_order_rows(force=True)
-    if not rows: 
+
+def _build_order_item(row: dict) -> dict:
+    item = {}
+    for display_key, source_key in _ORDER_DISPLAY_FIELDS:
+        item[display_key] = _format_order_value(source_key, row.get(source_key, ""))
+    return item
+
+
+def _lookup_order(folio: str):
+    rows = _fetch_order_rows(force=True)
+    if not rows:
         print("[ORDERS] no rows loaded", flush=True)
         return []
-    target_int = _orders_int(order_number)
-    if target_int is None:
-        return []
 
-    headers = _orders_cache.get("headers", [])
-    cands = _order_candidate_columns(headers)
-    skip_cols = set(["SKU","Precio Unitario","Precio Total","Pzas","Plataforma","Envio","Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria","Guia","Fecha envió","Fecha Entrega"])
+    wanted = []
+    for row in rows:
+        if _folio_matches(row.get("FOLIO", ""), folio):
+            wanted.append(_build_order_item(row))
 
-    # 1) Intento principal: solo columnas candidatas
-    wanted=[]
-    for r in rows:
-        for key in cands:
-            val = r.get(key)
-            if val is None: 
-                continue
-            row_int = _orders_int(val)
-            if row_int is None: 
-                continue
-            if row_int == target_int:
-                item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
-                wanted.append(item)
-                break
-    if wanted:
-        print(f"[ORDERS] lookup (candidates) order={target_int} matches={len(wanted)}", flush=True)
-        return wanted
-
-    # 2) Fallback: escaneo controlado por todas las columnas (evitando precios/SKU)
-    for r in rows:
-        for key, val in r.items():
-            if key in skip_cols: 
-                continue
-            row_int = _orders_int(val)
-            if row_int is None: 
-                continue
-            if row_int == target_int:
-                item={col: (r.get(col, "") or "—") for col in _ORDER_COLS}
-                wanted.append(item)
-                break
-    print(f"[ORDERS] lookup (fallback) order={target_int} matches={len(wanted)}", flush=True)
+    print(f"[ORDERS] lookup folio={folio} matches={len(wanted)}", flush=True)
     return wanted
+
 
 def _render_order_vertical(rows: list) -> str:
     if not rows:
-        return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
-    parts=[]
-    for i,r in enumerate(rows,1):
-        blk=[f"**Artículo {i}**"]
-        for k in _ORDER_COLS:
-            blk.append(f"- **{k}:** {r.get(k,'—')}")
-        parts.append("\n".join(blk))
+        return "No encontramos información con ese número de folio. Verifica el folio tal como aparece en tu comprobante."
+    folio = rows[0].get("Folio", "—")
+    orden = rows[0].get("Orden de compra", "—")
+    parts = [f"Pedido correspondiente al folio: {folio}", f"Orden de compra: {orden}"]
+    for i, row in enumerate(rows, 1):
+        block = [f"Artículo {i}"]
+        for key in _ORDER_TABLE_FIELDS:
+            block.append(f"- {key}: {row.get(key, '—')}")
+        parts.append("\n".join(block))
     return "\n\n".join(parts)
 
 # ============== EXTRACTOR ROBUSTO (chat) ==============
@@ -773,7 +849,10 @@ def chat():
     query = (primary_text or request.args.get("q") or "").strip()
 
     detected_from_all = _detect_order_number(all_text)
-    order_intent = _looks_like_order_intent(query) or bool(detected_from_all)
+    bare_order_token = bool(re.fullmatch(r"\s*#?\s*[A-Za-z0-9][A-Za-z0-9._\-]{2,}\s*", query or ""))
+    # El chat de texto se mantiene separado de Pedidos. Solo desviamos si el usuario
+    # menciona explícitamente pedido/folio/seguimiento o si escribe únicamente un folio.
+    order_intent = _looks_like_order_intent(query) or (bool(detected_from_all) and bare_order_token)
 
     print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}' | any_order='{detected_from_all}'", flush=True)
 
@@ -860,32 +939,23 @@ def admin_orders_ping():
 def admin_orders_find():
     if not _admin_ok(request):
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    raw = (request.args.get("order") or "").strip()
-    target = _orders_int(raw)
-    if not target:
-        return {"ok": False, "error": "bad order"}, 400
+    raw = (request.args.get("folio") or request.args.get("order") or request.args.get("q") or "").strip()
+    folio = _detect_order_number(raw) or raw
+    if not _folio_key(folio):
+        return {"ok": False, "error": "bad folio"}, 400
     rows = _fetch_order_rows(force=True)
     headers = _orders_cache.get("headers", [])
-    cands = _order_candidate_columns(headers)
-    matches = []
-    for r in rows:
-        for k in cands:
-            vi = _orders_int(r.get(k))
-            if vi and vi == target:
-                matches.append(r); break
-    # fallback
-    if not matches:
-        skip_cols = set(["SKU","Precio Unitario","Precio Total","Pzas","Plataforma","Envio","Fecha Inicio","EN PROCESO","Fecha Termino","Almacen","Paqueteria","Guia","Fecha envió","Fecha Entrega"])
-        for r in rows:
-            for k,v in r.items():
-                if k in skip_cols: 
-                    continue
-                vi = _orders_int(v)
-                if vi and vi == target:
-                    matches.append(r); break
-    return {"ok": True, "target": target, "mode": _orders_cache.get("mode"),
-            "headers": headers, "candidate_cols": cands,
-            "rows_count": len(rows), "matched_count": len(matches), "matched_samples": matches[:3]}
+    matches = [r for r in rows if _folio_matches(r.get("FOLIO", ""), folio)]
+    return {
+        "ok": True,
+        "target_folio": folio,
+        "mode": _orders_cache.get("mode"),
+        "headers": headers,
+        "rows_count": len(rows),
+        "matched_count": len(matches),
+        "matched_samples": matches[:3],
+        "normalized_items": [_build_order_item(r) for r in matches[:10]],
+    }
 
 # ---------- Admin varios ----------
 def _do_reindex():
@@ -940,55 +1010,50 @@ def admin_discards():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     return indexer.discard_stats()
 
-# ---------- Endpoint dedicado de pedidos (independiente al buscador) ----------
+# ---------- Endpoint dedicado de pedidos (independiente al buscador/DeepSeek) ----------
 @app.route("/api/orders", methods=["POST", "OPTIONS"])
 def api_orders():
-    """Consulta de estatus de pedido por número (p. ej. 6506 o #6506)."""
+    """Consulta de pedido por FOLIO. Acepta {folio}, {order}, {message} o {q}."""
     if request.method == "OPTIONS":
-        return ("", 204)  # preflight OK
+        return ("", 204)
 
     try:
         data = request.get_json(force=True) or {}
     except Exception:
         data = {}
 
-    raw = (data.get("order") or data.get("message") or data.get("q") or "").strip()
+    raw = (
+        data.get("folio") or
+        data.get("order") or
+        data.get("order_no") or
+        data.get("message") or
+        data.get("q") or
+        ""
+    )
+    raw = str(raw).strip()
     if not raw:
-        return jsonify({ "ok": False, "error": "missing order" }), 400
+        return jsonify({"ok": False, "error": "missing folio"}), 400
 
-    order_no = _detect_order_number(raw) or raw
-    try_int = _orders_int(order_no)
-    if try_int is None:
-        return jsonify({ "ok": False, "error": "invalid order format" }), 400
+    folio = _detect_order_number(raw) or raw
+    if not _folio_key(folio):
+        return jsonify({"ok": False, "error": "invalid folio format"}), 400
 
     try:
-        rows = _lookup_order(str(try_int))
+        rows = _lookup_order(folio)
         answer = _render_order_vertical(rows)
-        return jsonify({ "ok": True, "order": str(try_int), "items": rows, "answer": answer })
+        return jsonify({
+            "ok": True,
+            "folio": folio,
+            "order": folio,
+            "items": rows,
+            "answer": answer,
+            "fields": _ORDER_TABLE_FIELDS,
+        })
     except Exception as e:
         print(f"[ORDERS] /api/orders error: {e}", flush=True)
-        return jsonify({ "ok": False, "error": "internal error" }), 500
+        return jsonify({"ok": False, "error": "internal error"}), 500
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-
-
-# === PATCH: Robust digits-only order detection (Amazon/Elektra/Coppel) ===
-# Prior patch chose the longest digit run; this version concatenates *all* digits in order.
-# Examples:
-#   "702-1217127-5967419" -> "70212171275967419"
-#   "v42705452ekt-01"     -> "4270545201"
-#   "167657658-A"         -> "167657658"
-def __digits_only__(s):
-    try:
-        import re
-        return re.sub(r"\D+", "", str(s or ""))
-    except Exception:
-        return ""  # fail-safe
-
-
-def _detect_order_number(text: str):  # type: ignore[override]
-    s = __digits_only__(text)
-    return s if len(s) >= 3 else None
