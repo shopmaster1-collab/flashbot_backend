@@ -1,97 +1,99 @@
 # -*- coding: utf-8 -*-
-# orders_endpoints.py
-import os, re, time, html, logging
-from flask import Blueprint, request, jsonify
+"""Endpoints opcionales de pedidos por FOLIO.
 
-# Reutilizamos tu lector de hoja publicada
+El endpoint principal del proyecto está en app.py como POST /api/orders.
+Este blueprint queda actualizado por compatibilidad con instalaciones que lo
+registren por separado.
+"""
+
+import logging
+import os
+from flask import Blueprint, jsonify, request
+
 try:
-    from .orders_report import OrdersSheetReader, render_vertical_md
-except Exception:
-    # En despliegue real esto debería existir; si no, devolvemos un error claro
+    from .orders_report import (
+        DEFAULT_ORDERS_PUBHTML_URL,
+        OrdersSheetReader,
+        detect_order_number,
+        folio_key,
+        render_vertical_md,
+    )
+except Exception:  # pragma: no cover - fallback defensivo para despliegue
     OrdersSheetReader = None
-    def render_vertical_md(rows): return "Sin renderer disponible."
+    DEFAULT_ORDERS_PUBHTML_URL = ""
+
+    def detect_order_number(text):
+        return None
+
+    def folio_key(text):
+        return str(text or "").strip()
+
+    def render_vertical_md(rows):
+        return "Sin renderer disponible."
+
 
 bp_orders = Blueprint("bp_orders", __name__)
 
-# Instancia compartida con caché de la hoja
-_ORDERS_URL = os.getenv("ORDERS_PUBHTML_URL", "").strip()
-_TTL = int(os.getenv("ORDERS_AUTORELOAD", "45") or "45")
+_ORDERS_URL = (os.getenv("ORDERS_PUBHTML_URL") or DEFAULT_ORDERS_PUBHTML_URL or "").strip()
+_TTL = int(os.getenv("ORDERS_TTL_SECONDS", "45") or "45")
 _reader = None
 if OrdersSheetReader and _ORDERS_URL:
     try:
         _reader = OrdersSheetReader(_ORDERS_URL, ttl=_TTL)
-    except Exception as e:
-        logging.exception("OrdersSheetReader init failed: %s", e)
+    except Exception as exc:
+        logging.exception("OrdersSheetReader init failed: %s", exc)
 else:
     logging.warning("orders_endpoints: missing deps or ORDERS_PUBHTML_URL")
 
-_ORDER_RE = re.compile(r"\d{4,15}")
-
-def _extract_order_no(raw: str) -> str:
-    if not raw: return ""
-    m = _ORDER_RE.search(str(raw))
-    return m.group(0) if m else ""
 
 @bp_orders.post("/api/orders/status")
 def order_status():
-    """
-    Endpoint dedicado para consultar el estatus de un pedido.
-    Body esperado: { "order_no": "1234567" }  (acepta con o sin '#')
-    Respuesta: { ok, answer(markdown), rows_count }
+    """Consulta de estatus por folio.
+
+    Body aceptado: {"folio":"A1BC3"}, {"order":"A1BC3"} u {"order_no":"A1BC3"}.
     """
     if _reader is None:
-        return jsonify({"ok": False, "error": "Orders module not ready (missing ORDERS_PUBHTML_URL or bs4)."}), 500
+        return jsonify({"ok": False, "error": "Orders module not ready."}), 500
 
     data = request.get_json(silent=True) or {}
-    raw_no = data.get("order_no", "")
-    order_no = _extract_order_no(raw_no)
+    raw = (data.get("folio") or data.get("order") or data.get("order_no") or data.get("message") or "")
+    raw = str(raw).strip()
+    folio = detect_order_number(raw) or raw
 
-    if not order_no:
-        return jsonify({"ok": False, "error": "Número de orden inválido. Ingresa 4 a 15 dígitos."}), 400
+    if not folio_key(folio):
+        return jsonify({"ok": False, "error": "Folio inválido."}), 400
 
     try:
-        rows = _reader.find_by_order(order_no)
-    except Exception as e:
-        logging.exception("orders lookup failed: %s", e)
+        rows = _reader.find_by_folio(folio)
+    except Exception as exc:
+        logging.exception("orders lookup failed: %s", exc)
         return jsonify({"ok": False, "error": "Error consultando el reporte de pedidos."}), 500
 
     if not rows:
-        return jsonify({"ok": True, "answer": f"No encontramos información para el pedido #{order_no}.", "rows_count": 0})
+        return jsonify({
+            "ok": True,
+            "folio": folio,
+            "answer": f"No encontramos información para el folio {folio}.",
+            "rows_count": 0,
+            "items": [],
+        })
 
-    md = render_vertical_md(rows)
-    return jsonify({"ok": True, "answer": md, "rows_count": len(rows)})
+    return jsonify({
+        "ok": True,
+        "folio": folio,
+        "answer": render_vertical_md(rows),
+        "rows_count": len(rows),
+        "items": rows,
+    })
+
 
 @bp_orders.get("/api/admin/orders-ping")
 def orders_ping():
-    """
-    Diagnóstico: trae headers y una muestra para validar que la hoja pubblicada carga en Render.
-    Recomendado proteger con X-Admin-Secret en Nginx/Firewall si lo deseas.
-    """
+    """Diagnóstico simple de la hoja publicada."""
     if _reader is None:
         return jsonify({"ok": False, "error": "Orders module not ready"}), 500
     try:
-        meta = _reader.meta()
-        sample = _reader.sample(3)
-        return jsonify({"ok": True, "meta": meta, "sample": sample})
-    except Exception as e:
-        logging.exception("orders ping failed: %s", e)
-        return jsonify({"ok": False, "error": repr(e)}), 500
-
-
-# === PATCH: Robust digits-only order detection (Amazon/Elektra/Coppel) ===
-# Prior patch chose the longest digit run; this version concatenates *all* digits in order.
-# Examples:
-#   "702-1217127-5967419" -> "70212171275967419"
-#   "v42705452ekt-01"     -> "4270545201"
-#   "167657658-A"         -> "167657658"
-def __digits_only__(s):
-    try:
-        import re
-        return re.sub(r"\D+", "", str(s or ""))
-    except Exception:
-        return ""  # fail-safe
-
-
-def _extract_order_no(raw: str) -> str:  # type: ignore[override]
-    s = __digits_only__(raw)
-    return s if len(s) >= 3 else ""
+        return jsonify({"ok": True, "meta": _reader.meta(), "sample": _reader.sample(3)})
+    except Exception as exc:
+        logging.exception("orders ping failed: %s", exc)
+        return jsonify({"ok": False, "error": repr(exc)}), 500
