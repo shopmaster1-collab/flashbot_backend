@@ -83,7 +83,11 @@ def serve_widget(filename):
     if not os.path.isfile(full):
         return {"ok": False, "error": "not_found"}, 404
     resp = send_from_directory(WIDGET_DIR, filename)
-    resp.headers["Cache-Control"] = "public, max-age=604800"  # 7 días
+    # En Shopify es mejor evitar caché agresivo durante correcciones del widget.
+    # Además se puede usar ?v=YYYYMMDD_N en el script para forzar actualización.
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
 @app.get("/")
@@ -107,6 +111,10 @@ def home():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+@app.get("/api/health")
+def api_health():
+    return {"ok": True, "service": "flashbot"}
 
 # ======================================================================
 #  Utilidades de contexto/respuesta (Productos)  — (no modifican negocio)

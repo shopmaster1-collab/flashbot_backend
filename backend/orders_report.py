@@ -2,215 +2,364 @@
 """
 orders_report.py
 ----------------
-Lectura *solo-lectura* de la publicación de Google Sheets en formato `pubhtml`
-para generar reportes de pedidos por "# de Orden".
+Lector solo-lectura para la hoja pública de Google Sheets usada por el widget
+Master. La búsqueda se realiza por la columna FOLIO y la salida se normaliza a
+las columnas solicitadas por el frontend:
 
-Diseñado para ser "plug-and-play" sin romper nada del bot existente.
-No requiere nuevas dependencias fuera de `requests` y `beautifulsoup4`.
+- Orden de compra  <- ORDEN_COMPRA
+- SKU de producto  <- CLAVE_ARTICULO
+- Cantidad         <- UNIDADES
+- Total            <- TOTAL_CON_IVA
+- Paquetería       <- REM_PAQUETERIA
+- Guía             <- REM_GUIA
 """
 
+from __future__ import annotations
+
+import csv
+import html
+import io
 import os
 import re
 import time
-import html
-import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 
-# ENV
-ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or os.getenv("ORDERS_PUBHTMl_URL") or ""
-ORDERS_AUTORELOAD = os.getenv("ORDERS_AUTORELOAD", "1")  # "1" para leer siempre; "0" cachea por TTL corto
+DEFAULT_ORDERS_PUBHTML_URL = (
+    "https://docs.google.com/spreadsheets/d/e/"
+    "2PACX-1vS7MFutb5ikOvAvWsxuc164Txu30GeVkCGZAY3U_fUVmS_0MKMn6ta2hbbNc-hcmFbV0fyAe8A-7PGG/"
+    "pubhtml?gid=1842193501&single=true"
+)
+ORDERS_PUBHTML_URL = os.getenv("ORDERS_PUBHTML_URL") or os.getenv("ORDERS_PUBHTMl_URL") or DEFAULT_ORDERS_PUBHTML_URL
 ORDERS_TTL_SECONDS = int(os.getenv("ORDERS_TTL_SECONDS", "45"))
 
-# Cache muy ligero en memoria de proceso
-_cache = {"ts": 0.0, "rows": []}
+SOURCE_COLS = ["FOLIO", "ORDEN_COMPRA", "CLAVE_ARTICULO", "UNIDADES", "TOTAL_CON_IVA", "REM_PAQUETERIA", "REM_GUIA"]
+DISPLAY_FIELDS: List[Tuple[str, str]] = [
+    ("Folio", "FOLIO"),
+    ("Orden de compra", "ORDEN_COMPRA"),
+    ("SKU de producto", "CLAVE_ARTICULO"),
+    ("Cantidad", "UNIDADES"),
+    ("Total", "TOTAL_CON_IVA"),
+    ("Paquetería", "REM_PAQUETERIA"),
+    ("Guía", "REM_GUIA"),
+]
+TABLE_FIELDS = ["Orden de compra", "SKU de producto", "Cantidad", "Total", "Paquetería", "Guía"]
 
-# Normalización flexible de encabezados
-_HEADER_MAP = {
-    "# DE ORDEN": "# de Orden",
-    "NO. DE ORDEN": "# de Orden",
-    "NÚMERO DE ORDEN": "# de Orden",
-    "NÚMERO DE PEDIDO": "# de Orden",
-    "ORDEN": "# de Orden",
-    "# ORDEN": "# de Orden",
-    "#": "# de Orden",
-    "SKU": "SKU",
-    "PZAS": "Pzas",
-    "PIEZAS": "Pzas",
-    "CANTIDAD": "Pzas",
-    "PRECIO UNITARIO": "Precio Unitario",
-    "PRECIO": "Precio Unitario",
-    "PRECIO TOTAL": "Precio Total",
-    "TOTAL": "Precio Total",
-    "FECHA INICIO": "Fecha Inicio",
-    "EN PROCESO": "EN PROCESO",
-    "PAQUETERÍA": "Paquetería",
-    "PAQUETERIA": "Paquetería",
-    "FECHA ENVÍO": "Fecha envío",
-    "FECHA ENVIO": "Fecha envío",
-    "FECHA ENVIÓ": "Fecha envío",
-    "FECHA ENTREGA": "Fecha Entrega",
+HEADER_ALIASES = {
+    "FOLIO": "FOLIO",
+    "NO_FOLIO": "FOLIO",
+    "NUMERO_FOLIO": "FOLIO",
+    "NUMERO_DE_FOLIO": "FOLIO",
+    "FOLIO_PEDIDO": "FOLIO",
+    "FOLIO_DE_PEDIDO": "FOLIO",
+    "ORDEN_COMPRA": "ORDEN_COMPRA",
+    "ORDEN_DE_COMPRA": "ORDEN_COMPRA",
+    "OC": "ORDEN_COMPRA",
+    "ORDEN": "ORDEN_COMPRA",
+    "CLAVE_ARTICULO": "CLAVE_ARTICULO",
+    "CLAVE_DE_ARTICULO": "CLAVE_ARTICULO",
+    "SKU": "CLAVE_ARTICULO",
+    "SKU_PRODUCTO": "CLAVE_ARTICULO",
+    "SKU_DE_PRODUCTO": "CLAVE_ARTICULO",
+    "ARTICULO": "CLAVE_ARTICULO",
+    "UNIDADES": "UNIDADES",
+    "UNIDAD": "UNIDADES",
+    "CANTIDAD": "UNIDADES",
+    "PIEZAS": "UNIDADES",
+    "PZAS": "UNIDADES",
+    "TOTAL_CON_IVA": "TOTAL_CON_IVA",
+    "TOTAL": "TOTAL_CON_IVA",
+    "TOTAL_IVA": "TOTAL_CON_IVA",
+    "PRECIO_TOTAL": "TOTAL_CON_IVA",
+    "IMPORTE": "TOTAL_CON_IVA",
+    "REM_PAQUETERIA": "REM_PAQUETERIA",
+    "PAQUETERIA": "REM_PAQUETERIA",
+    "REMISION_PAQUETERIA": "REM_PAQUETERIA",
+    "REM_GUIA": "REM_GUIA",
+    "GUIA": "REM_GUIA",
+    "NUMERO_GUIA": "REM_GUIA",
+    "NUMERO_DE_GUIA": "REM_GUIA",
+    "REMISION_GUIA": "REM_GUIA",
 }
 
-_WANTED_COLS = [
-    "# de Orden", "SKU", "Pzas", "Precio Unitario", "Precio Total",
-    "Fecha Inicio", "EN PROCESO", "Paquetería", "Fecha envío", "Fecha Entrega"
-]
+ORDER_TOKEN_RE = re.compile(
+    r"(?:folio|pedido|orden|order|estatus|status|seguimiento|rastreo|gu[ií]a)\s*[:#\-]?\s*([A-Za-z0-9][A-Za-z0-9._\-]{2,})",
+    re.IGNORECASE,
+)
+ORDER_HASH_RE = re.compile(r"#\s*([A-Za-z0-9][A-Za-z0-9._\-]{2,})")
+ORDER_NUMERIC_RE = re.compile(r"(?:^|[^A-Za-z0-9])#?([0-9]{3,24})(?:[^A-Za-z0-9]|$)")
 
-_ORDER_RE = re.compile(r"(?:^|[^0-9])#?\s*([0-9]{4,15})\b")
 
-def _normalize_header(text: str) -> str:
-    t = (text or "").strip()
-    t = html.unescape(t)
-    t = re.sub(r"\s+", " ", t)
-    t_upper = t.upper()
-    # quitar acentos para el mapeo laxo
-    t_upper = (
-        t_upper.replace("Á", "A").replace("É", "E")
-        .replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
-    )
-    return _HEADER_MAP.get(t_upper, t)
+def strip_accents(text: str) -> str:
+    return (text or "").translate(str.maketrans({
+        "Á": "A", "É": "E", "Í": "I", "Ó": "O", "Ú": "U", "Ü": "U", "Ñ": "N",
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ü": "u", "ñ": "n",
+    }))
 
-def _fetch_rows(force: bool=False) -> List[Dict[str, str]]:
-    """Lee la publicación pubhtml y devuelve una lista de dicts (una por fila)."""
-    global _cache
-    now = time.time()
-    if not force and ORDERS_AUTORELOAD != "1":
-        if _cache["rows"] and (now - _cache["ts"] < ORDERS_TTL_SECONDS):
-            return _cache["rows"]
 
-    if not ORDERS_PUBHTML_URL:
-        logging.warning("ORDERS_PUBHTML_URL no definida")
-        return []
+def clean_cell(value) -> str:
+    return re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip()
 
-    try:
-        r = requests.get(ORDERS_PUBHTML_URL, timeout=20, headers={"Cache-Control":"no-cache"})
-        r.raise_for_status()
-    except Exception as e:
-        logging.exception("Error leyendo pubhtml: %s", e)
-        return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    table = soup.find("table")
-    if not table:
-        logging.warning("No se encontró <table> en pubhtml")
-        return []
+def normalize_header(text: str) -> str:
+    t = strip_accents(html.unescape(str(text or "")).strip()).upper()
+    t = re.sub(r"[^A-Z0-9]+", "_", t).strip("_")
+    return HEADER_ALIASES.get(t, t)
 
-    # Extraer filas
-    rows = []
-    ths = [c.get_text(strip=True) for c in table.find_all("th")]
-    if ths:
-        headers = [ _normalize_header(h) for h in ths ]
-        body_rows = table.find_all("tr")[1:]
-    else:
-        trs = table.find_all("tr")
-        if not trs: return []
-        first = trs[0]
-        headers = [ _normalize_header(c.get_text(strip=True)) for c in first.find_all(["td","th"]) ]
-        body_rows = trs[1:]
 
-    for tr in body_rows:
-        cells = [c.get_text(strip=True) for c in tr.find_all(["td","th"])]
-        if not any(cells): 
-            continue
-        row = {}
-        for i, val in enumerate(cells):
-            if i < len(headers):
-                row[headers[i]] = val
-        if any(k for k in row.keys()):
-            rows.append(row)
+def folio_key(value) -> str:
+    s = strip_accents(html.unescape(str(value or "")).strip()).upper()
+    return re.sub(r"[^A-Z0-9]", "", s)
 
-    _cache["rows"] = rows
-    _cache["ts"] = now
-    return rows
+
+def folio_matches(sheet_value, requested_value) -> bool:
+    a = folio_key(sheet_value)
+    b = folio_key(requested_value)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.isdigit() and b.isdigit():
+        try:
+            return int(a) == int(b)
+        except Exception:
+            return False
+    return False
+
 
 def detect_order_number(text: str) -> Optional[str]:
-    """Devuelve el número de pedido si se encuentra en el texto, de lo contrario None."""
     if not text:
         return None
-    m = _ORDER_RE.search(text)
-    if not m:
-        return None
-    return m.group(1)
+    s = str(text).strip()
+    for pattern in (ORDER_TOKEN_RE, ORDER_HASH_RE, ORDER_NUMERIC_RE):
+        m = pattern.search(s)
+        if m:
+            return m.group(1).strip()
+    return None
+
 
 def looks_like_order_intent(text: str) -> bool:
-    if not text: return False
+    if not text:
+        return False
     t = text.lower()
-    keys = ("pedido", "orden", "order", "estatus", "status", "seguimiento", "rastreo", "mi compra", "mi pedido")
-    return any(k in t for k in keys)
+    keys = (
+        "folio", "pedido", "orden", "order", "estatus", "status", "seguimiento", "rastreo",
+        "mi compra", "mi pedido", "envio", "envío", "paqueteria", "paquetería", "guia", "guía",
+    )
+    return any(k in t for k in keys) or bool(ORDER_TOKEN_RE.search(text)) or bool(ORDER_HASH_RE.search(text))
 
-def lookup_order(order_number: str, force: bool=False) -> List[Dict[str, str]]:
-    rows = _fetch_rows(force=force)
-    if not rows:
+
+def format_value(source_key: str, value) -> str:
+    val = clean_cell(value)
+    if not val:
+        return "—"
+    if source_key == "TOTAL_CON_IVA":
+        raw = val.replace("$", "").replace(",", "").strip()
+        try:
+            return f"${float(raw):,.2f}"
+        except Exception:
+            return val
+    return val
+
+
+def build_item(row: Dict[str, str]) -> Dict[str, str]:
+    return {display: format_value(source, row.get(source, "")) for display, source in DISPLAY_FIELDS}
+
+
+def csv_url_from_pubhtml(url: str) -> str:
+    if not url:
+        return ""
+    if "/pubhtml" in url:
+        base = url.replace("/pubhtml", "/pub")
+        if "output=csv" not in base:
+            sep = "&" if "?" in base else "?"
+            base = f"{base}{sep}output=csv"
+        return base
+    if "/pub" in url and "output=csv" not in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}output=csv"
+    return url
+
+
+def header_score(cells: List[str]) -> int:
+    normalized = [normalize_header(c) for c in cells]
+    return sum(1 for h in normalized if h in SOURCE_COLS)
+
+
+def matrix_from_html(html_text: str) -> List[List[str]]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    tables = soup.find_all("table")
+    table = soup.find("table", {"class": "waffle"})
+    if table is None and tables:
+        table = max(tables, key=lambda t: len(t.find_all("tr")))
+    if table is None:
         return []
-    out = []
-    for r in rows:
-        num = r.get("# de Orden") or r.get("# Orden") or r.get("#")
-        if not num: 
-            for k in r.keys():
-                if k.strip().lower().startswith("# de orden"):
-                    num = r.get(k)
-                    break
-        if not num:
+
+    matrix: List[List[str]] = []
+    for tr in table.find_all("tr"):
+        cells: List[str] = []
+        for index, cell in enumerate(tr.find_all(["td", "th"])):
+            text = clean_cell(cell.get_text(" ", strip=True))
+            classes = " ".join(cell.get("class") or [])
+            is_visual_row_header = index == 0 and cell.name == "th" and (
+                "row-headers" in classes or re.fullmatch(r"\d+", text or "") is not None
+            )
+            if is_visual_row_header:
+                continue
+            if cell.name == "th" and re.fullmatch(r"[A-Z]+", text or ""):
+                continue
+            cells.append(text)
+        if any(cells):
+            matrix.append(cells)
+    return matrix
+
+
+def rows_from_matrix(matrix: List[List[str]]) -> Tuple[List[str], List[Dict[str, str]]]:
+    if not matrix:
+        return [], []
+    best_idx = -1
+    best_score = -1
+    for i, cells in enumerate(matrix[:25]):
+        score = header_score(cells)
+        if score > best_score:
+            best_idx = i
+            best_score = score
+    if best_idx < 0 or best_score <= 0:
+        return [], []
+
+    headers = [normalize_header(h) for h in matrix[best_idx]]
+    rows: List[Dict[str, str]] = []
+    for arr in matrix[best_idx + 1:]:
+        if not any(arr):
             continue
-        digits = re.sub(r"\D+", "", str(num))
-        if digits == re.sub(r"\D+", "", str(order_number)):
-            item = {}
-            for col in _WANTED_COLS:
-                item[col] = r.get(col, "") or "—"
-            out.append(item)
-    return out
+        row: Dict[str, str] = {}
+        for index, value in enumerate(arr):
+            if index < len(headers) and headers[index]:
+                row[headers[index]] = clean_cell(value)
+        if row and any(row.values()):
+            rows.append(row)
+    return headers, rows
+
+
+class OrdersSheetReader:
+    """Lector con caché en memoria para consultar pedidos por FOLIO."""
+
+    def __init__(self, url: str = "", ttl: int = ORDERS_TTL_SECONDS):
+        self.url = url or ORDERS_PUBHTML_URL
+        self.ttl = int(ttl or ORDERS_TTL_SECONDS)
+        self._cache_ts = 0.0
+        self._headers: List[str] = []
+        self._rows: List[Dict[str, str]] = []
+        self._mode = ""
+        self._source_url = ""
+
+    def _fetch_html(self) -> Tuple[List[str], List[Dict[str, str]]]:
+        response = requests.get(
+            self.url,
+            timeout=25,
+            headers={
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+            },
+        )
+        response.raise_for_status()
+        return rows_from_matrix(matrix_from_html(response.text or ""))
+
+    def _fetch_csv(self) -> Tuple[List[str], List[Dict[str, str]]]:
+        csv_url = csv_url_from_pubhtml(self.url)
+        response = requests.get(
+            csv_url,
+            timeout=25,
+            headers={
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/csv,*/*;q=0.8",
+                "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+            },
+        )
+        response.raise_for_status()
+        data = list(csv.reader(io.StringIO(response.text or "")))
+        headers, rows = rows_from_matrix(data)
+        if rows:
+            self._source_url = csv_url
+        return headers, rows
+
+    def rows(self, force: bool = False) -> List[Dict[str, str]]:
+        now = time.time()
+        if not force and self._rows and (now - self._cache_ts) < self.ttl:
+            return self._rows
+
+        headers, rows = [], []
+        self._mode = ""
+        self._source_url = self.url
+        try:
+            headers, rows = self._fetch_html()
+            if rows:
+                self._mode = "html"
+        except Exception:
+            headers, rows = [], []
+
+        if not rows:
+            try:
+                headers, rows = self._fetch_csv()
+                if rows:
+                    self._mode = "csv"
+            except Exception:
+                headers, rows = [], []
+
+        self._headers = headers
+        self._rows = rows
+        self._cache_ts = now
+        return self._rows
+
+    def find_by_order(self, folio: str) -> List[Dict[str, str]]:
+        return self.find_by_folio(folio)
+
+    def find_by_folio(self, folio: str) -> List[Dict[str, str]]:
+        return [build_item(row) for row in self.rows(force=True) if folio_matches(row.get("FOLIO", ""), folio)]
+
+    def sample(self, limit: int = 3) -> List[Dict[str, str]]:
+        return self.rows(force=True)[: max(0, int(limit))]
+
+    def meta(self) -> Dict[str, object]:
+        self.rows(force=True)
+        return {
+            "url": self.url,
+            "source_url": self._source_url,
+            "mode": self._mode,
+            "headers": self._headers,
+            "rows_count": len(self._rows),
+        }
+
 
 def render_vertical_md(rows: List[Dict[str, str]]) -> str:
-    """Formato mobile-first (widget vertical): bloques por ítem con pares etiqueta: valor."""
     if not rows:
-        return "No encontramos información con ese número de pedido. Verifica el número tal como aparece en tu comprobante."
-    parts = []
-    for i, r in enumerate(rows, 1):
-        blk = []
-        blk.append(f"**Artículo {i}**")
-        for key in _WANTED_COLS:
-            val = r.get(key, "—")
-            blk.append(f"- **{key}:** {val}")
-        parts.append("\n".join(blk))
+        return "No encontramos información con ese número de folio. Verifica el folio tal como aparece en tu comprobante."
+    folio = rows[0].get("Folio", "—")
+    orden = rows[0].get("Orden de compra", "—")
+    parts = [f"Pedido correspondiente al folio: {folio}", f"Orden de compra: {orden}"]
+    for index, row in enumerate(rows, 1):
+        block = [f"Artículo {index}"]
+        for key in TABLE_FIELDS:
+            block.append(f"- {key}: {row.get(key, '—')}")
+        parts.append("\n".join(block))
     return "\n\n".join(parts)
 
+
 def render_compact_table_md(rows: List[Dict[str, str]]) -> str:
-    """Tabla compacta (si el widget soporta scroll horizontal)."""
     if not rows:
-        return "No encontramos información con ese número de pedido."
-    hdr = "| " + " | ".join(_WANTED_COLS) + " |"
-    sep = "|" + "|".join(["---"]*len(_WANTED_COLS)) + "|"
-    body = []
-    for r in rows:
-        body.append("| " + " | ".join(r.get(c, "—") for c in _WANTED_COLS) + " |")
-    return "\n".join([hdr, sep] + body)
-
-def format_for_widget(rows: List[Dict[str, str]], prefer_vertical: bool=True) -> str:
-    """Devuelve el markdown ideal para tu widget en vertical."""
-    if prefer_vertical:
-        return render_vertical_md(rows)
-    return render_compact_table_md(rows)
+        return "No encontramos información con ese número de folio."
+    header = "| " + " | ".join(TABLE_FIELDS) + " |"
+    sep = "|" + "|".join(["---"] * len(TABLE_FIELDS)) + "|"
+    body = ["| " + " | ".join(row.get(col, "—") for col in TABLE_FIELDS) + " |" for row in rows]
+    return "\n".join([header, sep] + body)
 
 
-# === PATCH: Robust digits-only order detection (Amazon/Elektra/Coppel) ===
-# Prior patch chose the longest digit run; this version concatenates *all* digits in order.
-# Examples:
-#   "702-1217127-5967419" -> "70212171275967419"
-#   "v42705452ekt-01"     -> "4270545201"
-#   "167657658-A"         -> "167657658"
-def __digits_only__(s):
-    try:
-        import re
-        return re.sub(r"\D+", "", str(s or ""))
-    except Exception:
-        return ""  # fail-safe
-
-
-from typing import Optional
-
-def detect_order_number(text: str) -> Optional[str]:  # type: ignore[override]
-    s = __digits_only__(text)
-    return s if len(s) >= 3 else None
+def format_for_widget(rows: List[Dict[str, str]], prefer_vertical: bool = True) -> str:
+    return render_vertical_md(rows) if prefer_vertical else render_compact_table_md(rows)
