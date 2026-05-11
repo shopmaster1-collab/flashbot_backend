@@ -3,7 +3,7 @@
   ------------------------------------------------------------
   - Chat de texto: backend DeepSeek/Catálogo en /api/chat
   - Voz: ElevenLabs ConvAI, montado únicamente dentro de la pestaña Voz
-  - Pedidos: consulta independiente en /api/orders usando FOLIO
+  - Pedidos: consulta independiente en /api/orders usando ORDEN_COMPRA
   - Versión robusta para Shopify: no depende de scripts externos de ElevenLabs
 */
 (function () {
@@ -68,7 +68,7 @@
           <svg viewBox="0 0 24 24" fill="none"><path d="M4.25 11.75c0-4.004 3.496-7.25 7.75-7.25s7.75 3.246 7.75 7.25S16.254 19 12 19H7.5L4 21l1.18-3.54a7.02 7.02 0 0 1-.93-5.71Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
         </div>
         <div class="mf-title-wrap">
-          <strong>Asistente</strong>
+          <strong>Tu Asistente Maxter</strong>
           <span><i aria-hidden="true"></i> En línea</span>
         </div>
         <button class="mf-close" type="button" aria-label="Cerrar asistente">×</button>
@@ -119,19 +119,19 @@
         <div class="mf-orders-view" data-view="orders" hidden>
           <div class="mf-orders-intro">
             <h3>Consulta tu pedido</h3>
-            <p>Ingresa el número de folio para ver su estado.</p>
+            <p>¿Necesitas saber el estatus de tu pedido? Escribe tu Número de Pedido.</p>
           </div>
           <form class="mf-order-form" id="mfOrderForm">
-            <label for="mfOrderInput">Número de folio</label>
+            <label for="mfOrderInput">Número de Pedido</label>
             <div class="mf-order-row">
-              <input id="mfOrderInput" type="text" autocomplete="off" placeholder="Ej. #A1BC3" required>
+              <input id="mfOrderInput" type="text" autocomplete="off" placeholder="Ej. 702-7300318-1033843" required>
               <button type="submit" id="mfOrderSubmit" aria-label="Consultar pedido">
                 <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m21 21-4.35-4.35M10.8 18.1a7.3 7.3 0 1 1 0-14.6 7.3 7.3 0 0 1 0 14.6Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
               </button>
             </div>
           </form>
           <div class="mf-order-result" id="mfOrderResult">
-            Aquí aparecerá el detalle de tu pedido.
+            Escribe tu número de pedido y presiona Enter para consultar el estatus.
           </div>
         </div>
       </main>
@@ -155,7 +155,7 @@
       close: closePanel,
       switchTab,
       backend: BACKEND,
-      version: '2026-05-11.2'
+      version: '2026-05-11.3'
     };
   }
 
@@ -236,7 +236,7 @@
     const body = $('#mfChatBody');
     if (!body) return;
     body.innerHTML = '';
-    appendChatMessage('¡Hola! Soy tu asistente. ¿En qué puedo ayudarte hoy?', 'bot');
+    appendChatMessage('¡Hola! Soy tu asistente inteligente Maxter. ¿En qué puedo ayudarte hoy?', 'bot');
   }
 
   function appendChatMessage(text, from) {
@@ -378,21 +378,21 @@
     if (state.orderLoading) return;
 
     const input = $('#mfOrderInput');
-    const folio = input ? input.value.trim() : '';
-    if (!folio) return;
+    const orderNo = input ? input.value.trim() : '';
+    if (!orderNo) return;
 
     const result = $('#mfOrderResult');
     if (result) {
       result.className = 'mf-order-result mf-order-loading';
-      result.textContent = 'Consultando pedido...';
+      result.textContent = 'Consultando número de pedido...';
     }
     state.orderLoading = true;
     const submit = $('#mfOrderSubmit');
     if (submit) submit.disabled = true;
 
     try {
-      const data = await postJson(`${BACKEND}/api/orders`, { folio, order: folio }, 30000);
-      renderOrderResult(data, folio);
+      const data = await postJson(`${BACKEND}/api/orders`, { order: orderNo }, 30000);
+      renderOrderResult(data, orderNo);
     } catch (err) {
       console.error('[Flashbot] order error:', err);
       if (result) {
@@ -405,26 +405,25 @@
     }
   }
 
-  function renderOrderResult(data, requestedFolio) {
+  function renderOrderResult(data, requestedOrder) {
     const result = $('#mfOrderResult');
     if (!result) return;
     const items = Array.isArray(data.items) ? data.items : [];
     if (!items.length) {
       result.className = 'mf-order-result mf-order-empty';
-      result.textContent = data.answer || `No encontramos información para el folio ${requestedFolio}. Verifica que esté escrito tal como aparece en tu comprobante.`;
+      result.textContent = data.answer || `No encontramos información para el número de pedido ${requestedOrder}. Verifica que esté escrito tal como aparece en tu comprobante.`;
       return;
     }
 
     const first = items[0] || {};
-    const folio = first.Folio || data.folio || data.order || requestedFolio;
-    const orden = first['Orden de compra'] || '';
+    const orderNo = first['Orden de compra'] || data.order || data.folio || requestedOrder;
     const columns = ['Orden de compra', 'SKU de producto', 'Cantidad', 'Total', 'Paquetería', 'Guía'];
 
     result.className = 'mf-order-result mf-order-success';
     result.innerHTML = `
       <div class="mf-order-title">
-        <strong>Pedido correspondiente al folio: ${escapeHtml(folio)}</strong>
-        ${orden ? `<span>Orden de compra: ${escapeHtml(orden)}</span>` : ''}
+        <strong>Pedido correspondiente al pedido: ${escapeHtml(orderNo)}</strong>
+        <span>Consulta por ORDEN_COMPRA</span>
       </div>
       <div class="mf-table-scroll">
         <table class="mf-order-table">
