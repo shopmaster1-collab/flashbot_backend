@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Endpoints opcionales de pedidos por FOLIO.
+"""Endpoints opcionales de pedidos por ORDEN_COMPRA.
 
 El endpoint principal del proyecto está en app.py como POST /api/orders.
 Este blueprint queda actualizado por compatibilidad con instalaciones que lo
@@ -15,7 +15,8 @@ try:
         DEFAULT_ORDERS_PUBHTML_URL,
         OrdersSheetReader,
         detect_order_number,
-        folio_key,
+        looks_like_bare_order,
+        order_key,
         render_vertical_md,
     )
 except Exception:  # pragma: no cover - fallback defensivo para despliegue
@@ -25,10 +26,13 @@ except Exception:  # pragma: no cover - fallback defensivo para despliegue
     def detect_order_number(text):
         return None
 
-    def folio_key(text):
+    def looks_like_bare_order(text):
+        return bool(str(text or "").strip())
+
+    def order_key(text):
         return str(text or "").strip()
 
-    def render_vertical_md(rows):
+    def render_vertical_md(rows, requested_order=""):
         return "Sin renderer disponible."
 
 
@@ -48,23 +52,31 @@ else:
 
 @bp_orders.post("/api/orders/status")
 def order_status():
-    """Consulta de estatus por folio.
+    """Consulta de estatus por número de pedido / ORDEN_COMPRA.
 
-    Body aceptado: {"folio":"A1BC3"}, {"order":"A1BC3"} u {"order_no":"A1BC3"}.
+    Body aceptado: {"order":"702-..."}, {"orden":"..."}, {"order_no":"..."},
+    {"folio":"..."} o {"message":"mi pedido es ..."}.
     """
     if _reader is None:
         return jsonify({"ok": False, "error": "Orders module not ready."}), 500
 
     data = request.get_json(silent=True) or {}
-    raw = (data.get("folio") or data.get("order") or data.get("order_no") or data.get("message") or "")
+    raw = (
+        data.get("order") or
+        data.get("orden") or
+        data.get("order_no") or
+        data.get("folio") or
+        data.get("message") or
+        ""
+    )
     raw = str(raw).strip()
-    folio = detect_order_number(raw) or raw
+    order_no = raw if looks_like_bare_order(raw) else (detect_order_number(raw) or raw)
 
-    if not folio_key(folio):
-        return jsonify({"ok": False, "error": "Folio inválido."}), 400
+    if not order_key(order_no):
+        return jsonify({"ok": False, "error": "Número de pedido inválido."}), 400
 
     try:
-        rows = _reader.find_by_folio(folio)
+        rows = _reader.find_by_order(order_no)
     except Exception as exc:
         logging.exception("orders lookup failed: %s", exc)
         return jsonify({"ok": False, "error": "Error consultando el reporte de pedidos."}), 500
@@ -72,16 +84,16 @@ def order_status():
     if not rows:
         return jsonify({
             "ok": True,
-            "folio": folio,
-            "answer": f"No encontramos información para el folio {folio}.",
+            "order": order_no,
+            "answer": f"No encontramos información para el número de pedido {order_no}.",
             "rows_count": 0,
             "items": [],
         })
 
     return jsonify({
         "ok": True,
-        "folio": folio,
-        "answer": render_vertical_md(rows),
+        "order": order_no,
+        "answer": render_vertical_md(rows, order_no),
         "rows_count": len(rows),
         "items": rows,
     })
