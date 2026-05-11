@@ -1,10 +1,19 @@
-# Widget flotante Master / Flashbot
+# Widget flotante Master / Maxter
 
 Este widget crea una ventana flotante con tres secciones independientes:
 
 1. **Chat**: usa el backend `/api/chat`, conectado al flujo de catálogo/DeepSeek.
 2. **Voz**: monta dentro del widget el componente oficial de ElevenLabs ConvAI con el agente `agent_0801k6azj1rxe3arwjrs5y4rsrk4`.
-3. **Pedidos**: usa el backend `/api/orders`, consulta la hoja pública de Google Sheets por columna `FOLIO` y devuelve una tabla ordenada.
+3. **Pedidos**: usa el backend `/api/orders`, consulta la hoja pública de Google Sheets por columna **`ORDEN_COMPRA`** y devuelve una tabla ordenada.
+
+## Cambios visuales y funcionales
+
+- Header: **Tu Asistente Maxter**.
+- Mensaje inicial de Chat: **¡Hola! Soy tu asistente inteligente Maxter. ¿En qué puedo ayudarte hoy?**
+- Pestaña **Pedidos** con vista propia y diseño diferenciado.
+- Mensaje de Pedidos: **¿Necesitas saber el estatus de tu pedido? Escribe tu Número de Pedido.**
+- El input de Pedidos envía `{ "order": "..." }` a `/api/orders`.
+- No se recortan órdenes con guiones, puntos, letras o `#`.
 
 ## Corrección importante para Shopify
 
@@ -25,7 +34,7 @@ Pega este bloque antes de `</body>` en el theme de Shopify:
 </script>
 <script
   defer
-  src="https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_2"
+  src="https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_3"
   data-backend="https://flashbot-backend-25b6.onrender.com"
   data-agent-id="agent_0801k6azj1rxe3arwjrs5y4rsrk4">
 </script>
@@ -46,7 +55,7 @@ También puedes validar el backend desde el navegador:
 
 ```text
 https://flashbot-backend-25b6.onrender.com/health
-https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_2
+https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_3
 ```
 
 ## ElevenLabs usado internamente
