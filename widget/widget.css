@@ -12,6 +12,9 @@
 .mf-root,
 .mf-root *{ box-sizing:border-box; }
 
+.mf-root [hidden],
+.mf-view-hidden{ display:none!important; }
+
 .mf-root{
   font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
   color:var(--mf-ink);
@@ -138,6 +141,9 @@
 .mf-chat-view,
 .mf-voice-view,
 .mf-orders-view{ height:100%; }
+.mf-root[data-active-tab="chat"] .mf-chat-view{ display:flex!important; }
+.mf-root[data-active-tab="voice"] .mf-voice-view{ display:block!important; }
+.mf-root[data-active-tab="orders"] .mf-orders-view{ display:block!important; }
 .mf-chat-view{ display:flex; flex-direction:column; min-height:0; }
 
 .mf-body{
