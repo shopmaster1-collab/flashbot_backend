@@ -1,20 +1,28 @@
-# Flashbot Backend + Widget Master
+# Flashbot Backend + Widget Master / Maxter
 
 Proyecto actualizado para usar un chatbot flotante en `master.com.mx` con tres secciones separadas:
 
 - **Chat**: flujo de texto conectado a `/api/chat` y DeepSeek/catálogo.
 - **Voz**: widget oficial de ElevenLabs ConvAI montado dentro del panel, agente `agent_0801k6azj1rxe3arwjrs5y4rsrk4`.
-- **Pedidos**: consulta independiente a `/api/orders`, buscando en Google Sheets por la columna `FOLIO`.
+- **Pedidos**: consulta independiente a `/api/orders`, buscando en Google Sheets por la columna **`ORDEN_COMPRA`**.
 
 ## Cambios clave de esta versión
 
-- El widget ya no depende de que el theme de Shopify cargue ElevenLabs por separado.
+- Header del widget actualizado a **Tu Asistente Maxter**.
+- Mensaje inicial actualizado a: **¡Hola! Soy tu asistente inteligente Maxter. ¿En qué puedo ayudarte hoy?**
+- La pestaña **Pedidos** ahora se muestra como una vista visualmente distinta del Chat.
+- El texto de Pedidos es: **¿Necesitas saber el estatus de tu pedido? Escribe tu Número de Pedido.**
+- `/api/orders` ya no recorta pedidos con guiones. Conserva completos valores como:
+  - `702-7300318-1033843`
+  - `2000012817687573`
+  - `v44851776ekt-01`
+  - `#9188.307766427-A`
+- La búsqueda principal se realiza en `ORDEN_COMPRA`.
+- Se agregaron alias de compatibilidad como `DE_ORDEN`, `ORDER_ID`, `PEDIDO` y fallback a `FOLIO` si no existe columna de orden.
+- La lectura de Google Sheets ahora intenta varias rutas: `pubhtml`, `pub?output=csv` y `gviz/tq?tqx=out:csv`.
+- `/api/admin/orders-ping` devuelve `attempts`, `source_url`, `headers`, `rows_count` y `search_columns` para diagnóstico.
 - `widget.js` monta `<elevenlabs-convai>` únicamente cuando el usuario entra a la pestaña **Voz**.
-- Se agregaron `clientTools` de ElevenLabs dentro del widget para mostrar tarjetas de producto sin usar scripts externos en Shopify.
-- Se agregaron timeouts y mensajes claros si Render tarda o el backend no responde.
-- Se agregó CSS crítico de respaldo si `widget.css` no carga.
-- Se cambió la caché de archivos `/widget/*` a `no-store` para evitar que Shopify o el navegador usen una versión antigua durante correcciones.
-- Se agregó `/api/health` además de `/health`.
+- Se mantiene `Cache-Control: no-store` para evitar caché agresiva en Shopify durante correcciones.
 
 ## Variables recomendadas en Render
 
@@ -45,7 +53,7 @@ Pegar antes del cierre de `</body>`:
 </script>
 <script
   defer
-  src="https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_2"
+  src="https://flashbot-backend-25b6.onrender.com/widget/widget.js?v=20260511_3"
   data-backend="https://flashbot-backend-25b6.onrender.com"
   data-agent-id="agent_0801k6azj1rxe3arwjrs5y4rsrk4">
 </script>
@@ -66,22 +74,40 @@ No agregues este bloque por separado, porque ahora lo administra `widget.js`:
 - `POST /api/chat`
 - `POST /api/orders`
 - `GET /api/admin/orders-ping`
-- `GET /api/admin/orders-find?folio=TU_FOLIO`
+- `GET /api/admin/orders-find?order=TU_ORDEN_COMPRA`
 
 ## Respuesta de pedidos
 
 `POST /api/orders` acepta:
 
 ```json
-{ "folio": "A1BC3" }
+{ "order": "702-7300318-1033843" }
 ```
 
 y devuelve `items` con:
 
-- `Folio`
 - `Orden de compra`
 - `SKU de producto`
 - `Cantidad`
 - `Total`
 - `Paquetería`
 - `Guía`
+
+## Pruebas recomendadas en PowerShell
+
+```powershell
+Invoke-RestMethod `
+  -Uri "https://flashbot-backend-25b6.onrender.com/api/admin/orders-ping" `
+  -Method Get `
+  -Headers @{ "X-Admin-Secret" = "TU_SECRET_REAL" }
+```
+
+```powershell
+$body = @{ order = "702-7300318-1033843" } | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Uri "https://flashbot-backend-25b6.onrender.com/api/orders" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
+```
