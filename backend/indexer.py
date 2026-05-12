@@ -880,6 +880,8 @@ class CatalogIndexer:
                 "product_type": it["product_type"],
                 "product_url": product_url,
                 "buy_url": buy_url,
+                "variant_id": v.get("variant_id"),
+                "sku": v.get("sku"),
                 "variant": v,
             })
 
@@ -895,6 +897,7 @@ class CatalogIndexer:
                 "title": it["title"],
                 "price": v["price"],
                 "sku": v.get("sku"),
+                "variant_id": v.get("variant_id"),
                 "compare_at_price": v.get("compare_at_price"),
                 "product_url": it["product_url"],
                 "buy_url": it["buy_url"],

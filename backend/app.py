@@ -216,10 +216,14 @@ def _cards_from_items(items):
         v=it["variant"]
         cards.append({
             "title": it["title"],
+            "handle": it.get("handle"),
+            "sku": v.get("sku"),
+            "variant_id": v.get("variant_id"),
             "image": it["image"],
             "price": money(v.get("price")) if v.get("price") is not None else None,
             "compare_at_price": money(v.get("compare_at_price")) if v.get("compare_at_price") else None,
-            "buy_url": it["buy_url"], "product_url": it["product_url"],
+            "buy_url": it["buy_url"],
+            "product_url": it["product_url"],
             "inventory": v.get("inventory"),
         })
     return cards
@@ -229,6 +233,7 @@ def _plain_items(items):
     for it in items:
         v=it["variant"]
         out.append({"title": it.get("title"), "sku": v.get("sku"),
+                    "variant_id": v.get("variant_id"),
                     "price": money(v.get("price")) if v.get("price") is not None else None,
                     "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
     return out
