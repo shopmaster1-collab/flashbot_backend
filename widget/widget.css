@@ -257,6 +257,7 @@
 .mf-product-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .mf-product-actions a{ text-decoration:none; font-size:12px; font-weight:800; }
 .mf-buy{ padding:7px 10px; border-radius:999px; color:#fff; background:var(--mf-success); }
+.mf-buy[aria-disabled="true"]{ opacity:.72; pointer-events:none; }
 .mf-view{ color:#334155; text-decoration:underline!important; }
 .mf-product-inv{ margin:8px 0 0; color:#64748B; font-size:11.5px; line-height:1.35; }
 
