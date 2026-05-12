@@ -532,7 +532,10 @@ class CatalogIndexer:
             "pantalla": ["tv","televisor","monitor","television"],
             "televisor": ["tv","pantalla","monitor","television","tele"],
             "television": ["tv","televisor","pantalla","tele"],
-            "soporte": ["base","bracket","montaje","mount","pared","techo","mural"],
+            "soporte": ["base","bracket","montaje","mount","pared","techo","mural","vesa","televisor","pantalla"],
+            "vesa": ["soporte","pantalla","tv","televisor","montaje","bracket","mount"],
+            "pulgadas": ["pulgada","pantalla","tv","televisor","soporte"],
+            "pulgada": ["pulgadas","pantalla","tv","televisor","soporte"],
             
             # ============== DECODIFICADORES Y TV DIGITAL (NUEVO) ==============
             "decodificador": ["decoder","receptor","sintonizador","tdt","isdb-t","dtv","digital","señal","convertidor","conversor","mv-tdtplus","tdtplus"],
@@ -600,7 +603,10 @@ class CatalogIndexer:
             "medidor": ["sensor","detector","monitor","monitore"],
             "movimiento": ["pir"],
             # agua / nivel
-            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna"],
+            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna","deposito","depósito","sensor"],
+            "cisterna": ["agua","nivel","water","tinaco","deposito","depósito","sensor","medidor"],
+            "tinaco": ["agua","nivel","water","cisterna","deposito","depósito","sensor","medidor"],
+            "nivel": ["sensor","medidor","agua","gas","tinaco","cisterna"],
 
             # ---------------- GAS (mejorado) ----------------
             "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen","gassensor","gas-sensor"],
@@ -626,6 +632,7 @@ class CatalogIndexer:
         COMBOS = [
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
+            ({"soporte","bracket","mount","base"}, {"vesa","pulgadas","pulgada","televisor","television"}, 45),
             ({"sensor","detector","sonda","medidor"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
 
             # ============== COMBOS PARA ANTENAS ESPECÍFICAS (NUEVO) ==============

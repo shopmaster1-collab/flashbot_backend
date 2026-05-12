@@ -8,6 +8,19 @@ from dotenv import load_dotenv
 from .shopify_client import ShopifyClient
 from .indexer import CatalogIndexer
 try:
+    from .catalog_intelligence import (
+        analyze_query as _ci_analyze_query,
+        build_search_queries as _ci_build_search_queries,
+        apply_catalog_intelligence as _ci_apply_catalog_intelligence,
+        build_catalog_answer as _ci_build_catalog_answer,
+    )
+except Exception as _ci_import_error:
+    print(f"[WARN] catalog_intelligence disabled: {_ci_import_error}", flush=True)
+    _ci_analyze_query = None
+    _ci_build_search_queries = None
+    _ci_apply_catalog_intelligence = None
+    _ci_build_catalog_answer = None
+try:
     from .utils import money  # si existe
 except Exception:
     def money(x):  # fallback seguro
@@ -225,6 +238,8 @@ def _cards_from_items(items):
             "buy_url": it["buy_url"],
             "product_url": it["product_url"],
             "inventory": v.get("inventory"),
+            "compatibility": it.get("compatibility") or {},
+            "catalog_specs": it.get("catalog_specs") or {},
         })
     return cards
 
@@ -235,8 +250,49 @@ def _plain_items(items):
         out.append({"title": it.get("title"), "sku": v.get("sku"),
                     "variant_id": v.get("variant_id"),
                     "price": money(v.get("price")) if v.get("price") is not None else None,
-                    "product_url": it.get("product_url"), "buy_url": it.get("buy_url")})
+                    "product_url": it.get("product_url"), "buy_url": it.get("buy_url"),
+                    "compatibility": it.get("compatibility"),
+                    "catalog_specs": it.get("catalog_specs")})
     return out
+
+def _merge_unique_items(*groups):
+    """Une resultados de varias búsquedas sin duplicar productos."""
+    out=[]; seen=set()
+    for group in groups:
+        for it in group or []:
+            key = it.get("id") or it.get("handle") or it.get("title")
+            if key in seen:
+                continue
+            seen.add(key); out.append(it)
+    return out
+
+def _search_catalog_candidates(query: str, max_search: int = 200):
+    """Busca candidatos ampliando términos cuando hay filtros técnicos."""
+    if _ci_analyze_query and _ci_build_search_queries:
+        try:
+            analysis = _ci_analyze_query(query)
+            queries = _ci_build_search_queries(query, analysis)
+        except Exception as e:
+            print(f"[WARN] catalog intelligence query analysis failed: {e}", flush=True)
+            analysis = None; queries = [query]
+    else:
+        analysis = None; queries = [query]
+    groups=[]
+    for q in queries:
+        try:
+            groups.append(indexer.search(q, k=max_search))
+        except Exception as e:
+            print(f"[WARN] indexer search failed for '{q}': {e}", flush=True)
+    return _merge_unique_items(*groups), analysis
+
+def _apply_catalog_intelligence_safe(query: str, items: list):
+    if not _ci_apply_catalog_intelligence:
+        return items, {"analysis": None, "technical_filter_applied": False, "filtered_out": 0, "notes": []}
+    try:
+        return _ci_apply_catalog_intelligence(query, items)
+    except Exception as e:
+        print(f"[WARN] catalog intelligence ranking failed: {e}", flush=True)
+        return items, {"analysis": None, "technical_filter_applied": False, "filtered_out": 0, "notes": []}
 
 # ---------- Señales / familias (idéntico enfoque) ----------
 _WATER_ALLOW_FAMILIES = [
@@ -1007,11 +1063,12 @@ def chat():
         print(f"[WARN] order-status pipeline error: {e}", flush=True)
     # ---------- FIN desvío de pedidos ----------
 
-    # Flujo normal de productos (INTACTO)
+    # Flujo normal de productos + inteligencia técnica de catálogo.
     max_search = 200
-    all_items=indexer.search(query, k=max_search)
+    all_items, query_analysis = _search_catalog_candidates(query, max_search=max_search)
     all_items=_apply_intent_rerank(query, all_items)
     all_items=_enforce_intent_gate(query, all_items)
+    all_items, compatibility_context = _apply_catalog_intelligence_safe(query, all_items)
     total_count=len(all_items)
 
     if not all_items:
@@ -1036,10 +1093,17 @@ def chat():
 
     cards=_cards_from_items(items)
     answer=_generate_contextual_answer(query, items, total_count, page, per_page)
+    if _ci_build_catalog_answer:
+        try:
+            smart_answer = _ci_build_catalog_answer(query, items, total_count, page, per_page, compatibility_context)
+            if smart_answer:
+                answer = smart_answer
+        except Exception as e:
+            print(f"[WARN] catalog intelligence answer failed: {e}", flush=True)
     if deeps and len(answer) > 50:
         try:
             enhanced_answer = deeps.chat(
-                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén toda la información técnica y de productos, pero hazla más conversacional y amigable. No inventes datos.",
+                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén intactos los criterios de compatibilidad técnica, advertencias y recomendaciones. No inventes precios, existencias ni características que no estén en el texto recibido.",
                 answer
             )
             if enhanced_answer and len(enhanced_answer) > 40:
@@ -1123,9 +1187,10 @@ def admin_diag():
 def admin_preview():
     if not _admin_ok(request): return jsonify({"ok":False,"error":"unauthorized"}), 401
     q=(request.args.get("q") or "").strip(); k=int(request.args.get("k") or 12)
-    items=indexer.search(q, k=max(k,90))
+    items, _analysis = _search_catalog_candidates(q, max_search=max(k,90))
     items=_apply_intent_rerank(q, items)
     items=_enforce_intent_gate(q, items)
+    items, _compatibility_context = _apply_catalog_intelligence_safe(q, items)
     items=items[:k]
     return {"q": q, "k": k, "items": _plain_items(items)}
 
