@@ -319,7 +319,7 @@ _CATALOG_ATTRIBUTE_ONLY = {
     "techo", "pared", "muro", "piso", "mesa", "grande", "chico", "pequeno", "pequeño", "larga", "largo",
     "corto", "corta", "wifi", "inalambrico", "inalámbrico", "bluetooth", "app", "alexa", "google",
     "smart", "inteligente", "digital", "analogico", "analógico", "nuevo", "nueva", "compatible",
-    "universal", "casa", "oficina", "hotel", "negocio", "exterior", "interior", "local", "remoto", "pulgada", "pulgadas", "inch", "inches", "nivel", "tanque", "deposito", "depósito"
+    "universal", "casa", "oficina", "hotel", "negocio", "exterior", "interior", "local", "remoto", "pulgada", "pulgadas", "inch", "inches", "nivel", "tanque", "deposito", "depósito", "pantalla", "pantallas", "tv", "televisor", "televisores", "television", "televisión", "senal", "señal", "digital"
 }
 
 _CATALOG_KNOWN_BRANDS = {"lg", "hp", "sony", "samsung", "tcl", "hisense", "roku", "panasonic", "daewoo", "philips", "sharp", "vizio", "xiaomi"}
@@ -338,6 +338,10 @@ _CATALOG_FAMILY_RULES = {
         "query_any": {"soporte", "soportes", "base", "bases", "bracket", "mount", "montaje", "vesa"},
         "item_any": {"soporte", "bracket", "mount", "montaje", "vesa", "pantalla", "televisor", "television", "tv"},
     },
+    "support_projector": {
+        "query_any": {"proyector", "proyectores", "projector"},
+        "item_any": {"proyector", "proyectores", "projector"},
+    },
     "antenna": {
         "query_any": {"antena", "antenas", "tvant", "uhf", "vhf"},
         "item_any": {"antena", "antenas", "tvant", "uhf", "vhf"},
@@ -347,20 +351,31 @@ _CATALOG_FAMILY_RULES = {
         "item_any": {"control", "controles", "remoto", "remotos", "mando", "atscontrol"},
     },
     "decoder": {
-        "query_any": {"decodificador", "decodificadores", "decoder", "receptor", "sintonizador", "tdt", "isdb", "dtv", "convertidor", "conversor"},
-        "item_any": {"decodificador", "decoder", "receptor", "sintonizador", "tdt", "isdb", "dtv", "tdtplus", "mv-tdtplus", "atscontrol"},
+        # Convertidor/conversor sólo se trata como decodificador cuando el texto
+        # también menciona TV/señal/TDT. Esto evita confundir adaptadores USB-C,
+        # convertidores de audio o cables con decodificadores de televisión.
+        "query_any": {"decodificador", "decodificadores", "decoder", "receptor", "sintonizador", "tdt", "isdb", "dtv"},
+        "item_any": {"decodificador", "decoder", "receptor", "sintonizador", "tdt", "isdb", "dtv", "tdtplus", "mv-tdtplus"},
     },
     "cable_connector": {
-        "query_any": {"cable", "cables", "cordon", "cordón", "hdmi", "rca", "vga", "coaxial", "adaptador", "adaptadores", "conector", "conectores", "plug", "jack", "splitter", "divisor", "divisores", "switch", "selector"},
-        "item_any": {"cable", "cordon", "hdmi", "rca", "vga", "coaxial", "adaptador", "conector", "plug", "jack", "splitter", "divisor", "switch", "selector", "1x2", "1x4"},
+        "query_any": {"cable", "cables", "cordon", "cordón", "hdmi", "usb", "rca", "aux", "vga", "coaxial", "rg6", "rg59", "adaptador", "adaptadores", "conector", "conectores", "plug", "jack", "splitter", "divisor", "divisores", "switch", "selector"},
+        "item_any": {"cable", "cordon", "hdmi", "usb", "tipo-c", "tipo c", "type-c", "type c", "rca", "aux", "vga", "coaxial", "rg6", "rg59", "adaptador", "conector", "plug", "jack", "splitter", "divisor", "switch", "selector", "1x2", "1x4"},
     },
     "sensor_water": {
-        "query_any": {"agua", "tinaco", "tinacos", "cisterna", "cisternas", "fuga", "fugas", "inundacion", "inundación", "boya", "flotador", "water"},
-        "item_any": {"agua", "tinaco", "tinacos", "cisterna", "cisternas", "water", "iot-water", "easy-water", "connect-water", "waterv", "waterultra"},
+        "query_any": {"agua", "tinaco", "tinacos", "cisterna", "cisternas", "fuga", "fugas", "inundacion", "inundación", "boya", "flotador", "electronivel", "electroniveles", "ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "presion", "presión", "water"},
+        "item_any": {"agua", "tinaco", "tinacos", "cisterna", "cisternas", "water", "iot-water", "easy-water", "connect-water", "waterv", "waterultra", "waterp", "electronivel", "flotador", "boya", "presion", "ultrasonico"},
     },
     "sensor_gas": {
         "query_any": {"gas", "gassensor", "gasensor", "lp", "propano", "butano", "estacionario", "estacionaria"},
         "item_any": {"gas", "gassensor", "gasensor", "lp", "propano", "butano", "estacionario", "easy-gas", "connect-gas", "iot-gassensor"},
+    },
+    "sensor_environmental": {
+        "query_any": {"ambiental", "ambientales", "ambiente", "temperatura", "humedad", "humo", "co2", "monoxido", "monóxido", "lluvia", "rain", "aire"},
+        "item_any": {"ambiental", "ambiente", "temperatura", "humedad", "humo", "co2", "monoxido", "lluvia", "rain", "aire"},
+    },
+    "sensor_arduino": {
+        "query_any": {"arduino", "raspberry", "prototipo", "prototipos", "robotica", "robótica"},
+        "item_any": {"arduino", "raspberry", "prototipo", "robotica", "robótica", "maker"},
     },
     "sensor_general": {
         "query_any": {"sensor", "sensores", "detector", "detectores", "medidor", "medidores", "modulo", "módulo", "iot"},
@@ -383,6 +398,16 @@ _CATALOG_FAMILY_RULES = {
         "item_any": {"router", "modem", "módem", "repetidor", "extensor", "internet", "ethernet", "rj45", "red"},
     },
 }
+
+# Marcas comunes de televisión/pantalla. Se usan para no mostrar controles de
+# marcas distintas cuando el cliente pide explícitamente una marca.
+_CATALOG_TV_BRANDS = {
+    "lg", "sony", "samsung", "tcl", "hisense", "roku", "panasonic", "daewoo",
+    "philips", "sharp", "vizio", "xiaomi", "sansui", "atvio", "jvc", "rca",
+    "toshiba", "aoc", "hyundai", "onn", "sanyo", "benq", "epson"
+}
+
+_ANTENNA_CLARIFICATION_MESSAGE = "Contamos con antenas para interiores y para exteriores. ¿De qué tipo requieres?"
 
 
 def _catalog_norm(value: str) -> str:
@@ -418,6 +443,239 @@ def _catalog_item_text(it: dict, include_body: bool = False) -> str:
     return _catalog_norm(" ".join(str(x) for x in parts if x))
 
 
+def _query_has_any(qn: str, terms: set[str] | list[str] | tuple[str, ...]) -> bool:
+    return any(term in qn for term in terms)
+
+
+def _detect_catalog_constraints(query: str) -> dict:
+    """Detecta subintenciones que deben respetarse de forma estricta."""
+    qn = _catalog_norm(query)
+    tokens = set(_catalog_tokens(query))
+    constraints: dict = {}
+
+    # Antenas: interior vs exterior. Si la consulta sólo dice "antena", el chat
+    # debe preguntar antes de mostrar tarjetas para no mezclar ambas familias.
+    has_antenna = _query_has_any(qn, ["antena", "antenas", "tvant"])
+    cable_context = _query_has_any(qn, ["cable", "coaxial", "rg6", "rg59", "conector", "plug", "adaptador"])
+    if has_antenna and not cable_context:
+        interior_terms = {"interior", "interiores", "interna", "internas", "indoor", "adentro", "dentro", "habitacion", "habitación", "recamara", "recámara", "cuarto", "departamento"}
+        exterior_terms = {"exterior", "exteriores", "externa", "externas", "outdoor", "afuera", "azotea", "techo", "tejado", "intemperie", "fachada", "muro", "pared exterior"}
+        if _query_has_any(qn, exterior_terms):
+            constraints["antenna_type"] = "exterior"
+        elif _query_has_any(qn, interior_terms):
+            constraints["antenna_type"] = "interior"
+        else:
+            constraints["antenna_needs_clarification"] = True
+
+    # Soportes para pantalla/proyector: techo, fijo, articulado, inclinable y proyector.
+    has_support = _query_has_any(qn, ["soporte", "soportes", "base", "bases", "bracket", "mount", "montaje", "vesa"])
+    if has_support:
+        if _query_has_any(qn, ["proyector", "proyectores", "projector"]):
+            constraints["support_kind"] = "projector"
+        elif _query_has_any(qn, ["techo", "ceiling"]):
+            constraints["support_kind"] = "ceiling"
+        elif _query_has_any(qn, ["articulado", "articulada", "articulable", "brazo", "brazos", "extendible", "movil", "móvil", "movimiento", "full motion"]):
+            constraints["support_kind"] = "articulated"
+        elif _query_has_any(qn, ["fijo", "fija", "fixed"]):
+            constraints["support_kind"] = "fixed"
+        elif _query_has_any(qn, ["inclinable", "inclinacion", "inclinación", "tilt", "tilting"]):
+            constraints["support_kind"] = "tilt"
+
+    # Controles remotos: marca específica y control para TV vs control de decodificador.
+    remote_terms = {"control", "controles", "remoto", "remotos", "mando", "mandos"}
+    if tokens & remote_terms:
+        brands = sorted({brand for brand in _CATALOG_TV_BRANDS if re.search(rf"\b{re.escape(brand)}\b", qn)})
+        if brands:
+            constraints["remote_brand"] = brands[0]
+        if _query_has_any(qn, ["pantalla", "pantallas", "tv", "televisor", "television", "televisión"]):
+            constraints["remote_kind"] = "tv"
+        elif _query_has_any(qn, ["decodificador", "decoder", "tdt", "sintonizador"]):
+            constraints["remote_kind"] = "decoder"
+
+    # Decodificador: sólo TV/señal/TDT. No debe arrastrar audio, cables, controles o adaptadores.
+    decoder_core = _query_has_any(qn, ["decodificador", "decodificadores", "decoder", "sintonizador", "tdt", "isdb", "dtv"])
+    converter_tv = _query_has_any(qn, ["convertidor", "conversor", "receptor"]) and _query_has_any(qn, ["tv", "televisor", "television", "televisión", "pantalla", "senal", "señal", "tdt", "digital"])
+    if (decoder_core or converter_tv) and not (tokens & remote_terms):
+        constraints["decoder_type"] = "tv"
+
+    # Cables: tipo específico solicitado.
+    cable_terms = {"cable", "cables", "cordon", "cordón", "conector", "conectores", "adaptador", "adaptadores"}
+    if tokens & cable_terms or _query_has_any(qn, ["hdmi", "usb", "tipo c", "tipo-c", "type c", "type-c", "coaxial", "rg6", "rg59", "rca", "aux", "jack", "plug"]):
+        if "hdmi" in qn:
+            constraints["cable_type"] = "hdmi"
+        elif _query_has_any(qn, ["usb", "tipo c", "tipo-c", "type c", "type-c", "micro usb", "microusb"]):
+            constraints["cable_type"] = "usb"
+        elif _query_has_any(qn, ["coaxial", "rg6", "rg59", "cable de antena", "cable para antena"]):
+            constraints["cable_type"] = "coaxial"
+        elif _query_has_any(qn, ["audio", "rca", "aux", "auxiliar", "jack", "plug", "3.5", "3 5"]):
+            constraints["cable_type"] = "audio"
+        if constraints.get("cable_type"):
+            if _query_has_any(qn, ["adaptador", "adaptadores", "convertidor", "conversor"]):
+                constraints["connection_form"] = "adapter"
+            elif _query_has_any(qn, ["divisor", "splitter", "switch", "selector", "repartidor"]):
+                constraints["connection_form"] = "distribution"
+            elif _query_has_any(qn, ["cable", "cables", "cordon", "cordón"]):
+                constraints["connection_form"] = "cable"
+
+    # Sensores: familia y tecnología. En agua general permitimos varias tecnologías;
+    # si el usuario pide una tecnología concreta, se filtra a esa tecnología.
+    has_sensor = _query_has_any(qn, ["sensor", "sensores", "detector", "detectores", "medidor", "medidores", "modulo", "módulo"])
+    if has_sensor:
+        if _query_has_any(qn, ["arduino", "raspberry", "robotica", "robótica", "maker", "prototipo"]):
+            constraints["sensor_kind"] = "arduino"
+        elif _query_has_any(qn, ["ambiental", "ambientales", "ambiente", "temperatura", "humedad", "humo", "co2", "monoxido", "monóxido", "lluvia", "calidad de aire", "aire"]):
+            constraints["sensor_kind"] = "environmental"
+        elif _query_has_any(qn, ["gas", "lp", "propano", "butano", "estacionario", "estacionaria"]):
+            constraints["sensor_kind"] = "gas"
+        elif _query_has_any(qn, ["agua", "tinaco", "cisterna", "fuga", "inundacion", "inundación", "water", "nivel", "ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "presion", "presión", "electronivel", "electroniveles"]):
+            constraints["sensor_kind"] = "water"
+
+        if constraints.get("sensor_kind") == "water" or _query_has_any(qn, ["agua", "tinaco", "cisterna", "water", "ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "presion", "presión", "electronivel", "electroniveles"]):
+            if _query_has_any(qn, ["ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "ultra", "waterultra"]):
+                constraints["sensor_water_tech"] = "ultrasonic"
+            elif _query_has_any(qn, ["presion", "presión", "pressure", "waterp"]):
+                constraints["sensor_water_tech"] = "pressure"
+            elif _query_has_any(qn, ["electronivel", "electroniveles", "electro nivel", "electro-nivel", "electro niveles", "electro-niveles", "flotador", "boya"]):
+                constraints["sensor_water_tech"] = "electronivel"
+
+    return constraints
+
+
+def _should_clarify_antenna_type(query: str) -> bool:
+    constraints = _detect_catalog_constraints(query)
+    return bool(constraints.get("antenna_needs_clarification"))
+
+
+def _antenna_clarification_payload(per_page: int = 10) -> dict:
+    return {
+        "answer": _ANTENNA_CLARIFICATION_MESSAGE,
+        "products": [],
+        "pagination": {"page": 1, "per_page": per_page, "total": 0, "total_pages": 0, "has_next": False, "has_prev": False},
+        "needs_clarification": True,
+        "clarification_type": "antenna_type",
+        "quick_replies": ["Antenas para interiores", "Antenas para exteriores"],
+    }
+
+
+def _item_has_any(text: str, terms: set[str] | list[str] | tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _item_matches_catalog_constraints(it: dict, constraints: dict) -> bool:
+    if not constraints:
+        return True
+    text = _catalog_item_text(it, include_body=True)
+    strong = _catalog_item_text(it, include_body=False)
+
+    antenna_type = constraints.get("antenna_type")
+    if antenna_type:
+        if not _item_has_any(text, ["antena", "antenas", "tvant", "uhf", "vhf"]):
+            return False
+        interior_terms = ["interior", "interna", "indoor", "tvant-int", "int-4k", "para interiores"]
+        exterior_terms = ["exterior", "externa", "outdoor", "azotea", "techo", "intemperie", "tvant-100", "tvant-16", "16elem", "aerea", "aérea", "para exteriores"]
+        if antenna_type == "interior":
+            return _item_has_any(text, interior_terms) and not (_item_has_any(strong, exterior_terms) and not _item_has_any(strong, interior_terms))
+        if antenna_type == "exterior":
+            return _item_has_any(text, exterior_terms) and not (_item_has_any(strong, interior_terms) and not _item_has_any(strong, exterior_terms))
+
+    support_kind = constraints.get("support_kind")
+    if support_kind:
+        if support_kind == "projector":
+            return _item_has_any(text, ["proyector", "proyectores", "projector"])
+        if _item_has_any(text, ["proyector", "projector"]):
+            return False
+        if not _item_has_any(text, ["soporte", "bracket", "mount", "montaje", "vesa"]):
+            return False
+        if support_kind == "ceiling":
+            return _item_has_any(text, ["techo", "ceiling"])
+        if support_kind == "articulated":
+            return _item_has_any(text, ["articulado", "articulada", "articulable", "brazo", "extendible", "movil", "móvil", "full motion"])
+        if support_kind == "fixed":
+            return _item_has_any(text, ["fijo", "fija", "fixed"]) and not _item_has_any(strong, ["articulado", "brazo", "extendible", "techo", "proyector"])
+        if support_kind == "tilt":
+            return _item_has_any(text, ["inclinable", "inclinacion", "inclinación", "tilt", "tilting"])
+
+    remote_brand = constraints.get("remote_brand")
+    if remote_brand:
+        if not _item_has_any(text, ["control", "remoto", "mando", "atscontrol"]):
+            return False
+        if remote_brand not in text:
+            return False
+    if constraints.get("remote_kind") == "tv":
+        if not _item_has_any(text, ["control", "remoto", "mando"]):
+            return False
+        if _item_has_any(strong, ["decodificador", "decoder", "tdt", "atscontrol", "sintonizador"]):
+            return False
+
+    if constraints.get("decoder_type") == "tv":
+        if not _item_has_any(text, ["decodificador", "decoder", "sintonizador", "tdt", "isdb", "dtv", "mv-tdtplus", "tdtplus"]):
+            return False
+        if _item_has_any(strong, ["audio", "bocina", "amplificador", "microfono", "micrófono"]):
+            return False
+        if _item_has_any(strong, ["cable", "adaptador", "conector", "plug", "jack", "splitter", "divisor", "switch", "control remoto", "atscontrol"]):
+            return False
+
+    cable_type = constraints.get("cable_type")
+    if cable_type:
+        form = constraints.get("connection_form")
+        if form == "cable" and _item_has_any(strong, ["splitter", "divisor", "switch", "selector", "adaptador", "conector"]):
+            return False
+        if form == "adapter" and not _item_has_any(text, ["adaptador", "convertidor", "conversor", "conector"]):
+            return False
+        if form == "distribution" and not _item_has_any(text, ["splitter", "divisor", "switch", "selector", "repartidor"]):
+            return False
+        if cable_type == "hdmi":
+            return "hdmi" in text
+        elif cable_type == "usb":
+            return _item_has_any(text, ["usb", "tipo c", "tipo-c", "type c", "type-c", "micro usb", "microusb"])
+        elif cable_type == "coaxial":
+            return _item_has_any(text, ["coaxial", "rg6", "rg59", "cable de antena", "cable para antena", "conector f"])
+        elif cable_type == "audio":
+            return _item_has_any(text, ["audio", "rca", "aux", "auxiliar", "jack", "plug", "3.5", "3 5"])
+
+    sensor_kind = constraints.get("sensor_kind")
+    if sensor_kind:
+        if sensor_kind == "water" and _item_has_any(strong, ["gas", "gassensor", "gasensor", "propano", "butano", "lp", "estacionario"]):
+            return False
+        if sensor_kind == "gas" and _item_has_any(strong, ["agua", "water", "tinaco", "cisterna", "waterv", "waterultra", "waterp"]):
+            return False
+        if sensor_kind == "environmental":
+            if not _item_has_any(text, ["ambiental", "ambiente", "temperatura", "humedad", "humo", "co2", "monoxido", "lluvia", "rain", "aire"]):
+                return False
+            if _item_has_any(strong, ["agua", "water", "tinaco", "cisterna", "gas", "gassensor"]):
+                return False
+        if sensor_kind == "arduino":
+            if not _item_has_any(text, ["arduino", "raspberry", "robotica", "robótica", "maker", "prototipo"]):
+                return False
+
+    water_tech = constraints.get("sensor_water_tech")
+    if water_tech:
+        if not _item_has_any(text, ["agua", "water", "tinaco", "cisterna", "nivel"]):
+            return False
+        if water_tech == "ultrasonic":
+            return _item_has_any(text, ["ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "waterultra", "ultra"])
+        if water_tech == "pressure":
+            return _item_has_any(text, ["presion", "presión", "pressure", "waterp"])
+        if water_tech == "electronivel":
+            return _item_has_any(text, ["electronivel", "electroniveles", "electro nivel", "electro-nivel", "electro niveles", "electro-niveles", "flotador", "boya"])
+
+    return True
+
+
+def _apply_specific_catalog_constraints(query: str, items: list) -> tuple[list, dict]:
+    constraints = _detect_catalog_constraints(query)
+    context = {"constraints": constraints, "input_count": len(items or []), "output_count": len(items or []), "rejected": False, "reason": ""}
+    # La pregunta de antenas genéricas se maneja antes del buscador, no aquí.
+    constraints = {k: v for k, v in constraints.items() if k != "antenna_needs_clarification"}
+    if not constraints or not items:
+        return items, context
+    filtered = [it for it in items if _item_matches_catalog_constraints(it, constraints)]
+    context["output_count"] = len(filtered)
+    if not filtered:
+        context.update({"rejected": True, "reason": "no_result_matches_specific_constraints"})
+    return filtered, context
+
+
 def _detect_catalog_families(query: str, analysis: dict | None = None) -> set[str]:
     tokens = set(_catalog_tokens(query))
     qn = _catalog_norm(query)
@@ -430,21 +688,62 @@ def _detect_catalog_families(query: str, analysis: dict | None = None) -> set[st
         families.add("sensor_water")
     elif intent == "gas":
         families.add("sensor_gas")
+    elif intent == "antenna":
+        families.add("antenna")
+    elif intent == "remote":
+        families.add("remote")
+    elif intent == "decoder_tv":
+        families.add("decoder")
+    elif intent == "cable":
+        families.add("cable_connector")
+    elif intent == "sensor_environmental":
+        families.add("sensor_environmental")
+    elif intent == "sensor_arduino":
+        families.add("sensor_arduino")
 
     for family, rule in _CATALOG_FAMILY_RULES.items():
         query_any = rule.get("query_any") or set()
         if tokens & query_any or any(term in qn for term in query_any if len(term) > 3):
             families.add(family)
 
+    # Convertidor/conversor/receptor es ambiguo. Sólo lo enviamos a decoder
+    # cuando hay contexto de TV, señal digital o TDT.
+    if (tokens & {"convertidor", "conversor", "receptor"}) and (
+        tokens & {"tv", "televisor", "television", "pantalla", "senal", "señal", "tdt", "digital", "dtv"}
+    ):
+        families.add("decoder")
+
     if (tokens & {"pantalla", "pantallas", "tv", "televisor", "televisores", "monitor", "monitores", "vesa"}) and (
         re.search(r"\b(1[9]|[2-9]\d|10\d|11\d|120)\b", qn) or "vesa" in tokens
     ):
         families.add("support")
 
-    # Si el usuario especifica agua o gas, no permitimos que la familia genérica
-    # "sensor" arrastre sensores de otra categoría.
-    if "sensor_gas" in families or "sensor_water" in families:
+    constraints = _detect_catalog_constraints(query)
+    if constraints.get("support_kind") == "projector":
+        families.add("support_projector")
+        families.discard("support")
+    if constraints.get("sensor_kind") == "environmental":
+        families.add("sensor_environmental")
         families.discard("sensor_general")
+    if constraints.get("sensor_kind") == "arduino":
+        families.add("sensor_arduino")
+        families.discard("sensor_general")
+    if constraints.get("decoder_type") == "tv":
+        families.add("decoder")
+    if constraints.get("cable_type"):
+        families.add("cable_connector")
+    if constraints.get("remote_brand") or constraints.get("remote_kind"):
+        families.add("remote")
+
+    # Si el usuario especifica agua, gas, ambiental o Arduino, no permitimos que
+    # la familia genérica "sensor" arrastre sensores de otra categoría.
+    if any(f in families for f in {"sensor_gas", "sensor_water", "sensor_environmental", "sensor_arduino"}):
+        families.discard("sensor_general")
+
+    # Si se pide control remoto de TV, no lo mezcles con decodificadores por la
+    # presencia de SKUs como ATSCONTROL.
+    if constraints.get("remote_kind") == "tv":
+        families.discard("decoder")
 
     return families
 
@@ -528,13 +827,21 @@ def _apply_strict_catalog_guard(query: str, items: list, analysis: dict | None =
         context["output_count"] = len(filtered)
         if not filtered:
             context.update({"rejected": True, "reason": "no_result_matches_detected_family"})
-        return filtered, context
+            return [], context
+        constrained, constraint_context = _apply_specific_catalog_constraints(query, filtered)
+        context["specific_constraints"] = constraint_context
+        context["output_count"] = len(constrained)
+        if not constrained:
+            context.update({"rejected": True, "reason": constraint_context.get("reason") or "no_result_matches_specific_constraints"})
+        return constrained, context
 
     filtered = [it for it in items if _has_direct_product_match(tokens, it)]
-    context["output_count"] = len(filtered)
-    if not filtered:
-        context.update({"rejected": True, "reason": "no_direct_catalog_match"})
-    return filtered, context
+    constrained, constraint_context = _apply_specific_catalog_constraints(query, filtered)
+    context["specific_constraints"] = constraint_context
+    context["output_count"] = len(constrained)
+    if not constrained:
+        context.update({"rejected": True, "reason": constraint_context.get("reason") or "no_direct_catalog_match"})
+    return constrained, context
 
 
 def _catalog_no_match_payload(per_page: int = 10):
@@ -1312,6 +1619,11 @@ def chat():
     except Exception as e:
         print(f"[WARN] order-status pipeline error: {e}", flush=True)
     # ---------- FIN desvío de pedidos ----------
+
+    # Antenas genéricas: si no especifica interior/exterior, preguntamos antes
+    # de mostrar productos para evitar mezclar familias incompatibles.
+    if _should_clarify_antenna_type(query):
+        return jsonify(_antenna_clarification_payload(per_page))
 
     # Flujo normal de productos + inteligencia técnica de catálogo.
     max_search = 200

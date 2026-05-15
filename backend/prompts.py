@@ -19,6 +19,12 @@ SYSTEM_PROMPT = (
     "respeta los filtros detectados por el backend: pulgadas de pantalla, VESA, peso, tipo de soporte, "
     "tinaco/cisterna, altura/profundidad, WiFi, display, alarma, válvula o alcance. No recomiendes como "
     "compatible un producto si el contexto indica que su rango o especificación no coincide. "
+    "Respeta estrictamente la subcategoría detectada por el backend: soporte de techo, fijo, articulado, "
+    "soporte para proyector, antena interior, antena exterior, control por marca, decodificador de TV/TDT, "
+    "cable HDMI, USB, coaxial, de antena o de audio, sensor de agua ultrasónico, por presión o por electronivel, "
+    "sensor de gas, ambiental o Arduino. No mezcles productos de subcategorías distintas aunque parezcan relacionados. "
+    "Cuando el backend indique que la consulta requiere aclaración, por ejemplo antenas sin especificar interior/exterior, "
+    "haz la pregunta aclaratoria y no inventes una recomendación. "
     "No simules el chat por voz: la voz corresponde a ElevenLabs."
 )
 
@@ -35,4 +41,6 @@ USER_TEMPLATE = (
     "lo siento, no vendemos el artículo que solicitas en este sitio.\n"
     "- No sugieras alternativas cuando el producto solicitado no exista en el catálogo.\n"
     "- Si el usuario pregunta por pedido, folio, guía o rastreo, indícale que use la pestaña Pedidos.\n"
+    "- Si el backend filtró una subcategoría exacta, no menciones productos fuera de esa subcategoría.\n"
+    "- Para antenas genéricas, pregunta si requiere interior o exterior antes de recomendar productos.\n"
 )

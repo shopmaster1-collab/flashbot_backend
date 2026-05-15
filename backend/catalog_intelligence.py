@@ -79,20 +79,46 @@ def analyze_query(query: str) -> Dict[str, Any]:
     """Extrae intención y parámetros técnicos de la pregunta del usuario."""
     q = query or ""
     qn = norm_text(q)
+    tokens = set(re.findall(r"[a-z0-9]+", qn))
 
-    support_words = ["soporte", "base", "bracket", "mount", "montaje", "pared", "techo", "piso"]
-    tv_words = ["pantalla", "tv", "televisor", "television", "monitor", "vesa"]
+    support_words = ["soporte", "soportes", "base", "bases", "bracket", "mount", "montaje", "pared", "techo", "piso", "vesa"]
+    tv_words = ["pantalla", "pantallas", "tv", "televisor", "televisores", "television", "monitor", "vesa"]
+    projector_words = ["proyector", "proyectores", "projector"]
     # "nivel" por sí solo no debe forzar agua, porque consultas como
     # "nivel de gas" son de gas. Agua requiere una señal específica.
-    water_words = ["agua", "tinaco", "cisterna", "tanque de agua", "water", "fuga", "inundacion", "inundación", "boya", "flotador"]
+    water_words = ["agua", "tinaco", "tinacos", "cisterna", "cisternas", "tanque de agua", "water", "fuga", "fugas", "inundacion", "inundación", "boya", "flotador", "ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "presion", "presión", "electronivel", "electroniveles"]
     gas_words = ["gas", "lp", "propano", "butano", "estacionario", "estacionaria", "gassensor", "gasensor", "tanque estacionario"]
+    antenna_words = ["antena", "antenas", "tvant", "uhf", "vhf"]
+    remote_words = ["control", "controles", "remoto", "remotos", "mando", "mandos"]
+    decoder_words = ["decodificador", "decodificadores", "decoder", "sintonizador", "tdt", "isdb", "dtv"]
+    cable_words = ["cable", "cables", "cordon", "cordón", "hdmi", "usb", "tipo c", "tipo-c", "type c", "type-c", "coaxial", "rg6", "rg59", "rca", "aux", "jack", "plug"]
+    environmental_words = ["ambiental", "ambientales", "ambiente", "temperatura", "humedad", "humo", "co2", "monoxido", "monóxido", "lluvia", "rain", "aire"]
+    arduino_words = ["arduino", "raspberry", "robotica", "robótica", "maker", "prototipo"]
 
-    is_support = any(w in qn for w in support_words) and (any(w in qn for w in tv_words) or "vesa" in qn)
+    is_support = any(w in qn for w in support_words) and (any(w in qn for w in tv_words) or any(w in qn for w in projector_words) or "vesa" in qn)
     is_water = any(w in qn for w in water_words)
     is_gas = any(w in qn for w in gas_words)
+    is_antenna = any(w in qn for w in antenna_words) and not any(w in qn for w in ["cable de antena", "cable para antena", "coaxial"])
+    is_remote = any(w in qn for w in remote_words)
+    is_decoder_tv = (any(w in qn for w in decoder_words) or (any(w in qn for w in ["convertidor", "conversor", "receptor"]) and any(w in qn for w in ["tv", "televisor", "television", "pantalla", "senal", "señal", "tdt", "digital"]))) and not is_remote
+    is_cable = any(w in qn for w in cable_words)
+    is_environmental = any(w in qn for w in environmental_words) and any(w in qn for w in ["sensor", "detector", "medidor", "modulo", "módulo"])
+    is_arduino = any(w in qn for w in arduino_words) and any(w in qn for w in ["sensor", "modulo", "módulo"])
 
     intent = "general"
-    if is_gas and not is_water:
+    if is_decoder_tv:
+        intent = "decoder_tv"
+    elif is_cable:
+        intent = "cable"
+    elif is_remote:
+        intent = "remote"
+    elif is_antenna:
+        intent = "antenna"
+    elif is_arduino:
+        intent = "sensor_arduino"
+    elif is_environmental:
+        intent = "sensor_environmental"
+    elif is_gas and not is_water:
         intent = "gas"
     elif is_water and not is_gas:
         intent = "water"
@@ -167,17 +193,50 @@ def analyze_query(query: str) -> Dict[str, Any]:
 
     support_mount_type = None
     for key, aliases in {
+        "proyector": ["proyector", "proyectores", "projector"],
         "techo": ["techo", "ceiling"],
         "pared": ["pared", "muro", "wall"],
-        "piso": ["piso", "movil", "movil", "mobile", "floor"],
-        "brazo": ["brazo", "articulado", "articulable", "extendible"],
+        "piso": ["piso", "movil", "móvil", "mobile", "floor"],
+        "brazo": ["brazo", "articulado", "articulable", "extendible", "full motion"],
         "esquina": ["esquina", "corner"],
-        "fijo": ["fijo", "fixed"],
-        "inclinable": ["inclinable", "tilt", "tilting"],
+        "fijo": ["fijo", "fija", "fixed"],
+        "inclinable": ["inclinable", "inclinacion", "inclinación", "tilt", "tilting"],
     }.items():
         if any(a in qn for a in aliases):
             support_mount_type = key
             break
+
+    antenna_type = None
+    if is_antenna:
+        if any(w in qn for w in ["exterior", "exteriores", "externa", "externas", "outdoor", "afuera", "azotea", "techo", "intemperie"]):
+            antenna_type = "exterior"
+        elif any(w in qn for w in ["interior", "interiores", "interna", "internas", "indoor", "adentro", "dentro", "habitacion", "habitación", "departamento"]):
+            antenna_type = "interior"
+
+    remote_brand = None
+    for brand in ["lg", "sony", "samsung", "tcl", "hisense", "roku", "panasonic", "daewoo", "philips", "sharp", "vizio", "xiaomi", "sansui", "atvio", "jvc", "rca", "toshiba", "aoc", "hyundai", "onn", "sanyo"]:
+        if re.search(rf"\b{re.escape(brand)}\b", qn):
+            remote_brand = brand
+            break
+
+    cable_type = None
+    if "hdmi" in qn:
+        cable_type = "hdmi"
+    elif any(w in qn for w in ["usb", "tipo c", "tipo-c", "type c", "type-c", "micro usb"]):
+        cable_type = "usb"
+    elif any(w in qn for w in ["coaxial", "rg6", "rg59", "cable de antena", "cable para antena"]):
+        cable_type = "coaxial"
+    elif any(w in qn for w in ["audio", "rca", "aux", "auxiliar", "jack", "plug", "3.5", "3 5"]):
+        cable_type = "audio"
+
+    sensor_water_tech = None
+    if intent == "water" or any(w in qn for w in ["agua", "tinaco", "cisterna", "water", "ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "presion", "presión", "electronivel", "electroniveles"]):
+        if any(w in qn for w in ["ultrasonico", "ultrasonica", "ultrasónico", "ultrasónica", "ultra", "waterultra"]):
+            sensor_water_tech = "ultrasonic"
+        elif any(w in qn for w in ["presion", "presión", "pressure", "waterp"]):
+            sensor_water_tech = "pressure"
+        elif any(w in qn for w in ["electronivel", "electroniveles", "electro nivel", "electro-nivel", "flotador", "boya"]):
+            sensor_water_tech = "electronivel"
 
     wants = {
         "wifi": any(w in qn for w in ["wifi", "wi-fi", "app", "celular", "remoto", "alexa", "google home"]),
@@ -185,8 +244,9 @@ def analyze_query(query: str) -> Dict[str, Any]:
         "display": any(w in qn for w in ["pantalla", "display", "lcd"]),
         "alarm": any(w in qn for w in ["alarma", "alerta", "notificacion", "notificaciones"]),
         "valve": any(w in qn for w in ["valvula", "electrovalvula", "cierre"]),
-        "ultrasonic": any(w in qn for w in ["ultra", "ultrasonico", "ultrasonica"]),
-        "pressure": any(w in qn for w in ["presion"]),
+        "ultrasonic": sensor_water_tech == "ultrasonic",
+        "pressure": sensor_water_tech == "pressure",
+        "electronivel": sensor_water_tech == "electronivel",
         "bluetooth": "bluetooth" in qn,
         "wireless": any(w in qn for w in ["inalambrico", "inalambrica", "radiofrecuencia", "rf"]),
     }
@@ -199,9 +259,13 @@ def analyze_query(query: str) -> Dict[str, Any]:
         "tank_type": tank_type,
         "height_m": height_m,
         "support_mount_type": support_mount_type,
+        "antenna_type": antenna_type,
+        "remote_brand": remote_brand,
+        "cable_type": cable_type,
+        "sensor_water_tech": sensor_water_tech,
         "wants": wants,
         "normalized": qn,
-        "has_technical_filters": bool(tv_inches or vesa or tank_liters or tank_type or height_m or any(wants.values()) or support_mount_type),
+        "has_technical_filters": bool(tv_inches or vesa or tank_liters or tank_type or height_m or any(wants.values()) or support_mount_type or antenna_type or remote_brand or cable_type or sensor_water_tech),
     }
 
 
@@ -213,7 +277,10 @@ def build_search_queries(query: str, analysis: Optional[Dict[str, Any]] = None) 
     intent = analysis.get("intent")
 
     if intent == "support":
-        base = "soporte pantalla tv televisor monitor vesa"
+        if analysis.get("support_mount_type") == "proyector":
+            base = "soporte proyector projector techo pared montaje"
+        else:
+            base = "soporte pantalla tv televisor monitor vesa"
         if analysis.get("tv_inches"):
             queries.append(f"{base} {analysis['tv_inches']} pulgadas")
         if analysis.get("vesa"):
@@ -221,20 +288,59 @@ def build_search_queries(query: str, analysis: Optional[Dict[str, Any]] = None) 
             queries.append(f"{base} VESA {a}x{b}")
         if analysis.get("support_mount_type"):
             queries.append(f"{base} {analysis['support_mount_type']}")
-        queries.extend(["soporte pantalla tv", "soporte televisor vesa"])
+        queries.extend(["soporte pantalla tv", "soporte televisor vesa", "soporte proyector"])
     elif intent == "water":
-        queries.extend([
-            "sensor nivel agua cisterna tinaco iot water connect-water easy-water",
-            "medidor nivel agua cisterna tinaco",
-            "sensor agua app alarma wifi display valvula ultrasonico",
-        ])
+        tech = analysis.get("sensor_water_tech")
+        if tech == "ultrasonic":
+            queries.extend(["sensor agua ultrasonico waterultra tinaco cisterna", "iot-waterultra easy-waterultra ultrasonico"])
+        elif tech == "pressure":
+            queries.extend(["sensor agua presion waterp tinaco cisterna", "iot-waterp presion nivel agua"])
+        elif tech == "electronivel":
+            queries.extend(["sensor agua electronivel flotador boya tinaco cisterna", "modulo nivel agua electro nivel"])
+        else:
+            queries.extend([
+                "sensor nivel agua cisterna tinaco iot water connect-water easy-water",
+                "medidor nivel agua cisterna tinaco",
+                "sensor agua app alarma wifi display valvula ultrasonico presion electronivel",
+            ])
     elif intent == "gas":
         queries.extend([
             "sensor nivel gas tanque estacionario iot gassensor easy-gas connect-gas",
             "medidor gas app alarma display valvula",
         ])
+    elif intent == "antenna":
+        if analysis.get("antenna_type") == "interior":
+            queries.extend(["antena interior interna indoor tvant", "antena para interior television"])
+        elif analysis.get("antenna_type") == "exterior":
+            queries.extend(["antena exterior externa techo outdoor tvant", "antena para exterior television techo"])
+        else:
+            queries.extend(["antena tvant uhf vhf television digital"])
+    elif intent == "remote":
+        brand = analysis.get("remote_brand")
+        if brand:
+            queries.extend([f"control remoto tv {brand}", f"control pantalla {brand}"])
+        else:
+            queries.extend(["control remoto tv pantalla universal", "control para televisor"])
+    elif intent == "decoder_tv":
+        queries.extend(["decodificador tv tdt señal digital receptor sintonizador", "mv-tdtplus decodificador television digital"])
+    elif intent == "cable":
+        ctype = analysis.get("cable_type")
+        if ctype == "hdmi":
+            queries.extend(["cable hdmi 4k uhd", "cordon hdmi"])
+        elif ctype == "usb":
+            queries.extend(["cable usb tipo c type-c", "adaptador usb tipo c"])
+        elif ctype == "coaxial":
+            queries.extend(["cable coaxial rg6 rg59 antena", "cable para antena coaxial"])
+        elif ctype == "audio":
+            queries.extend(["cable audio rca auxiliar jack plug", "cable rca audio video"])
+        else:
+            queries.extend(["cables conectores adaptadores hdmi usb coaxial audio"])
+    elif intent == "sensor_environmental":
+        queries.extend(["sensor ambiental temperatura humedad humo co2 aire lluvia", "detector ambiental smart"])
+    elif intent == "sensor_arduino":
+        queries.extend(["sensor arduino modulo robotica maker", "modulo sensor arduino raspberry"])
 
-    return _unique_keep_order(queries, limit=6)
+    return _unique_keep_order(queries, limit=8)
 
 
 def extract_product_specs(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -258,16 +364,37 @@ def extract_product_specs(item: Dict[str, Any]) -> Dict[str, Any]:
         "features": {},
     }
 
+    is_projector_support = any(w in text for w in ["soporte", "bracket", "mount", "montaje"]) and any(w in text for w in ["proyector", "proyectores", "projector"])
     is_support = any(w in text for w in ["soporte", "bracket", "mount", "montaje"]) and any(w in text for w in ["pantalla", "tv", "televisor", "television", "monitor", "vesa"])
     is_water = any(w in text for w in ["agua", "water", "tinaco", "cisterna", "nivel de liquido", "nivel liquido"])
-    is_gas = any(w in text for w in ["gas", "gassensor", "tanque estacionario", "lp"])
+    is_gas = any(w in text for w in ["gas", "gassensor", "gasensor", "tanque estacionario", "lp"])
+    is_antenna = any(w in text for w in ["antena", "antenas", "tvant", "uhf", "vhf"])
+    is_remote = any(w in text for w in ["control", "remoto", "mando", "atscontrol"])
+    is_decoder = any(w in text for w in ["decodificador", "decoder", "sintonizador", "tdt", "isdb", "dtv", "tdtplus", "mv-tdtplus"])
+    is_cable = any(w in text for w in ["cable", "cordon", "hdmi", "usb", "coaxial", "rg6", "rg59", "rca", "aux", "jack", "plug", "adaptador", "conector"])
+    is_environmental = any(w in text for w in ["ambiental", "ambiente", "temperatura", "humedad", "humo", "co2", "monoxido", "lluvia", "rain", "aire"])
+    is_arduino = any(w in text for w in ["arduino", "raspberry", "robotica", "maker", "prototipo"])
 
-    if is_support:
+    if is_projector_support:
+        specs["category"] = "support_projector"
+    elif is_support:
         specs["category"] = "support"
     elif is_water and not is_gas:
         specs["category"] = "water"
     elif is_gas and not is_water:
         specs["category"] = "gas"
+    elif is_antenna:
+        specs["category"] = "antenna"
+    elif is_remote:
+        specs["category"] = "remote"
+    elif is_decoder:
+        specs["category"] = "decoder_tv"
+    elif is_cable:
+        specs["category"] = "cable"
+    elif is_environmental:
+        specs["category"] = "sensor_environmental"
+    elif is_arduino:
+        specs["category"] = "sensor_arduino"
 
     # Rango de pulgadas para soportes. Se limita a 13-120 para evitar capacidades/metros.
     ranges: List[Tuple[Optional[int], int]] = []
@@ -311,6 +438,7 @@ def extract_product_specs(item: Dict[str, Any]) -> Dict[str, Any]:
 
     mount_types = []
     for key, aliases in {
+        "proyector": ["proyector", "proyectores", "projector"],
         "techo": ["techo", "ceiling"],
         "pared": ["pared", "muro", "wall"],
         "piso": ["piso", "movil", "mobile", "floor"],
@@ -345,11 +473,12 @@ def extract_product_specs(item: Dict[str, Any]) -> Dict[str, Any]:
         "wifi": any(w in text for w in ["wifi", "wi-fi", "app", "master iot", "alexa", "google home"]),
         "bluetooth": "bluetooth" in text or "ble" in text,
         # En soportes, "pantalla" describe la TV, no un display del producto.
-        "display": specs["category"] != "support" and any(w in text for w in ["pantalla", "display", "lcd"]),
+        "display": specs["category"] not in {"support", "support_projector"} and any(w in text for w in ["pantalla", "display", "lcd"]),
         "alarm": any(w in text for w in ["alarma", "alerta", "notificacion", "notificaciones"]),
         "valve": any(w in text for w in ["valvula", "electrovalvula", "cierre"]),
         "ultrasonic": any(w in text for w in ["ultrasonico", "ultrasonica", "ultra"]),
-        "pressure": "presion" in text,
+        "pressure": any(w in text for w in ["presion", "pressure", "waterp"]),
+        "electronivel": any(w in text for w in ["electronivel", "electroniveles", "electro nivel", "electro-nivel", "flotador", "boya"]),
         "wireless": any(w in text for w in ["inalambrico", "inalambrica", "radiofrecuencia", "rf"]),
     }
 
@@ -365,8 +494,12 @@ def extract_product_specs(item: Dict[str, Any]) -> Dict[str, Any]:
         specs["features"].update({"wifi": True, "alarm": True})
     if "waterultra" in family:
         specs["features"]["ultrasonic"] = True
+    if "waterp" in family:
+        specs["features"]["pressure"] = True
     if "waterv" in family:
         specs["features"]["valve"] = True
+    if any(w in family for w in ["electronivel", "electro-nivel", "electro nivel"]):
+        specs["features"]["electronivel"] = True
     if "easy-gas" in family:
         specs["features"].update({"display": True})
     if "connect-gas" in family or "gassensor" in family:
@@ -635,6 +768,7 @@ def _build_specs_summary(specs: Dict[str, Any]) -> List[str]:
         ("valve", "válvula"),
         ("ultrasonic", "ultrasónico"),
         ("pressure", "presión"),
+        ("electronivel", "electronivel"),
         ("wireless", "inalámbrico"),
     ]:
         if features.get(key):
@@ -649,7 +783,7 @@ def build_catalog_answer(query: str, items: List[Dict[str, Any]], total_count: i
     context = context or {}
     analysis = context.get("analysis") or analyze_query(query)
     intent = analysis.get("intent")
-    if intent not in {"support", "water", "gas"}:
+    if intent not in {"support", "water", "gas", "antenna", "remote", "decoder_tv", "cable", "sensor_environmental", "sensor_arduino"}:
         return None
 
     top_reasons: List[str] = []
@@ -695,6 +829,45 @@ def build_catalog_answer(query: str, items: List[Dict[str, Any]], total_count: i
         if top_reasons:
             parts.append("Prioricé coincidencias como: " + "; ".join(top_reasons[:3]) + ".")
         parts.append("Confirma si buscas sólo medición, alertas por app o cierre automático con válvula para elegir el modelo adecuado.")
+
+    elif intent == "antenna":
+        antenna_type = analysis.get("antenna_type")
+        if antenna_type == "interior":
+            parts.append("Filtré únicamente antenas para interiores, evitando mezclar modelos para exterior o techo.")
+        elif antenna_type == "exterior":
+            parts.append("Filtré únicamente antenas para exteriores o instalación en techo/azotea.")
+        else:
+            parts.append("Encontré opciones de antenas en el catálogo.")
+        parts.append("Verifica la zona de instalación y la distancia aproximada a la antena de transmisión para elegir mejor.")
+
+    elif intent == "remote":
+        brand = analysis.get("remote_brand")
+        if brand:
+            parts.append(f"Filtré controles remotos que indiquen compatibilidad con pantallas o TV {brand.upper()}.")
+        else:
+            parts.append("Filtré controles remotos para pantalla/TV en general, sin forzar una marca específica.")
+        parts.append("Para máxima seguridad, confirma el modelo exacto de tu pantalla antes de comprar.")
+
+    elif intent == "decoder_tv":
+        parts.append("Filtré decodificadores de señal para TV/TDT, evitando cables, controles, adaptadores o decodificadores de audio.")
+        parts.append("Estos productos son para recepción o conversión de señal de televisión; revisa entradas/salidas compatibles con tu pantalla.")
+
+    elif intent == "cable":
+        ctype = analysis.get("cable_type")
+        labels = {"hdmi": "HDMI", "usb": "USB/Tipo C", "coaxial": "coaxial o de antena", "audio": "audio"}
+        if ctype:
+            parts.append(f"Filtré cables de tipo {labels.get(ctype, ctype)}, evitando mezclar otros formatos de cable.")
+        else:
+            parts.append("Filtré productos de cableado y conectividad del catálogo.")
+        parts.append("Confirma longitud, conector y versión requerida antes de comprar.")
+
+    elif intent == "sensor_environmental":
+        parts.append("Filtré sensores ambientales, evitando mezclarlos con sensores de agua o gas.")
+        parts.append("Revisa si necesitas temperatura, humedad, humo, lluvia o calidad del aire para elegir el modelo adecuado.")
+
+    elif intent == "sensor_arduino":
+        parts.append("Filtré sensores y módulos orientados a proyectos Arduino/maker.")
+        parts.append("Confirma voltaje de operación, tipo de señal y compatibilidad con tu placa antes de comprar.")
 
     if total_count > per_page:
         shown = min(len(items), per_page)

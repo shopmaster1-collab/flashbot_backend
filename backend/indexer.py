@@ -541,8 +541,12 @@ class CatalogIndexer:
             "pantalla": ["tv","televisor","monitor","television"],
             "televisor": ["tv","pantalla","monitor","television","tele"],
             "television": ["tv","televisor","pantalla","tele"],
-            "soporte": ["base","bracket","montaje","mount","pared","techo","mural","vesa","televisor","pantalla"],
+            "soporte": ["base","bracket","montaje","mount","pared","techo","mural","vesa","televisor","pantalla","fijo","articulado","brazo","inclinable","proyector"],
             "vesa": ["soporte","pantalla","tv","televisor","montaje","bracket","mount"],
+            "proyector": ["projector","soporte","montaje","techo","pared"],
+            "fijo": ["fixed","soporte","pantalla"],
+            "articulado": ["brazo","extendible","full motion","soporte","pantalla"],
+            "inclinable": ["tilt","tilting","soporte","pantalla"],
             "pulgadas": ["pulgada","pantalla","tv","televisor","soporte"],
             "pulgada": ["pulgadas","pantalla","tv","televisor","soporte"],
             
@@ -558,8 +562,8 @@ class CatalogIndexer:
             "signal": ["señal","decodificador","receptor","antena","digital"],
             "digital": ["tdt","decodificador","decoder","receptor","dtv","isdb-t","señal"],
             "terrestre": ["tdt","digital","decodificador","antena","aerea","aérea"],
-            "convertidor": ["decodificador","decoder","receptor","conversor","adaptador"],
-            "conversor": ["decodificador","decoder","receptor","convertidor","adaptador"],
+            "convertidor": ["conversor","adaptador","converter"],
+            "conversor": ["convertidor","adaptador","converter"],
             
             # TV antigua/vieja - contexto importante para decodificadores
             "antigua": ["vieja","old","legacy","analogica","analógica","análoga"],
@@ -572,18 +576,20 @@ class CatalogIndexer:
             # Productos específicos MV
             "mv-tdtplus": ["tdtplus","tdt-plus","decodificador","tdt","receptor","decoder"],
             "tdtplus": ["mv-tdtplus","tdt-plus","decodificador","tdt","receptor"],
-            "mv-atscontrol": ["atscontrol","mv-atscontrol2","control","remoto","decodificador"],
-            "mv-atscontrol2": ["atscontrol2","mv-atscontrol","control","remoto","decodificador"],
+            "mv-atscontrol": ["atscontrol","mv-atscontrol2","control","remoto"],
+            "mv-atscontrol2": ["atscontrol2","mv-atscontrol","control","remoto"],
             "atscontrol": ["mv-atscontrol","mv-atscontrol2","control","remoto"],
             "atscontrol2": ["mv-atscontrol2","atscontrol","control","remoto"],
             # ===============================================================
             
             # cables / conectividad
-            "cable": ["cordon","cordón","conector","conexion","conexión"],
-            "hdmi": ["hdmi","uhd","4k","8k","microhdmi","mini hdmi","arc","earc"],
-            "rca": ["av","audio video","a/v"],
+            "cable": ["cordon","cordón","conector","conexion","conexión","hdmi","usb","coaxial","audio"],
+            "hdmi": ["hdmi","uhd","4k","8k","microhdmi","mini hdmi","arc","earc","cable hdmi"],
+            "usb": ["tipo-c","tipo c","type-c","type c","micro usb","cable usb"],
+            "rca": ["av","audio video","a/v","audio"],
+            "audio": ["rca","aux","auxiliar","jack","plug","3.5mm"],
             "vga": ["dsub","d-sub"],
-            "coaxial": ["rg6","rg59","f"],
+            "coaxial": ["rg6","rg59","f","cable de antena","cable para antena"],
             # divisores y switches
             "divisor": ["splitter","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
             "splitter": ["divisor","duplicador","repartidor","1x2","1x4","1×2","1×4","1 x 2","1 x 4"],
@@ -612,10 +618,15 @@ class CatalogIndexer:
             "medidor": ["sensor","detector","monitor","monitore"],
             "movimiento": ["pir"],
             # agua / nivel
-            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna","deposito","depósito","sensor"],
+            "agua": ["inundacion","inundación","fuga","nivel","liquido","líquido","water","leak","sumergible","boya","flotador","tinaco","cisterna","deposito","depósito","sensor","ultrasonico","presion","electronivel"],
             "cisterna": ["agua","nivel","water","tinaco","deposito","depósito","sensor","medidor"],
             "tinaco": ["agua","nivel","water","cisterna","deposito","depósito","sensor","medidor"],
             "nivel": ["sensor","medidor","agua","gas","tinaco","cisterna"],
+            "ultrasonico": ["ultrasónico","ultrasonica","waterultra","sensor agua"],
+            "presion": ["presión","pressure","waterp","sensor agua"],
+            "electronivel": ["electro nivel","electro-nivel","electroniveles","flotador","boya","sensor agua"],
+            "ambiental": ["ambiente","temperatura","humedad","humo","co2","aire"],
+            "arduino": ["maker","robotica","raspberry","modulo","módulo"],
 
             # ---------------- GAS (mejorado) ----------------
             "gas": ["lp","propano","butano","estacionario","estacionaria","tanque","nivel","medidor","porcentaje","volumen","gassensor","gas-sensor"],
@@ -642,7 +653,9 @@ class CatalogIndexer:
             ({"divisor","splitter","duplicador","repartidor"}, {"hdmi"}, 45),
             ({"soporte","bracket","mount","base"}, {"tv","pantalla","monitor"}, 35),
             ({"soporte","bracket","mount","base"}, {"vesa","pulgadas","pulgada","televisor","television"}, 45),
-            ({"sensor","detector","sonda","medidor"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna"}, 40),
+            ({"soporte","bracket","mount","base"}, {"techo","fijo","articulado","brazo","inclinable","proyector","projector"}, 55),
+            ({"sensor","detector","sonda","medidor"}, {"agua","inundacion","inundación","fuga","nivel","liquido","líquido","sumergible","boya","flotador","tinaco","cisterna","ultrasonico","presion","electronivel"}, 40),
+            ({"cable","cordon","conector"}, {"hdmi","usb","coaxial","rg6","rg59","rca","audio","aux","jack"}, 55),
 
             # ============== COMBOS PARA ANTENAS ESPECÍFICAS (NUEVO) ==============
             ({"antena","tvant"}, {"exterior","externa","outdoor","external","pared","techo","muro","tejado"}, 55),
@@ -656,10 +669,10 @@ class CatalogIndexer:
             ({"decodificador","decoder","receptor","sintonizador","convertidor","conversor"}, {"tv","televisor","television","pantalla"}, 60),
             ({"decodificador","decoder","receptor","sintonizador"}, {"tdt","isdb-t","digital","señal","dtv","terrestre"}, 55),
             ({"tv","televisor","television","pantalla"}, {"antigua","vieja","analogica","analógica","legacy"}, 50),
-            ({"control","remoto","mando"}, {"decodificador","decoder","tdt","mv-atscontrol","mv-tdtplus","atscontrol"}, 45),
+            ({"control","remoto","mando"}, {"mv-atscontrol","atscontrol"}, 45),
             ({"señal","signal"}, {"digital","tv","televisor","antena","tdt"}, 35),
             ({"mv-tdtplus","tdtplus","tdt-plus"}, {"decodificador","tdt","digital","receptor"}, 70),
-            ({"mv-atscontrol","mv-atscontrol2","atscontrol","atscontrol2"}, {"control","remoto","decodificador","tdt"}, 65),
+            ({"mv-atscontrol","mv-atscontrol2","atscontrol","atscontrol2"}, {"control","remoto"}, 65),
             # =================================================================
 
             # ---------- COMBOS DE GAS (expandidos y mejorados) ----------
@@ -692,7 +705,7 @@ class CatalogIndexer:
                 if s_n not in seen:
                     expanded.append(s_n); seen.add(s_n)
 
-        clean_terms = expanded[:15] if expanded else []  # Aumentado para más cobertura
+        clean_terms = expanded[:30] if expanded else []  # Cobertura ampliada para subtipos: antena, cable, sensores y soportes
 
         # intención por combos
         def detect_combo(tokens: List[str]) -> List[Tuple[set, set, int]]:
@@ -829,25 +842,32 @@ class CatalogIndexer:
                 if any(a in st for a in A) and any(b in st for b in B):
                     s += bonus
 
-            # ============== BOOST ESPECIAL PARA DECODIFICADORES (NUEVO) ==============
-            # Detectar si la búsqueda es sobre decodificadores
-            is_decoder_query = any(term in clean_terms for term in ["decodificador", "decoder", "receptor", "sintonizador", "tdt", "digital", "convertidor", "conversor"])
+            # ============== BOOST ESPECIAL PARA DECODIFICADORES DE TV ==============
+            # Convertidor/conversor/receptor sólo se interpreta como decodificador
+            # cuando la consulta también menciona TV/señal/TDT/digital.
+            decoder_core_terms = {"decodificador", "decoder", "sintonizador", "tdt", "isdb-t", "dtv"}
+            converter_terms = {"convertidor", "conversor", "receptor"}
+            tv_context_terms = {"tv", "televisor", "television", "pantalla", "senal", "señal", "digital", "tdt"}
+            is_decoder_query = bool(set(clean_terms) & decoder_core_terms) or (bool(set(clean_terms) & converter_terms) and bool(set(clean_terms) & tv_context_terms))
             is_tv_old_query = any(term in clean_terms for term in ["tv", "televisor", "television"]) and any(term in clean_terms for term in ["antigua", "vieja", "analogica", "analógica"])
-            
+
             if is_decoder_query or is_tv_old_query:
-                # Boost masivo para productos específicos de decodificadores
                 if any(prod in st for prod in ["mv-tdtplus", "tdtplus", "tdt-plus"]):
-                    s += 100
-                if any(prod in st for prod in ["mv-atscontrol", "atscontrol"]):
-                    s += 90
-                # Boost para términos relacionados en el texto del producto
+                    s += 120
                 if "decodificador" in st or "decoder" in st:
-                    s += 80
-                if "tdt" in st or "digital" in st:
-                    s += 70
+                    s += 90
+                if "tdt" in st or "digital" in st or "isdb" in st:
+                    s += 75
                 if "receptor" in st or "sintonizador" in st:
                     s += 60
-            # ==========================================================================
+                # Penalización fuerte para productos que no son decodificadores de TV.
+                if any(prod in st for prod in ["mv-atscontrol", "atscontrol", "control remoto"]):
+                    s -= 150
+                if any(prod in st for prod in ["cable", "adaptador", "conector", "plug", "jack", "splitter", "divisor", "switch"]):
+                    s -= 130
+                if any(prod in st for prod in ["audio", "bocina", "amplificador", "microfono", "micrófono"]):
+                    s -= 140
+            # ======================================================================
 
             # Inicio de título con primer término
             if clean_terms:
