@@ -51,6 +51,7 @@
     currentQuery: '',
     currentPage: 1,
     pagination: null,
+    chatContext: null,
     elevenLabsMounted: false,
     buyLoading: false
   };
@@ -159,7 +160,7 @@
       close: closePanel,
       switchTab,
       backend: BACKEND,
-      version: '2026-05-12.2'
+      version: '2026-05-15.1'
     };
   }
 
@@ -305,7 +306,15 @@
     showChatLoading('Buscando respuesta');
 
     try {
-      const data = await postJson(`${BACKEND}/api/chat`, { message, page, per_page: CHAT_PRODUCTS_PER_PAGE }, 30000);
+      const payload = {
+        message,
+        page,
+        per_page: CHAT_PRODUCTS_PER_PAGE,
+        conversation_context: state.chatContext || null
+      };
+      const data = await postJson(`${BACKEND}/api/chat`, payload, 30000);
+
+      syncChatContext(data, message, isNewSearch);
 
       hideChatLoading();
       if (isNewSearch && data.answer) appendChatMessage(data.answer, 'bot');
@@ -322,6 +331,28 @@
     } finally {
       state.chatLoading = false;
       setChatSubmitState(false);
+    }
+  }
+
+  function syncChatContext(data, fallbackMessage, isNewSearch) {
+    if (!data || typeof data !== 'object') {
+      if (isNewSearch) state.currentQuery = fallbackMessage || '';
+      return;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(data, 'conversation_context')) {
+      const nextContext = data.conversation_context;
+      state.chatContext = nextContext && typeof nextContext === 'object' ? nextContext : null;
+    }
+
+    const effectiveQuery = typeof data.effective_query === 'string' && data.effective_query.trim()
+      ? data.effective_query.trim()
+      : '';
+
+    if (effectiveQuery) {
+      state.currentQuery = effectiveQuery;
+    } else if (isNewSearch) {
+      state.currentQuery = fallbackMessage || '';
     }
   }
 
