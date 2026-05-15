@@ -408,6 +408,7 @@ _CATALOG_TV_BRANDS = {
 }
 
 _ANTENNA_CLARIFICATION_MESSAGE = "Contamos con antenas para interiores y para exteriores. ¿De qué tipo requieres?"
+_CONTEXT_MAX_AGE_SECONDS = 30 * 60
 
 
 def _catalog_norm(value: str) -> str:
@@ -546,15 +547,184 @@ def _should_clarify_antenna_type(query: str) -> bool:
     return bool(constraints.get("antenna_needs_clarification"))
 
 
-def _antenna_clarification_payload(per_page: int = 10) -> dict:
+def _empty_pagination(per_page: int = 10) -> dict:
+    return {"page": 1, "per_page": per_page, "total": 0, "total_pages": 0, "has_next": False, "has_prev": False}
+
+
+def _now_ts() -> int:
+    try:
+        return int(time.time())
+    except Exception:
+        return 0
+
+
+def _clear_conversation_context(user_query: str = "", effective_query: str = "") -> dict:
     return {
-        "answer": _ANTENNA_CLARIFICATION_MESSAGE,
+        "pending_clarification": None,
+        "last_user_query": user_query or "",
+        "last_effective_query": effective_query or user_query or "",
+        "updated_at": _now_ts(),
+    }
+
+
+def _antenna_pending_context(base_query: str = "") -> dict:
+    clean_base = (base_query or "antena").strip() or "antena"
+    return {
+        "pending_clarification": {
+            "type": "antenna_type",
+            "family": "antenna",
+            "base_query": clean_base,
+            "base_product": "antena",
+        },
+        "last_user_query": clean_base,
+        "last_effective_query": clean_base,
+        "updated_at": _now_ts(),
+    }
+
+
+def _antenna_clarification_payload(per_page: int = 10, base_query: str = "", answer: str | None = None) -> dict:
+    return {
+        "answer": answer or _ANTENNA_CLARIFICATION_MESSAGE,
         "products": [],
-        "pagination": {"page": 1, "per_page": per_page, "total": 0, "total_pages": 0, "has_next": False, "has_prev": False},
+        "pagination": _empty_pagination(per_page),
         "needs_clarification": True,
         "clarification_type": "antenna_type",
         "quick_replies": ["Antenas para interiores", "Antenas para exteriores"],
+        "conversation_context": _antenna_pending_context(base_query),
+        "effective_query": base_query or "",
     }
+
+
+def _get_conversation_context(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    for key in ("conversation_context", "chat_context", "context"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _conversation_context_expired(context: dict) -> bool:
+    if not isinstance(context, dict):
+        return True
+    ts = context.get("updated_at")
+    if not isinstance(ts, (int, float)):
+        return False
+    now = _now_ts()
+    return bool(now and ts and (now - int(ts) > _CONTEXT_MAX_AGE_SECONDS))
+
+
+def _detect_antenna_type_from_text(text: str) -> str | None:
+    qn = _catalog_norm(text)
+    if not qn:
+        return None
+    interior_terms = {
+        "interior", "interiores", "interna", "internas", "indoor",
+        "adentro", "dentro", "habitacion", "recamara", "cuarto", "departamento",
+        "para interior", "para interiores", "de interior", "de interiores"
+    }
+    exterior_terms = {
+        "exterior", "exteriores", "externa", "externas", "outdoor",
+        "afuera", "azotea", "techo", "tejado", "intemperie", "fachada", "muro",
+        "para exterior", "para exteriores", "de exterior", "de exteriores"
+    }
+    wants_interior = _query_has_any(qn, interior_terms)
+    wants_exterior = _query_has_any(qn, exterior_terms)
+    if wants_exterior and not wants_interior:
+        return "exterior"
+    if wants_interior and not wants_exterior:
+        return "interior"
+    return None
+
+
+def _is_new_non_antenna_product_query(text: str) -> bool:
+    qn = _catalog_norm(text)
+    if not qn:
+        return False
+    if _query_has_any(qn, ["antena", "antenas", "tvant"]):
+        return False
+    product_terms = {
+        "soporte", "soportes", "base", "bases", "control", "controles", "remoto",
+        "sensor", "sensores", "detector", "medidor", "modulo", "módulo",
+        "cable", "cables", "adaptador", "adaptadores", "conector", "conectores",
+        "decodificador", "decodificadores", "receptor", "sintonizador", "tdt",
+        "bocina", "bocinas", "audio", "microfono", "micrófono",
+        "camara", "cámara", "camaras", "cámaras", "router", "modem", "módem",
+        "pila", "pilas", "bateria", "batería", "cargador", "enchufe", "contacto"
+    }
+    return _query_has_any(qn, product_terms)
+
+
+def _merge_antenna_clarification_query(base_query: str, user_query: str, antenna_type: str) -> str:
+    base = _catalog_norm(base_query or "")
+    user = (user_query or "").strip()
+    qn_user = _catalog_norm(user)
+    type_phrase = "exteriores" if antenna_type == "exterior" else "interiores"
+
+    # Si el usuario ya escribió la familia completa, conservamos su texto para no
+    # perder especificaciones adicionales: "antena exterior 4k", "antena para techo", etc.
+    if _query_has_any(qn_user, ["antena", "antenas", "tvant"]):
+        return user
+
+    # Si la pregunta base ya decía antena, la convertimos en una consulta directa.
+    if _query_has_any(base, ["antena", "antenas", "tvant"]):
+        return f"antena para {type_phrase}"
+
+    return f"antena para {type_phrase}"
+
+
+def _resolve_contextual_product_query(query: str, incoming_context: dict) -> tuple[str, dict, dict]:
+    """
+    Reconstruye consultas cortas de aclaración usando el contexto enviado por el widget.
+
+    Caso principal corregido:
+    - Usuario: "busco una antena"
+    - Bot: pregunta interior/exterior y devuelve pending_clarification.
+    - Usuario: "para exteriores"
+    - Backend convierte la búsqueda real en: "antena para exteriores".
+    """
+    original_query = (query or "").strip()
+    if not incoming_context or _conversation_context_expired(incoming_context):
+        return original_query, _clear_conversation_context(original_query, original_query), {"used_context": False}
+
+    pending = incoming_context.get("pending_clarification")
+    if not isinstance(pending, dict):
+        return original_query, _clear_conversation_context(original_query, original_query), {"used_context": False}
+
+    pending_type = pending.get("type")
+    family = pending.get("family")
+
+    if pending_type == "antenna_type" and family == "antenna":
+        if _is_new_non_antenna_product_query(original_query):
+            return original_query, _clear_conversation_context(original_query, original_query), {
+                "used_context": False,
+                "cleared_context": True,
+                "reason": "new_product_query",
+            }
+
+        antenna_type = _detect_antenna_type_from_text(original_query)
+        if antenna_type:
+            effective_query = _merge_antenna_clarification_query(
+                pending.get("base_query") or incoming_context.get("last_effective_query") or "antena",
+                original_query,
+                antenna_type,
+            )
+            return effective_query, _clear_conversation_context(original_query, effective_query), {
+                "used_context": True,
+                "resolved_clarification": "antenna_type",
+                "antenna_type": antenna_type,
+                "base_query": pending.get("base_query") or "antena",
+            }
+
+        # El usuario respondió algo como "cuál me recomiendas" o "la mejor"
+        # sin elegir interior/exterior; mantenemos el contexto y pedimos la aclaración otra vez.
+        return original_query, _antenna_pending_context(pending.get("base_query") or "antena"), {
+            "used_context": False,
+            "reask_clarification": "antenna_type",
+        }
+
+    return original_query, _clear_conversation_context(original_query, original_query), {"used_context": False}
 
 
 def _item_has_any(text: str, terms: set[str] | list[str] | tuple[str, ...]) -> bool:
@@ -844,11 +1014,13 @@ def _apply_strict_catalog_guard(query: str, items: list, analysis: dict | None =
     return constrained, context
 
 
-def _catalog_no_match_payload(per_page: int = 10):
+def _catalog_no_match_payload(per_page: int = 10, user_query: str = "", effective_query: str = ""):
     return {
         "answer": CATALOG_NO_MATCH_MESSAGE,
         "products": [],
-        "pagination": {"page": 1, "per_page": per_page, "total": 0, "total_pages": 0, "has_next": False, "has_prev": False},
+        "pagination": _empty_pagination(per_page),
+        "conversation_context": _clear_conversation_context(user_query, effective_query or user_query),
+        "effective_query": effective_query or user_query or "",
     }
 
 # ---------- Señales / familias (idéntico enfoque) ----------
@@ -1587,43 +1759,64 @@ def _extract_text_and_all_strings(payload):
 def chat():
     data = request.get_json(force=True) or {}
     primary_text, all_text = _extract_text_and_all_strings(data)
-    query = (primary_text or request.args.get("q") or "").strip()
+    original_query = (primary_text or request.args.get("q") or "").strip()
 
     detected_from_all = _detect_order_number(all_text)
-    bare_order_token = _looks_like_bare_order(query or "")
+    bare_order_token = _looks_like_bare_order(original_query or "")
     # El chat de texto se mantiene separado de Pedidos. Sólo desviamos si el usuario
     # menciona explícitamente pedido/orden/seguimiento o si escribe únicamente un número de pedido.
-    order_intent = _looks_like_order_intent(query) or (bool(detected_from_all) and bare_order_token)
+    order_intent = _looks_like_order_intent(original_query) or (bool(detected_from_all) and bare_order_token)
 
-    print(f"[CHAT] payload_keys={list(data.keys())} | extracted='{query}' | any_order='{detected_from_all}'", flush=True)
+    incoming_context = _get_conversation_context(data)
+    query, outgoing_context, context_resolution = _resolve_contextual_product_query(original_query, incoming_context)
+
+    print(
+        f"[CHAT] payload_keys={list(data.keys())} | extracted='{original_query}' | effective='{query}' | "
+        f"context={context_resolution} | any_order='{detected_from_all}'",
+        flush=True,
+    )
 
     page=int(data.get("page") or 1)
     per_page=int(data.get("per_page") or 10)
 
-    if not query and not detected_from_all:
+    if not original_query and not detected_from_all:
         return jsonify({
             "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores de agua, sensores de gas y mucho más.",
             "products":[],
-            "pagination":{"page":1,"per_page":per_page,"total":0,"total_pages":0,"has_next":False,"has_prev":False}
+            "pagination": _empty_pagination(per_page),
+            "conversation_context": _clear_conversation_context(),
+            "effective_query": "",
         })
 
     # ---------- DESVÍO: ESTATUS DE PEDIDO ----------
     try:
         if order_intent:
-            order_no = _detect_order_number(query) or detected_from_all
+            order_no = _detect_order_number(original_query) or detected_from_all
             if order_no:
                 rows = _lookup_order(order_no)
                 answer = _render_order_vertical(rows, order_no)
-                return jsonify({"answer": answer, "products": [],
-                                "pagination": {"page":1,"per_page":10,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
+                return jsonify({
+                    "answer": answer,
+                    "products": [],
+                    "pagination": _empty_pagination(10),
+                    "conversation_context": _clear_conversation_context(original_query, original_query),
+                    "effective_query": original_query,
+                })
     except Exception as e:
         print(f"[WARN] order-status pipeline error: {e}", flush=True)
     # ---------- FIN desvío de pedidos ----------
 
+    if context_resolution.get("reask_clarification") == "antenna_type":
+        return jsonify(_antenna_clarification_payload(
+            per_page,
+            base_query=(incoming_context.get("pending_clarification") or {}).get("base_query") or "antena",
+            answer="Para continuar con la búsqueda de antenas, dime si la necesitas para interiores o para exteriores.",
+        ))
+
     # Antenas genéricas: si no especifica interior/exterior, preguntamos antes
     # de mostrar productos para evitar mezclar familias incompatibles.
     if _should_clarify_antenna_type(query):
-        return jsonify(_antenna_clarification_payload(per_page))
+        return jsonify(_antenna_clarification_payload(per_page, base_query=query))
 
     # Flujo normal de productos + inteligencia técnica de catálogo.
     max_search = 200
@@ -1636,7 +1829,7 @@ def chat():
 
     if not all_items:
         print(f"[CHAT][CATALOG_GUARD] rejected query='{query}' reason={strict_guard_context.get('reason')} families={strict_guard_context.get('families')} blocked={strict_guard_context.get('blocked_terms')}", flush=True)
-        return jsonify(_catalog_no_match_payload(per_page))
+        return jsonify(_catalog_no_match_payload(per_page, original_query, query))
 
     total_pages=(total_count + per_page - 1)//per_page
     start_idx=(page-1)*per_page; end_idx=start_idx+per_page
@@ -1666,7 +1859,14 @@ def chat():
                 answer = enhanced_answer
         except Exception as e:
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
-    return jsonify({"answer": answer, "products": cards, "pagination": pagination})
+    return jsonify({
+        "answer": answer,
+        "products": cards,
+        "pagination": pagination,
+        "conversation_context": _clear_conversation_context(original_query, query),
+        "effective_query": query,
+        "original_query": original_query,
+    })
 
 # ---------- Admin: diagnóstico de pedidos ----------
 @app.get("/api/admin/orders-ping")
