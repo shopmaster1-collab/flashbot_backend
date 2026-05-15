@@ -82,8 +82,10 @@ def analyze_query(query: str) -> Dict[str, Any]:
 
     support_words = ["soporte", "base", "bracket", "mount", "montaje", "pared", "techo", "piso"]
     tv_words = ["pantalla", "tv", "televisor", "television", "monitor", "vesa"]
-    water_words = ["agua", "tinaco", "cisterna", "tanque de agua", "nivel", "water", "fuga", "inundacion"]
-    gas_words = ["gas", "lp", "propano", "butano", "estacionario", "gassensor", "tanque estacionario"]
+    # "nivel" por sí solo no debe forzar agua, porque consultas como
+    # "nivel de gas" son de gas. Agua requiere una señal específica.
+    water_words = ["agua", "tinaco", "cisterna", "tanque de agua", "water", "fuga", "inundacion", "inundación", "boya", "flotador"]
+    gas_words = ["gas", "lp", "propano", "butano", "estacionario", "estacionaria", "gassensor", "gasensor", "tanque estacionario"]
 
     is_support = any(w in qn for w in support_words) and (any(w in qn for w in tv_words) or "vesa" in qn)
     is_water = any(w in qn for w in water_words)
@@ -92,8 +94,14 @@ def analyze_query(query: str) -> Dict[str, Any]:
     intent = "general"
     if is_gas and not is_water:
         intent = "gas"
-    if is_water:
+    elif is_water and not is_gas:
         intent = "water"
+    elif is_gas and is_water:
+        # Si aparecen ambos, priorizamos la señal explícita más fuerte del texto.
+        if re.search(r"\b(gas|gassensor|gasensor|lp|propano|butano|estacionari[oa])\b", qn):
+            intent = "gas"
+        else:
+            intent = "water"
     if is_support:
         intent = "support"
 

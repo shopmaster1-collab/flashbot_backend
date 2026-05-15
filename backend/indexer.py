@@ -522,9 +522,18 @@ class CatalogIndexer:
         STOP = {
             "el","la","los","las","un","una","unos","unas",
             "de","del","al","y","o","u","en","a","con","por","para",
-            "que","cual","cuales","cual","cuales","donde","donde",
-            "busco","busca","buscar","quiero","necesito","tienes","tienen","hay",
-            "producto","productos"
+            "que","qué","cual","cuál","cuales","cuáles","donde","dónde",
+            "como","cómo","me","mi","mis","tu","tus","su","sus",
+            "es","son","sea","ser","tiene","tienes","tienen","tendran","tendrán",
+            "manejan","venden","vendemos","venta","hay",
+            "busco","busca","buscar","buscando","estoy","estamos",
+            "quiero","queremos","necesito","necesitamos","requiero","requerimos",
+            "ocupo","ocupar","interesa","interesado","interesada",
+            "producto","productos","articulo","artículo","articulos","artículos",
+            "opcion","opción","opciones","recomienda","recomiendas","recomendar",
+            "cotizar","cotizacion","cotización","precio","precios","costo","costos",
+            "favor","porfa","gracias","hola","buenos","dias","días","tardes","noches",
+            "master","maxter","sitio","pagina","página","tienda","web"
         }
         SYN = {
             # vídeo / pantallas / soportes
@@ -661,7 +670,11 @@ class CatalogIndexer:
 
         # extraer tokens y expandir sinónimos
         raw_terms = [t for t in re.findall(r"[\w]+", q_norm, re.UNICODE)]
-        base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP] or [t for t in raw_terms if len(t) >= 2]
+        base_terms = [t for t in raw_terms if len(t) >= 2 and t not in STOP]
+        if not base_terms:
+            conn = self._conn_read()
+            conn.close()
+            return []
 
         # detectar patrones 1xN (1x2, 1x4, 2x4, etc.)
         m_q = re.search(r"\b(\d+)\s*[x×]\s*(\d+)\b", q_norm)
@@ -868,11 +881,12 @@ class CatalogIndexer:
 
             return s
 
-        candidates.sort(key=score_item, reverse=True)
+        scored_candidates = [(score_item(it), it) for it in candidates]
+        scored_candidates.sort(key=lambda row: row[0], reverse=True)
 
         # Armar resultado final con URLs
         results: List[Dict[str, Any]] = []
-        for it in candidates[:max(k, 12)]:
+        for search_score, it in scored_candidates[:max(k, 12)]:
             v = it["variant"]
             product_url = f"{self.store_base_url}/products/{it['handle']}" if it["handle"] else self.store_base_url
             buy_url = f"{self.store_base_url}/cart/{v['variant_id']}:1"
@@ -890,6 +904,7 @@ class CatalogIndexer:
                 "variant_id": v.get("variant_id"),
                 "sku": v.get("sku"),
                 "variant": v,
+                "_search_score": int(search_score),
             })
 
         conn.close()

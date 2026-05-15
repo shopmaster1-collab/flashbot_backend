@@ -294,6 +294,256 @@ def _apply_catalog_intelligence_safe(query: str, items: list):
         print(f"[WARN] catalog intelligence ranking failed: {e}", flush=True)
         return items, {"analysis": None, "technical_filter_applied": False, "filtered_out": 0, "notes": []}
 
+
+# ======================================================================
+#  Candado estricto de catálogo
+#  Objetivo: nunca mostrar tarjetas ni recomendaciones si la consulta no
+#  corresponde a productos reales publicados en el catálogo indexado.
+# ======================================================================
+CATALOG_NO_MATCH_MESSAGE = "lo siento, no vendemos el artículo que solicitas en este sitio."
+
+_CATALOG_STOPWORDS = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "y", "o", "u",
+    "en", "a", "con", "por", "para", "que", "qué", "cual", "cuál", "cuales", "cuáles", "donde",
+    "dónde", "como", "cómo", "me", "mi", "mis", "tu", "tus", "su", "sus", "es", "son", "sea",
+    "ser", "hay", "tiene", "tienen", "tendran", "tendrán", "manejan", "venden", "vendemos", "venta",
+    "busco", "busca", "buscar", "buscando", "estoy", "estamos", "quiero", "queremos", "necesito",
+    "necesitamos", "requiero", "requerimos", "ocupo", "ocupar", "interesa", "interesado", "interesada",
+    "producto", "productos", "articulo", "artículo", "articulos", "artículos", "opcion", "opción",
+    "opciones", "recomienda", "recomiendas", "recomendar", "cotizar", "cotizacion", "cotización",
+    "precio", "precios", "costo", "costos", "favor", "porfa", "gracias", "hola", "buenos", "dias", "días",
+    "tardes", "noches", "master", "maxter", "sitio", "pagina", "página", "tienda", "web"
+}
+
+_CATALOG_ATTRIBUTE_ONLY = {
+    "techo", "pared", "muro", "piso", "mesa", "grande", "chico", "pequeno", "pequeño", "larga", "largo",
+    "corto", "corta", "wifi", "inalambrico", "inalámbrico", "bluetooth", "app", "alexa", "google",
+    "smart", "inteligente", "digital", "analogico", "analógico", "nuevo", "nueva", "compatible",
+    "universal", "casa", "oficina", "hotel", "negocio", "exterior", "interior", "local", "remoto", "pulgada", "pulgadas", "inch", "inches", "nivel", "tanque", "deposito", "depósito"
+}
+
+_CATALOG_KNOWN_BRANDS = {"lg", "hp", "sony", "samsung", "tcl", "hisense", "roku", "panasonic", "daewoo", "philips", "sharp", "vizio", "xiaomi"}
+
+_CATALOG_BLOCKED_NOUNS = {
+    "ventilador", "ventiladores", "abanico", "abanicos", "alimento", "alimentos", "comida", "animal",
+    "animales", "perro", "perros", "gato", "gatos", "mascota", "mascotas", "ropa", "playera",
+    "zapatos", "tenis", "refrigerador", "refrigeradores", "lavadora", "lavadoras", "secadora", "secadoras",
+    "estufa", "estufas", "microondas", "licuadora", "licuadoras", "colchon", "colchón", "colchones",
+    "sillon", "sillón", "sillones", "sofa", "sofá", "celular", "celulares", "laptop", "laptops",
+    "tablet", "tablets", "medicina", "medicamento", "medicamentos", "juguete", "juguetes"
+}
+
+_CATALOG_FAMILY_RULES = {
+    "support": {
+        "query_any": {"soporte", "soportes", "base", "bases", "bracket", "mount", "montaje", "vesa"},
+        "item_any": {"soporte", "bracket", "mount", "montaje", "vesa", "pantalla", "televisor", "television", "tv"},
+    },
+    "antenna": {
+        "query_any": {"antena", "antenas", "tvant", "uhf", "vhf"},
+        "item_any": {"antena", "antenas", "tvant", "uhf", "vhf"},
+    },
+    "remote": {
+        "query_any": {"control", "controles", "remoto", "remotos", "mando", "mandos"},
+        "item_any": {"control", "controles", "remoto", "remotos", "mando", "atscontrol"},
+    },
+    "decoder": {
+        "query_any": {"decodificador", "decodificadores", "decoder", "receptor", "sintonizador", "tdt", "isdb", "dtv", "convertidor", "conversor"},
+        "item_any": {"decodificador", "decoder", "receptor", "sintonizador", "tdt", "isdb", "dtv", "tdtplus", "mv-tdtplus", "atscontrol"},
+    },
+    "cable_connector": {
+        "query_any": {"cable", "cables", "cordon", "cordón", "hdmi", "rca", "vga", "coaxial", "adaptador", "adaptadores", "conector", "conectores", "plug", "jack", "splitter", "divisor", "divisores", "switch", "selector"},
+        "item_any": {"cable", "cordon", "hdmi", "rca", "vga", "coaxial", "adaptador", "conector", "plug", "jack", "splitter", "divisor", "switch", "selector", "1x2", "1x4"},
+    },
+    "sensor_water": {
+        "query_any": {"agua", "tinaco", "tinacos", "cisterna", "cisternas", "fuga", "fugas", "inundacion", "inundación", "boya", "flotador", "water"},
+        "item_any": {"agua", "tinaco", "tinacos", "cisterna", "cisternas", "water", "iot-water", "easy-water", "connect-water", "waterv", "waterultra"},
+    },
+    "sensor_gas": {
+        "query_any": {"gas", "gassensor", "gasensor", "lp", "propano", "butano", "estacionario", "estacionaria"},
+        "item_any": {"gas", "gassensor", "gasensor", "lp", "propano", "butano", "estacionario", "easy-gas", "connect-gas", "iot-gassensor"},
+    },
+    "sensor_general": {
+        "query_any": {"sensor", "sensores", "detector", "detectores", "medidor", "medidores", "modulo", "módulo", "iot"},
+        "item_any": {"sensor", "detector", "medidor", "modulo", "módulo", "iot", "smart"},
+    },
+    "camera_security": {
+        "query_any": {"camara", "cámara", "camaras", "cámaras", "cctv", "vigilancia", "seguridad", "dvr", "nvr", "poe"},
+        "item_any": {"camara", "cámara", "camaras", "cámaras", "cctv", "vigilancia", "seguridad", "dvr", "nvr", "poe"},
+    },
+    "audio": {
+        "query_any": {"bocina", "bocinas", "parlante", "parlantes", "altavoz", "altavoces", "speaker", "microfono", "micrófono", "microfonos", "micrófonos", "amplificador", "amplificadores", "audio"},
+        "item_any": {"bocina", "bocinas", "parlante", "altavoz", "speaker", "microfono", "micrófono", "amplificador", "audio", "m1"},
+    },
+    "power_energy": {
+        "query_any": {"pila", "pilas", "bateria", "batería", "baterias", "baterías", "cargador", "cargadores", "fuente", "eliminador", "energia", "energía", "kwh", "watts", "voltaje", "contacto", "enchufe"},
+        "item_any": {"pila", "bateria", "batería", "cargador", "fuente", "eliminador", "energia", "energía", "kwh", "watts", "voltaje", "contacto", "enchufe", "iote"},
+    },
+    "network": {
+        "query_any": {"router", "routers", "modem", "módem", "repetidor", "extensor", "internet", "red", "ethernet", "rj45"},
+        "item_any": {"router", "modem", "módem", "repetidor", "extensor", "internet", "ethernet", "rj45", "red"},
+    },
+}
+
+
+def _catalog_norm(value: str) -> str:
+    text = (value or "").lower()
+    text = _strip_accents(text) if "_strip_accents" in globals() else text
+    text = text.replace("×", "x")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _catalog_tokens(query: str) -> list[str]:
+    qn = _catalog_norm(query)
+    raw = re.findall(r"[a-z0-9]+", qn, re.IGNORECASE)
+    tokens = []
+    for token in raw:
+        if len(token) < 2 or token in _CATALOG_STOPWORDS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _catalog_item_text(it: dict, include_body: bool = False) -> str:
+    variant = it.get("variant") or {}
+    parts = [
+        it.get("title") or "", it.get("handle") or "", it.get("tags") or "",
+        it.get("vendor") or "", it.get("product_type") or "", it.get("sku") or "",
+        variant.get("sku") or "",
+    ]
+    skus = it.get("skus")
+    if isinstance(skus, (list, tuple)):
+        parts.extend([x for x in skus if x])
+    if include_body:
+        parts.append(it.get("body") or "")
+    return _catalog_norm(" ".join(str(x) for x in parts if x))
+
+
+def _detect_catalog_families(query: str, analysis: dict | None = None) -> set[str]:
+    tokens = set(_catalog_tokens(query))
+    qn = _catalog_norm(query)
+    families: set[str] = set()
+
+    intent = (analysis or {}).get("intent") if isinstance(analysis, dict) else None
+    if intent == "support":
+        families.add("support")
+    elif intent == "water":
+        families.add("sensor_water")
+    elif intent == "gas":
+        families.add("sensor_gas")
+
+    for family, rule in _CATALOG_FAMILY_RULES.items():
+        query_any = rule.get("query_any") or set()
+        if tokens & query_any or any(term in qn for term in query_any if len(term) > 3):
+            families.add(family)
+
+    if (tokens & {"pantalla", "pantallas", "tv", "televisor", "televisores", "monitor", "monitores", "vesa"}) and (
+        re.search(r"\b(1[9]|[2-9]\d|10\d|11\d|120)\b", qn) or "vesa" in tokens
+    ):
+        families.add("support")
+
+    # Si el usuario especifica agua o gas, no permitimos que la familia genérica
+    # "sensor" arrastre sensores de otra categoría.
+    if "sensor_gas" in families or "sensor_water" in families:
+        families.discard("sensor_general")
+
+    return families
+
+
+def _item_matches_family(it: dict, family: str) -> bool:
+    text = _catalog_item_text(it, include_body=False)
+    body_text = _catalog_item_text(it, include_body=True)
+    item_any = _CATALOG_FAMILY_RULES.get(family, {}).get("item_any") or set()
+    if not item_any:
+        return False
+    source = body_text if family in {"sensor_water", "sensor_gas", "sensor_general"} else text
+    return any(term in source for term in item_any)
+
+
+def _has_direct_product_match(query_tokens: list[str], it: dict) -> bool:
+    strong_text = _catalog_item_text(it, include_body=False)
+    body_text = _catalog_item_text(it, include_body=True)
+    meaningful = [t for t in query_tokens if t not in _CATALOG_ATTRIBUTE_ONLY and not t.isdigit() and (len(t) >= 3 or t in _CATALOG_KNOWN_BRANDS)]
+    if not meaningful:
+        return False
+    if any(t in strong_text for t in meaningful):
+        return True
+    if any(t in body_text for t in meaningful if t in {"agua", "gas", "cisterna", "tinaco", "alexa", "wifi", "bluetooth", "vesa", "hdmi"}):
+        return True
+    return False
+
+
+def _specific_query_tokens_for_families(query_tokens: list[str], families: set[str]) -> list[str]:
+    family_terms = set()
+    for family in families:
+        family_terms.update(_CATALOG_FAMILY_RULES.get(family, {}).get("query_any") or set())
+    return [
+        t for t in query_tokens
+        if t not in family_terms and t not in _CATALOG_ATTRIBUTE_ONLY and not t.isdigit() and (len(t) >= 3 or t in _CATALOG_KNOWN_BRANDS)
+    ]
+
+
+def _item_matches_specific_tokens(it: dict, specific_tokens: list[str]) -> bool:
+    if not specific_tokens:
+        return True
+    strong_text = _catalog_item_text(it, include_body=False)
+    body_text = _catalog_item_text(it, include_body=True)
+    # Los tokens específicos no son todos obligatorios, pero al menos uno debe estar en la ficha.
+    # Así evitamos que "sensor de movimiento" devuelva sensores de agua/gas si la palabra
+    # movimiento no aparece en productos publicados.
+    return any(token in strong_text or token in body_text for token in specific_tokens)
+
+
+def _apply_strict_catalog_guard(query: str, items: list, analysis: dict | None = None):
+    """Filtra o bloquea resultados débiles para evitar productos inventados."""
+    tokens = _catalog_tokens(query)
+    families = _detect_catalog_families(query, analysis)
+    blocked_terms = sorted(set(tokens) & _CATALOG_BLOCKED_NOUNS)
+    context = {
+        "strict_catalog_guard": True,
+        "query_tokens": tokens,
+        "families": sorted(families),
+        "blocked_terms": blocked_terms,
+        "input_count": len(items or []),
+        "output_count": 0,
+        "rejected": False,
+        "reason": "",
+    }
+
+    if not query or not items:
+        context.update({"rejected": True, "reason": "empty_query_or_items"})
+        return [], context
+
+    if blocked_terms and not families:
+        context.update({"rejected": True, "reason": "blocked_out_of_catalog_noun"})
+        return [], context
+
+    if families:
+        specific_tokens = _specific_query_tokens_for_families(tokens, families)
+        filtered = [
+            it for it in items
+            if any(_item_matches_family(it, fam) for fam in families)
+            and _item_matches_specific_tokens(it, specific_tokens)
+        ]
+        context["specific_tokens"] = specific_tokens
+        context["output_count"] = len(filtered)
+        if not filtered:
+            context.update({"rejected": True, "reason": "no_result_matches_detected_family"})
+        return filtered, context
+
+    filtered = [it for it in items if _has_direct_product_match(tokens, it)]
+    context["output_count"] = len(filtered)
+    if not filtered:
+        context.update({"rejected": True, "reason": "no_direct_catalog_match"})
+    return filtered, context
+
+
+def _catalog_no_match_payload(per_page: int = 10):
+    return {
+        "answer": CATALOG_NO_MATCH_MESSAGE,
+        "products": [],
+        "pagination": {"page": 1, "per_page": per_page, "total": 0, "total_pages": 0, "has_next": False, "has_prev": False},
+    }
+
 # ---------- Señales / familias (idéntico enfoque) ----------
 _WATER_ALLOW_FAMILIES = [
     "iot-waterv","iot-waterultra","iot-waterp","iot-water",
@@ -1069,18 +1319,12 @@ def chat():
     all_items=_apply_intent_rerank(query, all_items)
     all_items=_enforce_intent_gate(query, all_items)
     all_items, compatibility_context = _apply_catalog_intelligence_safe(query, all_items)
+    all_items, strict_guard_context = _apply_strict_catalog_guard(query, all_items, query_analysis)
     total_count=len(all_items)
 
     if not all_items:
-        fallback_msg = "No encontré resultados directos para tu búsqueda. "
-        if any(w in (query or "").lower() for w in ["gas","tanque","estacionario","gassensor"]):
-            fallback_msg += "Para sensores de gas, prueba con: 'sensor gas tanque estacionario', 'IOT-GASSENSOR', 'sensor gas con válvula', 'medidor gas WiFi' o 'EASY-GAS'."
-        elif any(w in (query or "").lower() for w in ["agua","tinaco","cisterna"]):
-            fallback_msg += "Para sensores de agua, prueba con: 'sensor agua tinaco', 'IOT-WATER', 'sensor nivel cisterna' o 'medidor agua WiFi'."
-        else:
-            fallback_msg += "Prueba con palabras clave específicas como 'divisor hdmi 1×4', 'soporte pared 55\"', 'control Samsung', 'sensor gas tanque' o 'sensor agua tinaco'."
-        return jsonify({"answer": fallback_msg,"products":[],
-                        "pagination":{"page":1,"per_page":per_page,"total":0,"total_pages":0,"has_next":False,"has_prev":False}})
+        print(f"[CHAT][CATALOG_GUARD] rejected query='{query}' reason={strict_guard_context.get('reason')} families={strict_guard_context.get('families')} blocked={strict_guard_context.get('blocked_terms')}", flush=True)
+        return jsonify(_catalog_no_match_payload(per_page))
 
     total_pages=(total_count + per_page - 1)//per_page
     start_idx=(page-1)*per_page; end_idx=start_idx+per_page
@@ -1103,7 +1347,7 @@ def chat():
     if deeps and len(answer) > 50:
         try:
             enhanced_answer = deeps.chat(
-                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén intactos los criterios de compatibilidad técnica, advertencias y recomendaciones. No inventes precios, existencias ni características que no estén en el texto recibido.",
+                "Eres un asistente experto en productos electrónicos de Master Electronics México. Mejora esta respuesta para que sea más natural, específica y útil. Mantén intactos los criterios de compatibilidad técnica, advertencias y recomendaciones. No inventes precios, existencias, productos, categorías ni características. Si el texto recibido es una negativa de catálogo, consérvala exactamente y no agregues alternativas.",
                 answer
             )
             if enhanced_answer and len(enhanced_answer) > 40:
@@ -1191,8 +1435,9 @@ def admin_preview():
     items=_apply_intent_rerank(q, items)
     items=_enforce_intent_gate(q, items)
     items, _compatibility_context = _apply_catalog_intelligence_safe(q, items)
+    items, strict_guard_context = _apply_strict_catalog_guard(q, items, _analysis)
     items=items[:k]
-    return {"q": q, "k": k, "items": _plain_items(items)}
+    return {"q": q, "k": k, "strict_guard": strict_guard_context, "items": _plain_items(items)}
 
 @app.get("/api/admin/search")
 def admin_search():
