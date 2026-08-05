@@ -1,8 +1,21 @@
 # -*- coding: utf-8 -*-
-import os, re, threading, time, html, io, csv
+import os, re, threading, time, html, io, csv, uuid
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
+
+# [MAXTER CHAT STORAGE - START: IMPORTACIÓN AISLADA]
+# El guardado es opcional y tolerante a fallos: si este módulo no pudiera cargar,
+# las respuestas, búsquedas y consultas de pedidos continúan funcionando igual.
+try:
+    from .chat_storage import ChatStorage
+    from .chat_admin_endpoints import register_chat_admin_endpoints
+except Exception as _chat_storage_import_error:
+    print(f"[MAXTER CHAT STORAGE][WARN] imports disabled: {_chat_storage_import_error}", flush=True)
+    ChatStorage = None
+    register_chat_admin_endpoints = None
+# [MAXTER CHAT STORAGE - END: IMPORTACIÓN AISLADA]
 
 # --- internos
 from .shopify_client import ShopifyClient
@@ -79,6 +92,21 @@ except Exception as e:
 def _admin_ok(req) -> bool:
     return req.headers.get("X-Admin-Secret") == os.getenv("ADMIN_REINDEX_SECRET", "")
 
+# [MAXTER CHAT STORAGE - START: INICIALIZACIÓN Y ENDPOINTS ADMIN]
+# Se crea una base independiente del índice de productos. Nunca se reutiliza ni se
+# modifica la base de datos del catálogo, por lo que una reindexación no borra chats.
+maxter_chat_storage = None
+maxter_chat_storage_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="maxter-chat-storage")
+if ChatStorage is not None:
+    try:
+        maxter_chat_storage = ChatStorage()
+        if register_chat_admin_endpoints is not None:
+            register_chat_admin_endpoints(app, _admin_ok, maxter_chat_storage)
+    except Exception as _chat_storage_start_error:
+        print(f"[MAXTER CHAT STORAGE][WARN] startup disabled: {_chat_storage_start_error}", flush=True)
+        maxter_chat_storage = None
+# [MAXTER CHAT STORAGE - END: INICIALIZACIÓN Y ENDPOINTS ADMIN]
+
 # =========================
 #  Estáticos del widget
 # =========================
@@ -118,7 +146,10 @@ def home():
             '<code>GET /api/admin/diag</code>, '
             '<code>GET /api/admin/preview?q=...</code>, '
             '<code>GET /api/admin/orders-ping</code>, '
-            '<code>GET /api/admin/orders-find?order=####</code>'
+            '<code>GET /api/admin/orders-find?order=####</code>, '
+            '<code>GET /api/admin/chat-storage/status</code>, '
+            '<code>GET /api/admin/conversations?section=chat</code>, '
+            '<code>GET /api/admin/conversations/export.csv?section=chat</code>'
             "</p>")
 
 @app.get("/health")
@@ -1752,6 +1783,94 @@ def _extract_text_and_all_strings(payload):
             return s, " ".join(strings)
     return strings[0], " ".join(strings)
 
+# [MAXTER CHAT STORAGE - START: METADATOS Y REGISTRO NO BLOQUEANTE]
+def _maxter_storage_metadata(data: dict) -> dict:
+    """Normaliza identificadores anónimos sin almacenar dirección IP."""
+    data = data if isinstance(data, dict) else {}
+    request_id = str(data.get("request_id") or uuid.uuid4()).strip()[:200]
+    session_id = str(data.get("session_id") or f"server-session-{request_id}").strip()[:160]
+    visitor_id = str(data.get("visitor_id") or f"server-visitor-{session_id}").strip()[:160]
+    return {
+        "request_id": request_id,
+        "session_id": session_id,
+        "visitor_id": visitor_id,
+        "page_url": str(data.get("page_url") or "")[:4000],
+        "page_title": str(data.get("page_title") or "")[:1000],
+        "referrer": str(data.get("referrer") or "")[:4000],
+        "user_agent": str(request.headers.get("User-Agent") or "")[:2000],
+    }
+
+
+def _maxter_is_new_chat_message(data: dict, page: int) -> bool:
+    """Evita guardar la paginación como si fuera otra pregunta del usuario."""
+    raw = data.get("is_new_message") if isinstance(data, dict) else None
+    if raw is None:
+        return int(page or 1) <= 1
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+    return bool(raw)
+
+
+def _maxter_storage_products(products: list) -> list:
+    """Guarda sólo datos comerciales útiles y evita duplicar objetos muy pesados."""
+    compact = []
+    for product in products or []:
+        if not isinstance(product, dict):
+            continue
+        compact.append({
+            "title": product.get("title"),
+            "sku": product.get("sku"),
+            "price": product.get("price"),
+            "variant_id": product.get("variant_id"),
+            "product_url": product.get("product_url") or product.get("buy_url"),
+        })
+    return compact
+
+
+def _maxter_chat_json(data: dict, user_message: str, payload: dict, page: int = 1):
+    """Guarda un intercambio real y devuelve exactamente el mismo JSON del bot."""
+    if (
+        maxter_chat_storage is not None
+        and user_message
+        and _maxter_is_new_chat_message(data, page)
+    ):
+        try:
+            # Se envía a un ejecutor aislado para que la escritura nunca retrase
+            # ni bloquee la respuesta normal del bot.
+            maxter_chat_storage_executor.submit(
+                maxter_chat_storage.record_chat_exchange,
+                metadata=_maxter_storage_metadata(data),
+                user_message=user_message,
+                assistant_message=str(payload.get("answer") or ""),
+                effective_query=str(payload.get("effective_query") or user_message),
+                page=page,
+                products=_maxter_storage_products(payload.get("products") or []),
+            )
+        except Exception as exc:
+            print(f"[MAXTER CHAT STORAGE][WARN] chat persistence skipped: {exc}", flush=True)
+    return jsonify(payload)
+
+
+def _maxter_orders_json(data: dict, order_number: str, payload: dict, status_code: int = 200):
+    """Registra la consulta de Pedidos sin cambiar su respuesta ni su código HTTP."""
+    if maxter_chat_storage is not None and order_number:
+        try:
+            items = payload.get("items") if isinstance(payload.get("items"), list) else []
+            # Igual que en Chat, el guardado es asíncrono y no altera el tiempo
+            # de respuesta del endpoint original de Pedidos.
+            maxter_chat_storage_executor.submit(
+                maxter_chat_storage.record_order_query,
+                metadata=_maxter_storage_metadata(data),
+                order_number=order_number,
+                found=bool(items),
+                items=items,
+                answer=str(payload.get("answer") or payload.get("error") or ""),
+            )
+        except Exception as exc:
+            print(f"[MAXTER CHAT STORAGE][WARN] order persistence skipped: {exc}", flush=True)
+    return jsonify(payload), status_code
+# [MAXTER CHAT STORAGE - END: METADATOS Y REGISTRO NO BLOQUEANTE]
+
 # =========================
 #  Endpoints
 # =========================
@@ -1780,13 +1899,14 @@ def chat():
     per_page=int(data.get("per_page") or 10)
 
     if not original_query and not detected_from_all:
-        return jsonify({
+        payload = {
             "answer":"¡Hola! Soy Maxter, tu asistente de compras de Master Electronics. ¿Qué producto estás buscando? Puedo ayudarte con soportes, antenas, controles, cables, sensores de agua, sensores de gas y mucho más.",
             "products":[],
             "pagination": _empty_pagination(per_page),
             "conversation_context": _clear_conversation_context(),
             "effective_query": "",
-        })
+        }
+        return _maxter_chat_json(data, original_query, payload, page)
 
     # ---------- DESVÍO: ESTATUS DE PEDIDO ----------
     try:
@@ -1795,28 +1915,31 @@ def chat():
             if order_no:
                 rows = _lookup_order(order_no)
                 answer = _render_order_vertical(rows, order_no)
-                return jsonify({
+                payload = {
                     "answer": answer,
                     "products": [],
                     "pagination": _empty_pagination(10),
                     "conversation_context": _clear_conversation_context(original_query, original_query),
                     "effective_query": original_query,
-                })
+                }
+                return _maxter_chat_json(data, original_query, payload, page)
     except Exception as e:
         print(f"[WARN] order-status pipeline error: {e}", flush=True)
     # ---------- FIN desvío de pedidos ----------
 
     if context_resolution.get("reask_clarification") == "antenna_type":
-        return jsonify(_antenna_clarification_payload(
+        payload = _antenna_clarification_payload(
             per_page,
             base_query=(incoming_context.get("pending_clarification") or {}).get("base_query") or "antena",
             answer="Para continuar con la búsqueda de antenas, dime si la necesitas para interiores o para exteriores.",
-        ))
+        )
+        return _maxter_chat_json(data, original_query, payload, page)
 
     # Antenas genéricas: si no especifica interior/exterior, preguntamos antes
     # de mostrar productos para evitar mezclar familias incompatibles.
     if _should_clarify_antenna_type(query):
-        return jsonify(_antenna_clarification_payload(per_page, base_query=query))
+        payload = _antenna_clarification_payload(per_page, base_query=query)
+        return _maxter_chat_json(data, original_query, payload, page)
 
     # Flujo normal de productos + inteligencia técnica de catálogo.
     max_search = 200
@@ -1829,7 +1952,8 @@ def chat():
 
     if not all_items:
         print(f"[CHAT][CATALOG_GUARD] rejected query='{query}' reason={strict_guard_context.get('reason')} families={strict_guard_context.get('families')} blocked={strict_guard_context.get('blocked_terms')}", flush=True)
-        return jsonify(_catalog_no_match_payload(per_page, original_query, query))
+        payload = _catalog_no_match_payload(per_page, original_query, query)
+        return _maxter_chat_json(data, original_query, payload, page)
 
     total_pages=(total_count + per_page - 1)//per_page
     start_idx=(page-1)*per_page; end_idx=start_idx+per_page
@@ -1859,14 +1983,15 @@ def chat():
                 answer = enhanced_answer
         except Exception as e:
             print(f"[WARN] Deepseek enhancement error: {e}", flush=True)
-    return jsonify({
+    payload = {
         "answer": answer,
         "products": cards,
         "pagination": pagination,
         "conversation_context": _clear_conversation_context(original_query, query),
         "effective_query": query,
         "original_query": original_query,
-    })
+    }
+    return _maxter_chat_json(data, original_query, payload, page)
 
 # ---------- Admin: diagnóstico de pedidos ----------
 @app.get("/api/admin/orders-ping")
@@ -1998,22 +2123,25 @@ def api_orders():
     # "mi pedido es 702-...".
     order_no = raw if _looks_like_bare_order(raw) else (_detect_order_number(raw) or raw)
     if not _order_key(order_no):
-        return jsonify({"ok": False, "error": "invalid order format"}), 400
+        payload = {"ok": False, "error": "invalid order format"}
+        return _maxter_orders_json(data, raw, payload, 400)
 
     try:
         rows = _lookup_order(order_no)
         answer = _render_order_vertical(rows, order_no)
-        return jsonify({
+        payload = {
             "ok": True,
             "order": order_no,
             "folio": order_no,  # compatibilidad con versiones anteriores del widget
             "items": rows,
             "answer": answer,
             "fields": _ORDER_TABLE_FIELDS,
-        })
+        }
+        return _maxter_orders_json(data, order_no, payload, 200)
     except Exception as e:
         print(f"[ORDERS] /api/orders error: {e}", flush=True)
-        return jsonify({"ok": False, "error": "internal error"}), 500
+        payload = {"ok": False, "error": "internal error"}
+        return _maxter_orders_json(data, order_no, payload, 500)
 
 # ---------- MAIN ----------
 if __name__ == "__main__":
