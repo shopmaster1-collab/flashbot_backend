@@ -20,6 +20,13 @@
   const CHAT_PRODUCTS_PER_PAGE = 20;
   const DEFAULT_STORE_ORIGIN = 'https://master.com.mx';
 
+  // [MAXTER CHAT STORAGE - START: CLAVES DE IDENTIFICACIÓN ANÓNIMA]
+  // visitor_id permanece en el navegador; session_id dura mientras la pestaña siga abierta.
+  // Ninguno contiene nombre, correo, teléfono ni dirección IP.
+  const MAXTER_VISITOR_STORAGE_KEY = 'maxter_anonymous_visitor_id_v1';
+  const MAXTER_SESSION_STORAGE_KEY = 'maxter_chat_session_id_v1';
+  // [MAXTER CHAT STORAGE - END: CLAVES DE IDENTIFICACIÓN ANÓNIMA]
+
   const currentScript = document.currentScript || Array.from(document.scripts).find((s) => /widget\.js(\?|$)/.test(s.src || ''));
   const scriptDataset = (currentScript && currentScript.dataset) || {};
   const options = window.MASTER_FLASHBOT_OPTIONS || {};
@@ -53,7 +60,12 @@
     pagination: null,
     chatContext: null,
     elevenLabsMounted: false,
-    buyLoading: false
+    buyLoading: false,
+
+    // [MAXTER CHAT STORAGE - START: IDENTIFICADORES ACTIVOS]
+    visitorId: getOrCreateAnonymousId('localStorage', MAXTER_VISITOR_STORAGE_KEY, 'visitor'),
+    sessionId: getOrCreateAnonymousId('sessionStorage', MAXTER_SESSION_STORAGE_KEY, 'session')
+    // [MAXTER CHAT STORAGE - END: IDENTIFICADORES ACTIVOS]
   };
 
   const root = document.createElement('div');
@@ -160,7 +172,7 @@
       close: closePanel,
       switchTab,
       backend: BACKEND,
-      version: '2026-05-15.1'
+      version: '2026-08-05.1-chat-storage'
     };
   }
 
@@ -310,7 +322,16 @@
         message,
         page,
         per_page: CHAT_PRODUCTS_PER_PAGE,
-        conversation_context: state.chatContext || null
+        conversation_context: state.chatContext || null,
+
+        // [MAXTER CHAT STORAGE - START: METADATOS DE CHAT]
+        request_id: createAnonymousId('chat'),
+        visitor_id: state.visitorId,
+        session_id: state.sessionId,
+        is_new_message: Boolean(isNewSearch),
+        event_type: isNewSearch ? 'message' : 'pagination',
+        ...getCurrentPageMetadata()
+        // [MAXTER CHAT STORAGE - END: METADATOS DE CHAT]
       };
       const data = await postJson(`${BACKEND}/api/chat`, payload, 30000);
 
@@ -658,7 +679,17 @@
     if (submit) submit.disabled = true;
 
     try {
-      const data = await postJson(`${BACKEND}/api/orders`, { order: orderNo }, 30000);
+      const orderPayload = {
+        order: orderNo,
+
+        // [MAXTER CHAT STORAGE - START: METADATOS DE PEDIDOS]
+        request_id: createAnonymousId('order'),
+        visitor_id: state.visitorId,
+        session_id: state.sessionId,
+        ...getCurrentPageMetadata()
+        // [MAXTER CHAT STORAGE - END: METADATOS DE PEDIDOS]
+      };
+      const data = await postJson(`${BACKEND}/api/orders`, orderPayload, 30000);
       renderOrderResult(data, orderNo);
     } catch (err) {
       console.error('[Flashbot] order error:', err);
@@ -791,6 +822,40 @@
     }
     return panel;
   }
+
+  // [MAXTER CHAT STORAGE - START: GENERACIÓN SEGURA DE IDENTIFICADORES]
+  function getOrCreateAnonymousId(storageName, key, prefix) {
+    try {
+      const storage = window[storageName];
+      const existing = storage && storage.getItem ? storage.getItem(key) : '';
+      if (existing) return existing;
+      const created = createAnonymousId(prefix);
+      if (storage && storage.setItem) storage.setItem(key, created);
+      return created;
+    } catch (err) {
+      // Algunos navegadores bloquean localStorage/sessionStorage. En ese caso se
+      // genera un identificador temporal sin afectar el funcionamiento del widget.
+      return createAnonymousId(prefix);
+    }
+  }
+
+  function createAnonymousId(prefix) {
+    const safePrefix = String(prefix || 'id').replace(/[^a-z0-9_-]/gi, '').toLowerCase() || 'id';
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return `${safePrefix}-${window.crypto.randomUUID()}`;
+    }
+    const randomPart = Math.random().toString(36).slice(2);
+    return `${safePrefix}-${Date.now().toString(36)}-${randomPart}`;
+  }
+
+  function getCurrentPageMetadata() {
+    return {
+      page_url: String(window.location.href || '').slice(0, 4000),
+      page_title: String(document.title || '').slice(0, 1000),
+      referrer: String(document.referrer || '').slice(0, 4000)
+    };
+  }
+  // [MAXTER CHAT STORAGE - END: GENERACIÓN SEGURA DE IDENTIFICADORES]
 
   async function postJson(url, payload, timeoutMs) {
     const controller = new AbortController();
