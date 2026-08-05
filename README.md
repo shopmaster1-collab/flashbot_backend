@@ -413,3 +413,282 @@ collections
 ```
 
 De esa forma, el candado de catálogo podría mantenerse sincronizado automáticamente con la tienda.
+
+---
+
+# [MAXTER CHAT STORAGE - START: HISTORIAL DE CHAT Y PEDIDOS]
+
+## Objetivo de esta actualización
+
+Esta versión agrega almacenamiento para las consultas escritas realizadas en las pestañas:
+
+- **Chat**: pregunta del visitante, respuesta de Maxter y productos presentados.
+- **Pedidos**: número consultado, si fue encontrado, respuesta y artículos devueltos.
+
+La lógica existente del catálogo, DeepSeek, Shopify, paginación y consulta de pedidos no fue reemplazada. El guardado ocurre después de construir la respuesta y se envía a un ejecutor independiente. Si el almacenamiento no está disponible, el endpoint original sigue respondiendo.
+
+## Archivos agregados
+
+```text
+backend/chat_storage.py
+backend/chat_admin_endpoints.py
+backend/.env.example
+tests/test_chat_storage.py
+.gitignore
+```
+
+## Archivos actualizados
+
+```text
+backend/app.py
+backend/requirements.txt
+widget/widget.js
+README.md
+```
+
+## Cómo se identifica una conversación
+
+El widget genera identificadores anónimos:
+
+```text
+visitor_id
+session_id
+request_id
+```
+
+- `visitor_id`: permanece en `localStorage` para reconocer el mismo navegador sin conocer la identidad de la persona.
+- `session_id`: permanece en `sessionStorage` y agrupa los mensajes de la pestaña actual.
+- `request_id`: identifica cada envío y evita registros duplicados si una solicitud se repite.
+
+No se almacena la dirección IP desde este código.
+
+## La paginación no se duplica como conversación
+
+Cuando el usuario pulsa **Anterior** o **Siguiente**, el widget envía:
+
+```json
+{
+  "is_new_message": false,
+  "event_type": "pagination"
+}
+```
+
+El backend no registra esa llamada como una nueva pregunta. Sólo se almacena el mensaje que realmente escribió el visitante.
+
+## Bases y tablas nuevas
+
+El almacenamiento es completamente independiente del índice del catálogo.
+
+```text
+maxter_chat_sessions
+maxter_chat_exchanges
+maxter_order_queries
+```
+
+La reindexación de productos no elimina estas tablas.
+
+## Configuración recomendada para producción en Render
+
+### 1. Crear PostgreSQL
+
+Crear una instancia PostgreSQL en la misma cuenta y región que el backend de Maxter.
+
+### 2. Configurar variables del servicio web
+
+Agregar en el servicio del backend:
+
+```text
+CHAT_STORAGE_ENABLED=true
+DATABASE_URL=<INTERNAL_DATABASE_URL_DE_POSTGRESQL>
+```
+
+Debe utilizarse la URL interna cuando PostgreSQL y el servicio web se encuentran en la misma región.
+
+No escribir la URL real dentro del repositorio. Debe guardarse como variable de entorno de Render.
+
+### 3. Mantener el secreto administrativo
+
+Los endpoints de consulta utilizan el mismo secreto existente:
+
+```text
+ADMIN_REINDEX_SECRET
+```
+
+Debe enviarse mediante el encabezado:
+
+```text
+X-Admin-Secret
+```
+
+### 4. Desplegar
+
+Al desplegar, `backend/requirements.txt` instala el adaptador PostgreSQL. Al iniciar el backend, las tablas se crean automáticamente si todavía no existen.
+
+## Fallback SQLite
+
+Cuando no existe `DATABASE_URL`, se crea una base separada en:
+
+```text
+backend/data/maxter_chat_history.sqlite3
+```
+
+También puede definirse otra ruta:
+
+```text
+CHAT_DB_PATH=/ruta/maxter_chat_history.sqlite3
+```
+
+Este fallback es útil para desarrollo y pruebas locales. En un servicio sin disco persistente no debe considerarse almacenamiento permanente.
+
+## Endpoints administrativos
+
+Todos requieren:
+
+```text
+X-Admin-Secret: valor_de_ADMIN_REINDEX_SECRET
+```
+
+### Estado y contadores
+
+```http
+GET /api/admin/chat-storage/status
+```
+
+Ejemplo:
+
+```bash
+curl \
+  -H "X-Admin-Secret: TU_SECRETO" \
+  "https://flashbot-backend-25b6.onrender.com/api/admin/chat-storage/status"
+```
+
+### Consultar chats
+
+```http
+GET /api/admin/conversations?section=chat&limit=100&offset=0
+```
+
+Filtros disponibles:
+
+```text
+section=chat|orders
+session_id=<id>
+date_from=<fecha ISO>
+date_to=<fecha ISO>
+limit=1..1000
+offset=<número>
+```
+
+Ejemplo:
+
+```bash
+curl \
+  -H "X-Admin-Secret: TU_SECRETO" \
+  "https://flashbot-backend-25b6.onrender.com/api/admin/conversations?section=chat&limit=100"
+```
+
+### Consultar pedidos
+
+```bash
+curl \
+  -H "X-Admin-Secret: TU_SECRETO" \
+  "https://flashbot-backend-25b6.onrender.com/api/admin/conversations?section=orders&limit=100"
+```
+
+### Exportar CSV de Chat
+
+```bash
+curl \
+  -H "X-Admin-Secret: TU_SECRETO" \
+  -o maxter_chat.csv \
+  "https://flashbot-backend-25b6.onrender.com/api/admin/conversations/export.csv?section=chat"
+```
+
+### Exportar CSV de Pedidos
+
+```bash
+curl \
+  -H "X-Admin-Secret: TU_SECRETO" \
+  -o maxter_pedidos.csv \
+  "https://flashbot-backend-25b6.onrender.com/api/admin/conversations/export.csv?section=orders"
+```
+
+El máximo predeterminado de exportación es 50,000 registros. Puede ajustarse con:
+
+```text
+CHAT_EXPORT_MAX_ROWS=50000
+```
+
+## Datos guardados en Chat
+
+```text
+fecha y hora UTC
+session_id
+visitor_id
+request_id
+mensaje escrito
+respuesta de Maxter
+consulta efectiva interpretada
+productos mostrados: título, SKU, precio, variante y URL
+URL y título de la página
+referrer
+user-agent
+```
+
+## Datos guardados en Pedidos
+
+```text
+fecha y hora UTC
+session_id
+visitor_id
+request_id
+número consultado
+pedido encontrado o no encontrado
+cantidad de artículos
+respuesta
+artículos devueltos
+URL y título de la página
+referrer
+user-agent
+```
+
+## Etiquetas permanentes en el código
+
+Todos los cambios están delimitados con comentarios como:
+
+```text
+[MAXTER CHAT STORAGE - START: ...]
+[MAXTER CHAT STORAGE - END: ...]
+```
+
+Estas etiquetas no deben eliminarse en futuras actualizaciones porque permiten identificar rápidamente cada parte de la implementación.
+
+## Pruebas
+
+Validación de sintaxis:
+
+```bash
+python -m py_compile \
+  backend/app.py \
+  backend/chat_storage.py \
+  backend/chat_admin_endpoints.py
+
+node --check widget/widget.js
+```
+
+Prueba automatizada del almacenamiento:
+
+```bash
+python -m unittest tests/test_chat_storage.py -v
+```
+
+La prueba comprueba:
+
+- creación del esquema;
+- guardado de Chat;
+- guardado de Pedidos;
+- deduplicación por `request_id`;
+- lectura de registros;
+- contadores administrativos.
+
+# [MAXTER CHAT STORAGE - END: HISTORIAL DE CHAT Y PEDIDOS]
